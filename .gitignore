@@ -1,0 +1,6 @@
+.tools/
+.active-dev/
+vscode/
+active/extension/node_modules/
+active/extension/out/
+active/extension/src/shared/

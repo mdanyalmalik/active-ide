@@ -1,0 +1,1062 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Active contributors. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.monaco-workbench {
+	--active-accent: var(--vscode-focusBorder);
+	--active-card: color-mix(in srgb, var(--vscode-textLink-foreground) 13%, var(--vscode-editor-background));
+	--active-surface: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	--active-muted: var(--vscode-descriptionForeground);
+	--active-added: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
+	--active-removed: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39);
+	--active-border: var(--vscode-widget-border, var(--vscode-editorGroup-border));
+	--active-eyebrow-size: 11px;
+}
+
+.monaco-workbench .active-chat button,
+.monaco-workbench .active-walkthrough button,
+.monaco-workbench .active-profile button,
+.monaco-workbench .active-history button,
+.monaco-workbench .active-session-view button {
+	font-family: inherit;
+	font-size: 13px;
+	border-radius: 4px;
+	cursor: pointer;
+	padding: 5px 12px;
+	border: 1px solid transparent;
+	color: var(--vscode-foreground);
+	background: transparent;
+}
+
+.monaco-workbench .active-chat button:disabled,
+.monaco-workbench .active-walkthrough button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.monaco-workbench button.primary,
+.monaco-workbench .active-chat button.send {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.monaco-workbench button.primary:hover:not(:disabled),
+.monaco-workbench .active-chat button.send:hover:not(:disabled) {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.monaco-workbench .active-chat button.secondary,
+.monaco-workbench .active-profile button.secondary,
+.monaco-workbench .active-history button.secondary,
+.monaco-workbench .active-session-view button.secondary {
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	border-color: var(--vscode-button-border, var(--active-border));
+}
+
+.monaco-workbench .eyebrow {
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	font-size: var(--active-eyebrow-size);
+	color: var(--active-muted);
+}
+
+/* ------------------------------------------------------------------ chat */
+
+.monaco-workbench .active-chat {
+	display: flex;
+	flex-direction: column;
+	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-chat-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 0 30px;
+	height: 44px;
+	flex-shrink: 0;
+	border-bottom: 1px solid var(--active-border);
+	font-size: 14px;
+}
+
+.monaco-workbench .active-chat-header .agent-host {
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-chat-header .agent-host.test-double {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.monaco-workbench .active-chat-header .agent-status {
+	margin-left: auto;
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-chat-header .agent-status.running::before,
+.monaco-workbench .active-chat-header .agent-status.idle::before,
+.monaco-workbench .active-chat-header .agent-status.unavailable::before {
+	content: '';
+	display: inline-block;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	margin-right: 6px;
+	background: var(--active-added);
+}
+
+.monaco-workbench .active-chat-header .agent-status.unavailable::before {
+	background: var(--vscode-editorError-foreground);
+}
+
+.monaco-workbench .active-chat-column {
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 56px 32px 48px;
+	display: flex;
+	flex-direction: column;
+	gap: 20px;
+}
+
+.monaco-workbench .active-chat-intro h1 {
+	font-size: 30px;
+	font-weight: 400;
+	margin: 8px 0 10px;
+}
+
+.monaco-workbench .active-chat-intro .lead {
+	color: var(--active-muted);
+	margin: 0;
+	font-size: 14px;
+}
+
+.monaco-workbench .active-chat-intro.compact h1 {
+	font-size: 20px;
+	margin: 4px 0;
+}
+
+.monaco-workbench .active-chat-intro.compact .lead {
+	display: none;
+}
+
+.monaco-workbench .active-chat-notices {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.monaco-workbench .active-chat-notices .notice {
+	border: 1px solid var(--active-border);
+	border-radius: 6px;
+	padding: 14px 16px;
+	background: var(--active-surface);
+}
+
+.monaco-workbench .active-chat-notices .notice.blocker {
+	border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground));
+}
+
+.monaco-workbench .active-chat-notices .notice.walkthrough {
+	border-left: 3px solid var(--active-accent);
+	background: var(--active-card);
+}
+
+.monaco-workbench .notice-title {
+	font-weight: 600;
+	margin-bottom: 6px;
+}
+
+.monaco-workbench .notice-detail {
+	color: var(--active-muted);
+	margin: 0 0 10px;
+	white-space: pre-wrap;
+	font-family: inherit;
+	font-size: 13px;
+}
+
+.monaco-workbench .notice-actions {
+	display: flex;
+	gap: 8px;
+}
+
+.monaco-workbench .active-chat-transcript {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.monaco-workbench .active-chat-transcript .entry {
+	font-size: 14px;
+	line-height: 1.55;
+}
+
+.monaco-workbench .active-chat-transcript .entry .eyebrow {
+	margin-bottom: 4px;
+}
+
+.monaco-workbench .active-chat-transcript .entry.agent,
+.monaco-workbench .active-chat-transcript .entry.explainer {
+	border-left: 2px solid var(--active-border);
+	padding: 6px 0 6px 22px;
+}
+
+.monaco-workbench .active-chat-transcript .entry.explainer {
+	border-left-color: var(--active-accent);
+}
+
+.monaco-workbench .active-chat-transcript .entry .markdown p:first-child {
+	margin-top: 0;
+}
+
+.monaco-workbench .active-chat-transcript .entry .markdown p:last-child {
+	margin-bottom: 0;
+}
+
+.monaco-workbench .active-chat-transcript .entry.tool {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	color: var(--active-muted);
+	font-family: var(--monaco-monospace-font);
+	padding-left: 24px;
+}
+
+.monaco-workbench .active-chat-transcript .entry.tool .tool-text {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .active-chat-transcript .entry.tool.status-completed .tool-icon {
+	color: var(--active-added);
+}
+
+.monaco-workbench .active-chat-transcript .entry.tool.status-failed .tool-icon {
+	color: var(--vscode-editorError-foreground);
+}
+
+.monaco-workbench .active-chat-transcript .entry.system {
+	font-size: 12px;
+	color: var(--active-muted);
+	font-style: italic;
+}
+
+.monaco-workbench .active-chat-transcript .entry.approval {
+	border: 1px solid var(--vscode-editorWarning-foreground);
+	border-radius: 6px;
+	padding: 12px 14px;
+}
+
+.monaco-workbench .active-chat-transcript .entry.approval pre.detail {
+	font-family: var(--monaco-monospace-font);
+	font-size: 12px;
+	white-space: pre-wrap;
+	background: var(--vscode-textCodeBlock-background);
+	padding: 8px;
+	border-radius: 4px;
+}
+
+.monaco-workbench .active-chat-transcript .entry.approval .actions {
+	display: flex;
+	gap: 8px;
+}
+
+.monaco-workbench .active-chat-stage {
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-chat-stage.hidden,
+.monaco-workbench .composer-context.hidden {
+	display: none;
+}
+
+.monaco-workbench .active-chat-composer {
+	border: 1px solid var(--active-border);
+	border-radius: 8px;
+	background: var(--vscode-input-background);
+	overflow: hidden;
+}
+
+.monaco-workbench .active-chat-composer:focus-within {
+	border-color: var(--vscode-focusBorder);
+}
+
+.monaco-workbench .active-chat-composer .composer-context {
+	display: flex;
+	gap: 6px;
+	padding: 8px 12px 0;
+}
+
+.monaco-workbench .active-chat-composer .composer-context button.mode {
+	font-size: 12px;
+	padding: 3px 10px;
+	border: 1px solid var(--active-border);
+	border-radius: 12px;
+	max-width: 60%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .active-chat-composer .composer-context button.mode.selected {
+	border-color: var(--active-accent);
+	background: var(--active-card);
+}
+
+.monaco-workbench .active-chat-composer textarea {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	resize: none;
+	border: none;
+	outline: none;
+	padding: 16px 20px;
+	background: transparent;
+	color: var(--vscode-input-foreground);
+	font-family: inherit;
+	font-size: 14px;
+	min-height: 96px;
+}
+
+.monaco-workbench .active-chat-composer textarea:focus {
+	outline: none !important;
+}
+
+.monaco-workbench .active-chat-composer .composer-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	border-top: 1px solid var(--active-border);
+	padding: 8px 10px 8px 20px;
+	color: var(--active-muted);
+	font-size: 13px;
+}
+
+.monaco-workbench .active-chat-composer button.send {
+	padding: 6px 18px;
+	font-size: 14px;
+}
+
+.monaco-workbench .active-chat-footer {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.monaco-workbench .active-chat-footer button.link {
+	color: var(--active-muted);
+	font-size: 12px;
+}
+
+.monaco-workbench .active-chat-footer button.link:hover:not(:disabled) {
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-chat-tagline {
+	color: var(--active-muted);
+	font-size: 13px;
+	margin: 0;
+}
+
+/* ------------------------------------------------------------------ walkthrough */
+
+.monaco-workbench .active-walkthrough {
+	display: flex;
+	flex-direction: column;
+	background: var(--vscode-editor-background);
+	outline: none;
+}
+
+.monaco-workbench .walkthrough-header {
+	flex-shrink: 0;
+	border-bottom: 1px solid var(--active-border);
+}
+
+.monaco-workbench .walkthrough-files {
+	display: flex;
+	gap: 2px;
+	padding: 0 12px;
+	background: var(--vscode-editorGroupHeader-tabsBackground);
+}
+
+.monaco-workbench .walkthrough-files:empty {
+	display: none;
+}
+
+.monaco-workbench .walkthrough-file-tab {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	border-radius: 0 !important;
+	padding: 6px 12px !important;
+	color: var(--vscode-tab-inactiveForeground) !important;
+	border-top: 1px solid transparent !important;
+	font-size: 12px !important;
+}
+
+.monaco-workbench .walkthrough-file-tab.active {
+	color: var(--vscode-tab-activeForeground) !important;
+	background: var(--vscode-tab-activeBackground) !important;
+	border-top-color: var(--vscode-tab-activeBorderTop, var(--active-accent)) !important;
+}
+
+.monaco-workbench .walkthrough-file-tab .added,
+.monaco-workbench .active-explorer-counts .added,
+.monaco-workbench .active-history .added {
+	color: var(--active-added);
+}
+
+.monaco-workbench .walkthrough-file-tab .removed,
+.monaco-workbench .active-explorer-counts .removed,
+.monaco-workbench .active-history .removed {
+	color: var(--active-removed);
+}
+
+.monaco-workbench .walkthrough-crumbs {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 6px 20px;
+	font-size: 13px;
+	color: var(--vscode-breadcrumb-foreground);
+}
+
+.monaco-workbench .walkthrough-crumbs .separator {
+	margin: 0 6px;
+	opacity: 0.7;
+}
+
+.monaco-workbench .walkthrough-crumbs .captured-version {
+	color: var(--active-muted);
+	font-size: 12px;
+}
+
+.monaco-workbench .walkthrough-code {
+	flex: 1;
+	min-height: 0;
+	position: relative;
+}
+
+.monaco-editor .active-focus-line {
+	background: color-mix(in srgb, var(--vscode-editor-selectionBackground) 70%, transparent);
+}
+
+.monaco-editor .active-focus-line-secondary {
+	background: color-mix(in srgb, var(--vscode-editor-selectionBackground) 30%, transparent);
+}
+
+.monaco-editor .active-dim-text {
+	opacity: 0.5;
+	transition: opacity 200ms ease;
+}
+
+.monaco-editor .active-folded-region {
+	font-family: var(--monaco-monospace-font);
+	color: var(--active-muted);
+	padding-left: 28px;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	font-size: 12px;
+}
+
+.monaco-editor .active-folded-region:hover {
+	color: var(--vscode-foreground);
+}
+
+/* View zones paint beneath the text layer; lift Active's so their controls receive clicks (the zones leave mouse handling to the browser). */
+.monaco-editor .view-zones .active-explain-zone,
+.monaco-editor .view-zones .active-folded-region {
+	z-index: 5;
+}
+
+.monaco-editor .active-explain-zone {
+	padding: 12px 0 16px 18px;
+	box-sizing: border-box;
+}
+
+.monaco-editor .active-explain-card {
+	box-sizing: border-box;
+	background: var(--active-card);
+	border-left: 3px solid var(--active-accent);
+	padding: 20px 28px 22px;
+	font-family: var(--vscode-font-family);
+	color: var(--vscode-foreground);
+	white-space: normal;
+	cursor: default;
+	user-select: text;
+}
+
+.monaco-editor .active-explain-card .card-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.monaco-editor .active-explain-card .open-file {
+	font-family: inherit;
+	font-size: 13px;
+	padding: 4px 12px;
+	border: 1px solid var(--active-border);
+	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	border-radius: 3px;
+}
+
+.monaco-editor .active-explain-card .open-file:hover {
+	border-color: var(--active-accent);
+}
+
+.monaco-editor .active-explain-card h2.title {
+	font-size: 22px;
+	font-weight: 400;
+	margin: 10px 0 8px;
+}
+
+.monaco-editor .active-explain-card .subtitle {
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	font-size: 11px;
+	color: var(--active-muted);
+	margin-bottom: 14px;
+}
+
+.monaco-editor .active-explain-card .visual {
+	margin: 4px 0 12px;
+}
+
+.monaco-editor .active-explain-card .caption {
+	font-size: 12px;
+	color: var(--active-muted);
+	margin-bottom: 10px;
+}
+
+.monaco-editor .active-explain-card p.narration {
+	font-size: 15px;
+	line-height: 1.6;
+	margin: 6px 0 0;
+	max-width: 80ch;
+}
+
+.monaco-editor .active-explain-card p.narration .segment {
+	transition: color 200ms ease, opacity 200ms ease;
+}
+
+.monaco-editor .active-explain-card p.narration .segment.spoken {
+	opacity: 0.75;
+}
+
+.monaco-editor .active-explain-card p.narration .segment.upcoming {
+	opacity: 0.4;
+}
+
+.monaco-editor .active-explain-card .pending {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+.monaco-editor .active-explain-card .pending-pill {
+	display: inline-flex;
+	gap: 6px;
+	align-items: center;
+	font-size: 12px;
+	padding: 2px 10px;
+	border-radius: 10px;
+	border: 1px solid var(--vscode-editorWarning-foreground);
+	color: var(--vscode-editorWarning-foreground);
+}
+
+/* visuals */
+
+.monaco-editor .active-visual-diff,
+.monaco-editor .active-visual-code {
+	font-family: var(--monaco-monospace-font);
+	font-size: 13px;
+	line-height: 1.6;
+	background: var(--vscode-editor-background);
+	border-left: 3px solid var(--active-added);
+	padding: 10px 18px;
+	white-space: pre;
+	overflow-x: auto;
+}
+
+.monaco-editor .active-visual-code {
+	border-left-color: var(--active-border);
+}
+
+.monaco-editor .active-visual-diff .diff-line.add {
+	color: var(--active-added);
+}
+
+.monaco-editor .active-visual-diff .diff-line.remove {
+	color: var(--active-removed);
+}
+
+.monaco-editor .active-visual-diff .diff-line.context,
+.monaco-editor .active-visual-diff .diff-line.gap {
+	color: var(--active-muted);
+}
+
+.monaco-editor .active-visual-diff .diff-line.dim {
+	opacity: 0.25;
+}
+
+.monaco-editor .active-visual-source {
+	font-size: 12px;
+	color: var(--active-muted);
+	margin-top: 6px;
+}
+
+.monaco-editor .active-visual-equation {
+	color: var(--vscode-textLink-foreground);
+	text-align: center;
+	font-size: 15px;
+	padding: 6px 0;
+}
+
+.monaco-editor .active-visual-legend {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 6px 18px;
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-editor .active-visual-legend .symbol {
+	font-family: var(--monaco-monospace-font);
+	color: var(--vscode-textLink-foreground);
+	margin-right: 6px;
+}
+
+.monaco-editor .active-visual-diagram {
+	position: relative;
+	padding: 6px 0;
+}
+
+.monaco-editor .active-visual-diagram .diagram-columns {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	gap: 120px;
+	position: relative;
+	z-index: 1;
+}
+
+.monaco-editor .active-visual-diagram .diagram-column {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	flex: 0 1 220px;
+	min-width: 110px;
+	transition: opacity 250ms ease;
+}
+
+.monaco-editor .active-visual-diagram .diagram-column.dim {
+	opacity: 0.15;
+}
+
+.monaco-editor .active-visual-diagram .diagram-node {
+	background: var(--vscode-editor-background);
+	border: 1px solid var(--active-border);
+	padding: 10px 12px;
+	text-align: center;
+	transition: border-color 200ms ease, opacity 200ms ease, box-shadow 200ms ease;
+}
+
+.monaco-editor .active-visual-diagram .diagram-node .label {
+	font-size: 14px;
+}
+
+.monaco-editor .active-visual-diagram .diagram-node .detail {
+	font-size: 12px;
+	color: var(--active-muted);
+	margin-top: 4px;
+}
+
+.monaco-editor .active-visual-diagram .diagram-node.highlight {
+	border-color: var(--active-accent);
+	box-shadow: 0 0 0 1px var(--active-accent);
+}
+
+.monaco-editor .active-visual-diagram .diagram-node.muted {
+	opacity: 0.55;
+}
+
+.monaco-editor .active-visual-diagram svg.diagram-edges {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	overflow: visible;
+}
+
+.monaco-editor .active-visual-diagram svg .edge {
+	fill: none;
+	stroke: var(--active-muted);
+	stroke-width: 1.2;
+}
+
+.monaco-editor .active-visual-diagram svg .edge.highlight {
+	stroke: var(--vscode-textLink-foreground);
+	stroke-width: 1.8;
+}
+
+.monaco-editor .active-visual-diagram svg .arrow-tip {
+	fill: var(--active-muted);
+}
+
+.monaco-editor .active-visual-diagram .diagram-edge-labels {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	z-index: 2;
+}
+
+.monaco-editor .active-visual-diagram .edge-label {
+	position: absolute;
+	transform: translate(-50%, -140%);
+	font-size: 12px;
+	color: var(--active-muted);
+	background: var(--active-card);
+	padding: 0 4px;
+	max-width: 112px;
+	text-align: center;
+	line-height: 1.25;
+}
+
+.monaco-editor .active-visual-diagram .edge-label.below {
+	transform: translate(-50%, 40%);
+}
+
+.monaco-editor .active-visual-diagram .edge-label.highlight {
+	color: var(--vscode-textLink-foreground);
+}
+
+.monaco-editor .active-visual-badge {
+	display: inline-block;
+	font-size: 11px;
+	letter-spacing: 0.04em;
+	color: var(--active-muted);
+	border: 1px dashed var(--active-border);
+	border-radius: 3px;
+	padding: 1px 6px;
+	margin-top: 8px;
+}
+
+.monaco-editor .active-visual-chart .chart-title {
+	font-size: 13px;
+	margin-bottom: 4px;
+}
+
+.monaco-editor .active-visual-chart svg .grid {
+	stroke: var(--active-border);
+	stroke-width: 1;
+}
+
+.monaco-editor .active-visual-chart svg .tick,
+.monaco-editor .active-visual-chart svg .value,
+.monaco-editor .active-visual-chart svg .axis-label {
+	fill: var(--active-muted);
+	font-size: 11px;
+}
+
+.monaco-editor .active-visual-chart svg .bar.series-0,
+.monaco-editor .active-visual-chart svg .dot.series-0 { fill: var(--vscode-charts-blue); }
+.monaco-editor .active-visual-chart svg .bar.series-1,
+.monaco-editor .active-visual-chart svg .dot.series-1 { fill: var(--vscode-charts-orange); }
+.monaco-editor .active-visual-chart svg .bar.series-2,
+.monaco-editor .active-visual-chart svg .dot.series-2 { fill: var(--vscode-charts-green); }
+.monaco-editor .active-visual-chart svg .bar.series-3,
+.monaco-editor .active-visual-chart svg .dot.series-3 { fill: var(--vscode-charts-purple); }
+.monaco-editor .active-visual-chart svg .line { fill: none; stroke-width: 2; }
+.monaco-editor .active-visual-chart svg .line.series-0 { stroke: var(--vscode-charts-blue); }
+.monaco-editor .active-visual-chart svg .line.series-1 { stroke: var(--vscode-charts-orange); }
+.monaco-editor .active-visual-chart svg .line.series-2 { stroke: var(--vscode-charts-green); }
+.monaco-editor .active-visual-chart svg .line.series-3 { stroke: var(--vscode-charts-purple); }
+
+.monaco-editor .active-visual-chart .chart-legend {
+	display: flex;
+	gap: 14px;
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-editor .active-visual-chart .chart-legend span::before {
+	content: '';
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	margin-right: 5px;
+	border-radius: 2px;
+}
+
+.monaco-editor .active-visual-chart .chart-legend .series-0::before { background: var(--vscode-charts-blue); }
+.monaco-editor .active-visual-chart .chart-legend .series-1::before { background: var(--vscode-charts-orange); }
+.monaco-editor .active-visual-chart .chart-legend .series-2::before { background: var(--vscode-charts-green); }
+.monaco-editor .active-visual-chart .chart-legend .series-3::before { background: var(--vscode-charts-purple); }
+
+/* controls */
+
+.monaco-workbench .walkthrough-controls {
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 20px;
+	border-top: 1px solid var(--active-border);
+	background: var(--vscode-editor-background);
+}
+
+.monaco-workbench .walkthrough-controls .spacer {
+	flex: 1;
+}
+
+.monaco-workbench .walkthrough-controls button.control.primary {
+	min-width: 200px;
+}
+
+.monaco-workbench .walkthrough-controls .progress {
+	color: var(--active-muted);
+	font-size: 13px;
+	min-width: 48px;
+	text-align: center;
+}
+
+.monaco-workbench .walkthrough-controls .playback-status {
+	flex: 1;
+	font-size: 12px;
+	color: var(--active-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .walkthrough-controls .playback-status.warning {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.monaco-workbench .walkthrough-controls button.open-chat {
+	border: 1px solid var(--active-border);
+	min-width: 180px;
+	text-align: left;
+}
+
+/* ------------------------------------------------------------------ explorer */
+
+.monaco-workbench .explorer-folders-view .monaco-tl-contents:has(> .active-explorer-counts) {
+	display: flex;
+	align-items: center;
+}
+
+.monaco-workbench .explorer-folders-view .monaco-tl-contents:has(> .active-explorer-counts) > .monaco-icon-label {
+	flex: 1;
+	min-width: 0;
+}
+
+.monaco-workbench .active-explorer-counts {
+	flex-shrink: 0;
+	font-size: 12px;
+	display: flex;
+	gap: 6px;
+	padding: 0 10px 0 6px;
+	pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ profile */
+
+.monaco-workbench .active-profile {
+	background: var(--vscode-editor-background);
+}
+
+.monaco-workbench .active-profile-form {
+	max-width: 720px;
+	margin: 0 auto;
+	padding: 48px 32px 80px;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-profile-form h1 {
+	font-weight: 400;
+	font-size: 26px;
+	margin: 6px 0;
+}
+
+.monaco-workbench .active-profile-form .lead,
+.monaco-workbench .active-profile-form .help {
+	color: var(--active-muted);
+	font-size: 13px;
+}
+
+.monaco-workbench .active-profile-form section {
+	margin-top: 28px;
+}
+
+.monaco-workbench .active-profile-form h2 {
+	font-size: 15px;
+	font-weight: 600;
+	margin: 0 0 4px;
+}
+
+.monaco-workbench .active-profile-form textarea,
+.monaco-workbench .active-profile-form input:not([type=radio]):not([type=checkbox]):not([type=range]),
+.monaco-workbench .active-profile-form select {
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, var(--active-border));
+	border-radius: 3px;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: 13px;
+}
+
+.monaco-workbench .active-profile-form textarea {
+	width: 100%;
+	box-sizing: border-box;
+	resize: vertical;
+}
+
+.monaco-workbench .active-profile-form label.field {
+	display: block;
+	margin: 12px 0 4px;
+	font-size: 13px;
+}
+
+.monaco-workbench .active-profile-form label.inline {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 10px 0;
+	font-size: 13px;
+}
+
+.monaco-workbench .active-profile-form .choices {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.monaco-workbench .active-profile-form .choice {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	font-size: 13px;
+}
+
+.monaco-workbench .active-profile-form .familiarity-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	align-items: flex-start;
+	margin-top: 8px;
+}
+
+.monaco-workbench .active-profile-form .familiarity-row {
+	display: flex;
+	gap: 8px;
+}
+
+.monaco-workbench .active-profile-form .profile-actions {
+	margin-top: 32px;
+}
+
+/* ------------------------------------------------------------------ history & session views */
+
+.monaco-workbench .active-history-list {
+	padding: 4px 12px 12px 20px;
+}
+
+.monaco-workbench .active-history .empty {
+	color: var(--active-muted);
+	font-size: 12px;
+	padding: 8px 0;
+}
+
+.monaco-workbench .active-history .session {
+	text-transform: uppercase;
+	font-size: 11px;
+	letter-spacing: 0.05em;
+	color: var(--active-muted);
+	margin: 12px 0 4px;
+}
+
+.monaco-workbench .active-history .turn {
+	border-bottom: 1px solid var(--active-border);
+	padding: 10px 0;
+	font-size: 12px;
+}
+
+.monaco-workbench .active-history .turn-head {
+	display: flex;
+	justify-content: space-between;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-history .task {
+	font-size: 13px;
+	margin: 4px 0;
+}
+
+.monaco-workbench .active-history .note {
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-history .note.has-walkthrough {
+	color: var(--vscode-textLink-foreground);
+}
+
+.monaco-workbench .active-history .files {
+	display: flex;
+	flex-direction: column;
+	margin: 6px 0;
+	font-family: var(--monaco-monospace-font);
+}
+
+.monaco-workbench .active-history .actions {
+	display: flex;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+.monaco-workbench .active-history .actions button {
+	padding: 2px 8px;
+	font-size: 12px;
+}
+
+.monaco-workbench .active-history .detail {
+	margin-top: 8px;
+	padding: 8px;
+	background: var(--vscode-textCodeBlock-background);
+	border-radius: 4px;
+}
+
+.monaco-workbench .active-history .detail-title {
+	font-weight: 600;
+	margin: 6px 0 2px;
+}
+
+.monaco-workbench .active-history .detail-line {
+	color: var(--active-muted);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.monaco-workbench .active-session-view {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px 20px;
+}
+
+.monaco-workbench .active-session-view .status {
+	color: var(--active-muted);
+	font-size: 12px;
+}

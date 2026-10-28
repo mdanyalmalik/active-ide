@@ -1,0 +1,655 @@
+{
+ "defaultAnswer": "the walkthrough is grounded in the captured code; ask about a specific line for more detail.",
+ "answers": [
+  {
+   "match": "why",
+   "text": "Because the refill is computed from elapsed time on each call, the bucket never needs a timer: idle time is credited lazily the next time take() runs, capped at capacity so a long idle period cannot bank an unlimited burst."
+  },
+  {
+   "match": "fraction",
+   "text": "Fractions work because the regular expression accepts an optional decimal part and the result is rounded to whole milliseconds, so 1.5h becomes 5,400,000 ms."
+  }
+ ],
+ "turns": [
+  {
+   "match": "minutes and hours",
+   "steps": [
+    {
+     "type": "reasoning",
+     "summary": "parseDuration only accepts seconds. Replace the single-unit regex with a unit table so new units are data, not new branches, and validate the result."
+    },
+    {
+     "type": "message",
+     "text": "I'll extend parseDuration with a unit table and add tests for the new units."
+    },
+    {
+     "type": "edit",
+     "path": "src/duration.js",
+     "content": "// Parses durations used in ledger export schedules.\nconst UNIT_MS = {\n\tms: 1,\n\ts: 1000,\n\tm: 60 * 1000,\n\th: 60 * 60 * 1000,\n};\n\nexport function parseDuration(text) {\n\tconst match = /^(\\d+(?:\\.\\d+)?)(ms|s|m|h)$/.exec(text.trim());\n\tif (!match) {\n\t\tthrow new Error(`Unsupported duration: ${text}`);\n\t}\n\tconst [, amount, unit] = match;\n\tconst value = Number(amount) * UNIT_MS[unit];\n\tif (!Number.isFinite(value) || value <= 0) {\n\t\tthrow new Error(`Duration must be positive: ${text}`);\n\t}\n\treturn Math.round(value);\n}\n",
+     "ms": 700
+    },
+    {
+     "type": "edit",
+     "path": "test/duration.test.js",
+     "content": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { parseDuration } from '../src/duration.js';\n\ntest('parses seconds', () => {\n\tassert.equal(parseDuration('30s'), 30000);\n});\n\ntest('parses minutes, hours and fractions', () => {\n\tassert.equal(parseDuration('5m'), 300000);\n\tassert.equal(parseDuration('1.5h'), 5400000);\n\tassert.equal(parseDuration('250ms'), 250);\n});\n\ntest('rejects zero and unknown units', () => {\n\tassert.throws(() => parseDuration('0s'));\n\tassert.throws(() => parseDuration('3d'));\n});\n",
+     "ms": 500
+    },
+    {
+     "type": "shell",
+     "command": "npm test",
+     "run": true
+    },
+    {
+     "type": "message",
+     "phase": "finalAnswer",
+     "text": "parseDuration now accepts ms, s, m and h (including fractions like 1.5h) and rejects zero or unknown units. Tests pass."
+    }
+   ],
+   "walkthrough": {
+    "title": "Durations become a lookup, not a special case",
+    "summary": "parseDuration now converts any supported unit through one table and rejects values that would schedule nothing.",
+    "terms": [
+     {
+      "name": "unit table",
+      "meaning": "maps a unit suffix to milliseconds",
+      "codeSymbol": "UNIT_MS"
+     }
+    ],
+    "scenes": [
+     {
+      "id": "problem",
+      "role": "problem",
+      "label": "The problem",
+      "title": "Only seconds were understood",
+      "file": "src/duration.js",
+      "version": "baseline",
+      "focus": [
+       {
+        "startLine": 3,
+        "endLine": 3
+       }
+      ],
+      "anchorLine": 7,
+      "symbol": "parseDuration",
+      "visual": {
+       "type": "diff",
+       "file": "src/duration.js",
+       "range": {
+        "find": "const match",
+        "file": "src/duration.js",
+        "end": "throw new Error(`Unsupported"
+       }
+      },
+      "narration": [
+       {
+        "text": "Before this change, parseDuration matched exactly one shape: a number followed by s."
+       },
+       {
+        "text": "Anything like five minutes was rejected, so schedules had to be written in seconds."
+       }
+      ]
+     },
+     {
+      "id": "model",
+      "role": "model",
+      "label": "Underlying concept",
+      "title": "Every unit is a multiplier",
+      "file": "src/duration.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "const UNIT_MS",
+        "file": "src/duration.js",
+        "end": "};"
+       }
+      ],
+      "anchorLine": {
+       "find": "};",
+       "file": "src/duration.js",
+       "as": "line"
+      },
+      "symbol": "UNIT_MS",
+      "visual": {
+       "type": "equation",
+       "latex": "\\text{milliseconds} = \\text{amount} \\times \\text{UNIT\\_MS}[\\text{unit}]",
+       "legend": [
+        {
+         "symbol": "amount",
+         "term": "the number in the text"
+        },
+        {
+         "symbol": "UNIT_MS",
+         "term": "unit table"
+        }
+       ]
+      },
+      "narration": [
+       {
+        "text": "The idea is simple: every unit is just a multiplier into milliseconds."
+       },
+       {
+        "text": "So the unit table stores those multipliers, and adding a unit means adding one entry, not another branch.",
+        "cue": {
+         "focus": 0
+        }
+       }
+      ]
+     },
+     {
+      "id": "implementation",
+      "role": "implementation",
+      "label": "Implementation",
+      "title": "One pattern, one lookup, one guard",
+      "file": "src/duration.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "const match",
+        "file": "src/duration.js"
+       },
+       {
+        "find": "const [, amount, unit]",
+        "file": "src/duration.js",
+        "end": "const value"
+       },
+       {
+        "find": "if (!Number.isFinite",
+        "file": "src/duration.js",
+        "end": "}"
+       }
+      ],
+      "anchorLine": {
+       "find": "return Math.round",
+       "file": "src/duration.js",
+       "as": "line"
+      },
+      "symbol": "parseDuration",
+      "narration": [
+       {
+        "text": "The pattern now captures an amount, which may have a decimal part, and one of four unit suffixes.",
+        "cue": {
+         "focus": 0
+        }
+       },
+       {
+        "text": "The amount is multiplied by the unit table entry.",
+        "cue": {
+         "focus": 1
+        }
+       },
+       {
+        "text": "Finally, a guard rejects zero or non-finite results, because a zero-length schedule would fire continuously.",
+        "cue": {
+         "focus": 2
+        }
+       }
+      ]
+     },
+     {
+      "id": "evidence",
+      "role": "evidence",
+      "label": "Evidence",
+      "title": "Tests pin the new units and the edge cases",
+      "file": "test/duration.test.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "parses minutes",
+        "file": "test/duration.test.js",
+        "end": "});"
+       },
+       {
+        "find": "rejects zero",
+        "file": "test/duration.test.js",
+        "end": "});"
+       }
+      ],
+      "anchorLine": {
+       "find": "rejects zero",
+       "file": "test/duration.test.js",
+       "as": "line"
+      },
+      "narration": [
+       {
+        "text": "The new tests cover minutes, hours and a fractional value.",
+        "cue": {
+         "focus": 0
+        }
+       },
+       {
+        "text": "They also check that zero and an unknown unit are rejected, and the test run in this turn passed.",
+        "cue": {
+         "focus": 1
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "match": "typo",
+   "steps": [
+    {
+     "type": "edit",
+     "path": "README.md",
+     "content": "# ledger-api\n\nA small sample project used to demonstrate Active walkthroughs.\n",
+     "ms": 300
+    },
+    {
+     "type": "message",
+     "phase": "finalAnswer",
+     "text": "Updated the README wording."
+    }
+   ]
+  },
+  {
+   "match": "rate limiting",
+   "steps": [
+    {
+     "type": "reasoning",
+     "summary": "Bursts of balance and transaction calls trigger 429s. A token bucket lets short bursts through and paces the rest; on 429 we should honor Retry-After by pausing the shared limiter."
+    },
+    {
+     "type": "message",
+     "text": "I'll add a token-bucket limiter, route every request through it, and handle 429 Retry-After."
+    },
+    {
+     "type": "edit",
+     "path": "src/rateLimiter.js",
+     "content": "// Token bucket: allows short bursts while holding the long-run rate to `ratePerSecond`.\nexport class RateLimiter {\n\tconstructor({ capacity, ratePerSecond, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {\n\t\tthis.capacity = capacity;\n\t\tthis.ratePerSecond = ratePerSecond;\n\t\tthis.tokens = capacity;\n\t\tthis.lastRefill = now();\n\t\tthis.pausedUntil = 0;\n\t\tthis.now = now;\n\t\tthis.sleep = sleep;\n\t}\n\n\trefill() {\n\t\tconst current = this.now();\n\t\tconst elapsedSeconds = (current - this.lastRefill) / 1000;\n\t\tthis.tokens = Math.min(this.capacity, this.tokens + elapsedSeconds * this.ratePerSecond);\n\t\tthis.lastRefill = current;\n\t}\n\n\tasync take() {\n\t\tfor (;;) {\n\t\t\tconst pause = this.pausedUntil - this.now();\n\t\t\tif (pause > 0) {\n\t\t\t\tawait this.sleep(pause);\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tthis.refill();\n\t\t\tif (this.tokens >= 1) {\n\t\t\t\tthis.tokens -= 1;\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tconst waitMs = ((1 - this.tokens) / this.ratePerSecond) * 1000;\n\t\t\tawait this.sleep(Math.ceil(waitMs));\n\t\t}\n\t}\n\n\tpauseFor(ms) {\n\t\tthis.pausedUntil = Math.max(this.pausedUntil, this.now() + ms);\n\t\tthis.tokens = 0;\n\t}\n}\n",
+     "ms": 900
+    },
+    {
+     "type": "edit",
+     "path": "src/apiClient.js",
+     "content": "// Minimal client for the ledger HTTP API.\nimport { RateLimiter } from './rateLimiter.js';\n\nexport class ApiClient {\n\tconstructor(baseUrl, fetchImpl = fetch, limiter = new RateLimiter({ capacity: 5, ratePerSecond: 2 })) {\n\t\tthis.baseUrl = baseUrl;\n\t\tthis.fetchImpl = fetchImpl;\n\t\tthis.limiter = limiter;\n\t}\n\n\tasync request(path) {\n\t\tawait this.limiter.take();\n\t\tconst response = await this.fetchImpl(`${this.baseUrl}${path}`);\n\t\tif (response.status === 429) {\n\t\t\tconst retryAfterSeconds = Number(response.headers.get('Retry-After') ?? '1');\n\t\t\tthis.limiter.pauseFor(retryAfterSeconds * 1000);\n\t\t\treturn this.request(path);\n\t\t}\n\t\treturn response;\n\t}\n\n\tasync getBalance(accountId) {\n\t\tconst response = await this.request(`/accounts/${accountId}/balance`);\n\t\tif (!response.ok) {\n\t\t\tthrow new Error(`Balance request failed: ${response.status}`);\n\t\t}\n\t\treturn response.json();\n\t}\n\n\tasync listTransactions(accountId, page = 1) {\n\t\tconst response = await this.request(`/accounts/${accountId}/transactions?page=${page}`);\n\t\tif (!response.ok) {\n\t\t\tthrow new Error(`Transactions request failed: ${response.status}`);\n\t\t}\n\t\treturn response.json();\n\t}\n}\n",
+     "ms": 900
+    },
+    {
+     "type": "edit",
+     "path": "test/rateLimiter.test.js",
+     "content": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { RateLimiter } from '../src/rateLimiter.js';\n\nfunction fakeClock() {\n\tlet time = 0;\n\treturn { now: () => time, sleep: async ms => { time += ms; } };\n}\n\ntest('allows a burst up to capacity, then paces requests', async () => {\n\tconst clock = fakeClock();\n\tconst limiter = new RateLimiter({ capacity: 3, ratePerSecond: 2, ...clock });\n\tfor (let i = 0; i < 3; i++) {\n\t\tawait limiter.take();\n\t}\n\tassert.equal(clock.now(), 0);\n\tawait limiter.take();\n\tassert.equal(clock.now(), 500);\n});\n\ntest('pauseFor drains the bucket and waits out Retry-After', async () => {\n\tconst clock = fakeClock();\n\tconst limiter = new RateLimiter({ capacity: 3, ratePerSecond: 2, ...clock });\n\tlimiter.pauseFor(2000);\n\tawait limiter.take();\n\tassert.ok(clock.now() >= 2000);\n});\n",
+     "ms": 600
+    },
+    {
+     "type": "reasoning",
+     "summary": "Retrying on 429 recursively is fine because pauseFor drains the bucket, so the retry waits for Retry-After before taking a token."
+    },
+    {
+     "type": "shell",
+     "command": "npm test",
+     "background": true,
+     "durationMs": 45000,
+     "output": "# tests 5\n# pass 5\n# fail 0"
+    },
+    {
+     "type": "message",
+     "phase": "finalAnswer",
+     "text": "Requests now go through a shared token bucket (burst 5, 2/s). A 429 pauses the bucket for Retry-After and retries. Tests are running in the background."
+    }
+   ],
+   "walkthrough": {
+    "title": "A token bucket paces the ledger client",
+    "summary": "Every request now takes a token from a shared bucket that refills over time; a 429 response drains it and pauses for Retry-After.",
+    "terms": [
+     {
+      "name": "token bucket",
+      "meaning": "a counter of request permits that refills at a fixed rate up to a capacity",
+      "codeSymbol": "RateLimiter"
+     },
+     {
+      "name": "capacity",
+      "meaning": "the largest burst allowed",
+      "codeSymbol": "capacity"
+     },
+     {
+      "name": "refill rate",
+      "meaning": "permits added per second",
+      "codeSymbol": "ratePerSecond"
+     },
+     {
+      "name": "Retry-After",
+      "meaning": "the server's requested back-off",
+      "codeSymbol": "pauseFor"
+     }
+    ],
+    "scenes": [
+     {
+      "id": "problem",
+      "role": "problem",
+      "label": "The problem",
+      "title": "Bursts of calls hit the API's limit",
+      "file": "src/apiClient.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "async request(path)",
+        "file": "src/apiClient.js",
+        "end": "return response;"
+       }
+      ],
+      "anchorLine": {
+       "find": "return response;",
+       "file": "src/apiClient.js",
+       "as": "line"
+      },
+      "symbol": "ApiClient \u203a request",
+      "visual": {
+       "type": "diagram",
+       "illustrative": true,
+       "nodes": [
+        {
+         "id": "callers",
+         "label": "getBalance \u00b7 listTransactions",
+         "detail": "many calls at once",
+         "column": 0
+        },
+        {
+         "id": "bucket",
+         "label": "token bucket",
+         "detail": "limiter.take()",
+         "column": 1
+        },
+        {
+         "id": "api",
+         "label": "Ledger API",
+         "detail": "429 when overloaded",
+         "column": 2
+        }
+       ],
+       "edges": [
+        {
+         "from": "callers",
+         "to": "bucket",
+         "label": "every request"
+        },
+        {
+         "from": "bucket",
+         "to": "api",
+         "label": "paced"
+        },
+        {
+         "from": "api",
+         "to": "bucket",
+         "label": "429 \u2192 pause"
+        }
+       ]
+      },
+      "narration": [
+       {
+        "text": "When a screen loads, it can fire many balance and transaction calls at once, and the ledger API answers some of them with 429, too many requests."
+       },
+       {
+        "text": "The fix puts a token bucket between every caller and the network.",
+        "cue": {
+         "nodes": [
+          "callers",
+          "bucket"
+         ]
+        }
+       },
+       {
+        "text": "Requests flow on at a steady pace, and a 429 sends a pause signal back to the bucket.",
+        "cue": {
+         "nodes": [
+          "bucket",
+          "api"
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "id": "model",
+      "role": "model",
+      "label": "Underlying concept",
+      "title": "Tokens refill with elapsed time, up to a cap",
+      "file": "src/rateLimiter.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "refill() {",
+        "file": "src/rateLimiter.js",
+        "end": "this.lastRefill = current;"
+       }
+      ],
+      "anchorLine": {
+       "find": "this.lastRefill = current;",
+       "file": "src/rateLimiter.js",
+       "as": "line"
+      },
+      "symbol": "RateLimiter \u203a refill",
+      "visual": {
+       "type": "equation",
+       "latex": "\\text{tokens} \\leftarrow \\min\\big(\\text{capacity},\\; \\text{tokens} + \\Delta t \\cdot \\text{refill rate}\\big)",
+       "legend": [
+        {
+         "symbol": "\u0394t",
+         "term": "seconds since the last refill"
+        },
+        {
+         "symbol": "capacity",
+         "term": "largest burst"
+        }
+       ]
+      },
+      "narration": [
+       {
+        "text": "The token bucket is one number that grows with time."
+       },
+       {
+        "text": "Each refill adds elapsed seconds times the refill rate, and never exceeds the capacity, so idle time can't bank an unlimited burst.",
+        "cue": {
+         "focus": 0
+        }
+       }
+      ]
+     },
+     {
+      "id": "take",
+      "role": "implementation",
+      "label": "Implementation",
+      "title": "take() waits exactly long enough for one token",
+      "file": "src/rateLimiter.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "if (this.tokens >= 1)",
+        "file": "src/rateLimiter.js",
+        "end": "return;"
+       },
+       {
+        "find": "const waitMs",
+        "file": "src/rateLimiter.js",
+        "end": "await this.sleep(Math.ceil"
+       }
+      ],
+      "anchorLine": {
+       "find": "await this.sleep(Math.ceil",
+       "file": "src/rateLimiter.js",
+       "as": "line"
+      },
+      "symbol": "RateLimiter \u203a take",
+      "narration": [
+       {
+        "text": "If a whole token is available, take spends it and returns immediately. That is the burst.",
+        "cue": {
+         "focus": 0
+        }
+       },
+       {
+        "text": "Otherwise it computes how long until the missing fraction refills, sleeps that long, and tries again.",
+        "cue": {
+         "focus": 1
+        }
+       }
+      ]
+     },
+     {
+      "id": "behavior",
+      "role": "behavior",
+      "label": "Behavior",
+      "title": "Five fast requests, then two per second",
+      "file": "src/rateLimiter.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "constructor({ capacity",
+        "file": "src/rateLimiter.js",
+        "end": "this.tokens = capacity;"
+       }
+      ],
+      "anchorLine": {
+       "find": "this.sleep = sleep;",
+       "file": "src/rateLimiter.js",
+       "as": "line"
+      },
+      "symbol": "RateLimiter",
+      "visual": {
+       "type": "chart",
+       "chart": "bar",
+       "title": "Wait before each of 8 back-to-back requests (capacity 5, 2 per second)",
+       "xLabel": "request",
+       "yLabel": "wait (ms)",
+       "source": "illustrative",
+       "series": [
+        {
+         "name": "wait",
+         "points": [
+          {
+           "x": 1,
+           "y": 0
+          },
+          {
+           "x": 2,
+           "y": 0
+          },
+          {
+           "x": 3,
+           "y": 0
+          },
+          {
+           "x": 4,
+           "y": 0
+          },
+          {
+           "x": 5,
+           "y": 0
+          },
+          {
+           "x": 6,
+           "y": 500
+          },
+          {
+           "x": 7,
+           "y": 500
+          },
+          {
+           "x": 8,
+           "y": 500
+          }
+         ]
+        }
+       ]
+      },
+      "narration": [
+       {
+        "text": "Here's an example with the client's defaults, capacity five and two tokens per second. This is worked out from the code, not measured.",
+        "cue": {
+         "reveal": 4
+        }
+       },
+       {
+        "text": "The first five requests go straight through; after that, each one waits about half a second.",
+        "cue": {
+         "reveal": 7
+        }
+       }
+      ]
+     },
+     {
+      "id": "integration",
+      "role": "implementation",
+      "label": "Code diff",
+      "title": "Every call now goes through request()",
+      "file": "src/apiClient.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "async request(path)",
+        "file": "src/apiClient.js",
+        "end": "return response;"
+       },
+       {
+        "find": "const response = await this.request(`/accounts/${accountId}/balance`)",
+        "file": "src/apiClient.js"
+       }
+      ],
+      "anchorLine": {
+       "find": "return response;",
+       "file": "src/apiClient.js",
+       "as": "line"
+      },
+      "symbol": "ApiClient \u203a request",
+      "visual": {
+       "type": "diff",
+       "file": "src/apiClient.js",
+       "range": {
+        "find": "async request(path)",
+        "file": "src/apiClient.js",
+        "end": "return response;"
+       }
+      },
+      "narration": [
+       {
+        "text": "In the client, a new request method takes a token before every fetch.",
+        "cue": {
+         "focus": 0
+        }
+       },
+       {
+        "text": "On a 429 it reads Retry-After, pauses the shared bucket, and retries; getBalance and listTransactions both route through it.",
+        "cue": {
+         "focus": 1
+        }
+       }
+      ]
+     },
+     {
+      "id": "tradeoff",
+      "role": "tradeoff",
+      "label": "Tradeoffs",
+      "title": "Pausing the bucket protects every caller",
+      "file": "src/rateLimiter.js",
+      "version": "final",
+      "focus": [
+       {
+        "find": "pauseFor(ms)",
+        "file": "src/rateLimiter.js",
+        "end": "this.tokens = 0;"
+       }
+      ],
+      "anchorLine": {
+       "find": "this.tokens = 0;",
+       "file": "src/rateLimiter.js",
+       "as": "line"
+      },
+      "symbol": "RateLimiter \u203a pauseFor",
+      "narration": [
+       {
+        "text": "pauseFor drains the bucket and blocks takes until the server's Retry-After has passed, so one 429 slows every caller instead of letting them all retry at once.",
+        "cue": {
+         "focus": 0
+        }
+       },
+       {
+        "text": "The tradeoff is that the retry has no attempt limit, so a server that keeps answering 429 keeps the call waiting."
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

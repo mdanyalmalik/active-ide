@@ -1,0 +1,63 @@
+{
+	"name": "active-agent",
+	"displayName": "Active Agent Services",
+	"description": "Muse Code coding/explanation sessions, change tracking, walkthrough planning, Phonon narration and local history for Active.",
+	"version": "0.1.0",
+	"publisher": "active",
+	"license": "MIT",
+	"private": true,
+	"engines": {
+		"vscode": "^1.100.0"
+	},
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"scripts": {
+		"compile": "tsc -p ./",
+		"test": "tsc -p ./ && node --test --test-reporter=spec out/test/*.test.js"
+	},
+	"dependencies": {
+		"@muse-code/sdk": "1.4.14"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"@types/vscode": "^1.100.0",
+		"typescript": "^5.6.0"
+	},
+	"contributes": {
+		"configuration": {
+			"title": "Active",
+			"properties": {
+				"active.muse.binaryPath": {
+					"type": "string",
+					"default": "",
+					"description": "Path to the `muse` CLI. Empty searches PATH and ~/.local/bin."
+				},
+				"active.walkthrough.backgroundTimeoutSeconds": {
+					"type": "number",
+					"default": 20,
+					"minimum": 0,
+					"description": "How long to wait for background tasks (tests, builds) after a coding turn before explaining. Unfinished checks are marked pending; the tasks keep running."
+				},
+				"active.explain.minMeaningfulLines": {
+					"type": "number",
+					"default": 8,
+					"minimum": 1,
+					"description": "Meaningful changed lines (excluding whitespace, comments and moves) that make a single turn worth explaining. Turns are assessed independently."
+				},
+				"active.explain.draftQuietSeconds": {
+					"type": "number",
+					"default": 6,
+					"minimum": 1,
+					"description": "Quiet period after the last change before drafting the walkthrough while the agent is still working."
+				},
+				"active.narration.pythonPath": {
+					"type": "string",
+					"default": "",
+					"description": "Python interpreter with the `ptts` package (Phonon). Empty uses .tools/tts-venv or ~/.active/tts-venv."
+				}
+			}
+		}
+	}
+}
