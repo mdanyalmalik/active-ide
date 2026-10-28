@@ -10,7 +10,7 @@ import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
@@ -32,6 +32,8 @@ const $ = dom.$;
 const INSTALL_COMMAND = 'curl -fsSL https://dev.meta.ai/install.sh | sh';
 
 type ComposerMode = 'task' | 'ask';
+
+const HANDOFF_SECONDS = 4;
 
 /**
  * Full-work-area chat with Muse Code. Auto mode shows messages, compact tool
@@ -58,6 +60,8 @@ export class ActiveChatEditor extends EditorPane {
 	private readonly inputStore = this._register(new DisposableStore());
 	private readonly noticeStore = this._register(new DisposableStore());
 	private readonly footerStore = this._register(new DisposableStore());
+	private readonly handoffStore = this._register(new DisposableStore());
+	private handoffCard!: HTMLElement;
 
 	constructor(
 		group: IEditorGroup,
@@ -86,9 +90,12 @@ export class ActiveChatEditor extends EditorPane {
 		dom.append(this.intro, $('p.lead')).textContent = localize('introLead', "Work with Muse Code, then follow a walkthrough shaped around what you know and want to learn.");
 		this.notices = dom.append(column, $('.active-chat-notices'));
 		this.transcript = dom.append(column, $('.active-chat-transcript'));
-		this.stageLine = dom.append(column, $('.active-chat-stage'));
 
-		const composer = dom.append(column, $('.active-chat-composer'));
+		// The dock stays put below the scrolling transcript: walkthrough status, composer, actions.
+		const dock = dom.append(dom.append(this.root, $('.active-chat-dock')), $('.active-chat-dock-column'));
+		this.handoffCard = dom.append(dock, $('.active-chat-handoff.hidden'));
+		this.stageLine = dom.append(dock, $('.active-chat-stage'));
+		const composer = dom.append(dock, $('.active-chat-composer'));
 		this.composerContext = dom.append(composer, $('.composer-context'));
 		this.textarea = dom.append(composer, $('textarea')) as HTMLTextAreaElement;
 		this.textarea.rows = 4;
@@ -105,8 +112,8 @@ export class ActiveChatEditor extends EditorPane {
 		this.sendButton.textContent = localize('send', "Send ↑");
 		this._register(dom.addDisposableListener(this.sendButton, dom.EventType.CLICK, () => this.send()));
 
-		this.footerRow = dom.append(column, $('.active-chat-footer'));
-		dom.append(column, $('p.active-chat-tagline')).textContent = localize('tagline', "Code, visuals, and narration unfold together inside the editor.");
+		this.footerRow = dom.append(dock, $('.active-chat-footer'));
+		dom.append(this.intro, $('p.active-chat-tagline')).textContent = localize('tagline', "Code, visuals, and narration unfold together inside the editor.");
 
 		this._register(this.activeService.onDidChangeChat(entry => entry ? this.renderEntry(entry, true) : this.renderTranscript()));
 		this._register(this.activeService.onDidChangeAgent(() => this.renderChrome()));
@@ -114,14 +121,114 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(this.activeService.onDidChangeWalkthroughStatus(() => this.renderStage()));
 		this._register(this.activeService.onDidChangeOffer(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangePlayer(() => this.renderChrome()));
+		this._register(this.activeService.onDidChangeHandoff(() => this.renderHandoff()));
+		this._register(this.activeService.onWillHandOff(() => this.root.classList.add('leaving')));
+		this._register(toDisposable(() => this.stopCountdown()));
 	}
 
 	override async setInput(input: ActiveChatInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		this.inputStore.clear();
 		this.mode = this.activeService.chatContext ? 'ask' : 'task';
+		this.root.classList.remove('leaving');
+		this.root.classList.remove('entering');
+		void this.root.offsetWidth;
+		this.root.classList.add('entering');
 		this.renderTranscript();
 		this.renderChrome();
+		this.renderHandoff();
+	}
+
+	protected override setEditorVisible(visible: boolean): void {
+		super.setEditorVisible(visible);
+		if (!visible && this.activeService.pendingHandoff) {
+			// The user moved elsewhere during the countdown: offer the walkthrough instead.
+			this.activeService.declineHandoff();
+		}
+	}
+
+	private countdownTimer: ReturnType<typeof setInterval> | undefined;
+	private secondsLeft = 0;
+
+	private stopCountdown(): void {
+		if (this.countdownTimer !== undefined) {
+			clearInterval(this.countdownTimer);
+			this.countdownTimer = undefined;
+		}
+	}
+
+	/** Announces a finished walkthrough and counts down before chat gives way to it. */
+	private renderHandoff(): void {
+		const walkthrough = this.activeService.pendingHandoff;
+		this.handoffStore.clear();
+		dom.clearNode(this.handoffCard);
+		this.handoffCard.classList.toggle('hidden', !walkthrough);
+		if (!walkthrough) {
+			this.stopCountdown();
+			this.relayoutScroll();
+			return;
+		}
+		if (this.countdownTimer === undefined) {
+			this.secondsLeft = HANDOFF_SECONDS;
+			this.countdownTimer = setInterval(() => {
+				if (this.textarea.value.trim()) {
+					// Never interrupt someone who is typing.
+					this.updateHandoffCountdown();
+					return;
+				}
+				this.secondsLeft--;
+				if (this.secondsLeft <= 0) {
+					this.stopCountdown();
+					void this.activeService.startHandoff();
+				} else {
+					this.updateHandoffCountdown();
+				}
+			}, 1000);
+		}
+		const icon = dom.append(this.handoffCard, $('span.handoff-icon'));
+		icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.playCircle));
+		const text = dom.append(this.handoffCard, $('.handoff-text'));
+		dom.append(text, $('.handoff-title')).textContent = localize('handoffTitle', "Walkthrough ready: {0}", walkthrough.title);
+		dom.append(text, $('.handoff-detail'));
+		const progress = dom.append(this.handoffCard, $('.handoff-progress'));
+		dom.append(progress, $('.handoff-progress-bar'));
+		const actions = dom.append(this.handoffCard, $('.handoff-actions'));
+		const start = dom.append(actions, $('button.primary'));
+		start.textContent = localize('startNow', "Start Now");
+		const stay = dom.append(actions, $('button.secondary'));
+		stay.textContent = localize('stayInChat', "Stay in Chat");
+		this.handoffStore.add(dom.addDisposableListener(start, dom.EventType.CLICK, () => {
+			this.stopCountdown();
+			void this.activeService.startHandoff();
+		}));
+		this.handoffStore.add(dom.addDisposableListener(stay, dom.EventType.CLICK, () => {
+			this.stopCountdown();
+			this.activeService.declineHandoff();
+		}));
+		this.updateHandoffCountdown();
+		this.relayoutScroll();
+	}
+
+	private updateHandoffCountdown(): void {
+		// eslint-disable-next-line no-restricted-syntax
+		const detail = this.handoffCard.querySelector<HTMLElement>('.handoff-detail');
+		// eslint-disable-next-line no-restricted-syntax
+		const bar = this.handoffCard.querySelector<HTMLElement>('.handoff-progress-bar');
+		const typing = !!this.textarea.value.trim();
+		if (detail) {
+			detail.textContent = typing
+				? localize('handoffPaused', "Waiting while you type. Start it whenever you are ready.")
+				: localize('handoffCountdown', "Starting in {0}… The coding agent keeps working while you watch.", this.secondsLeft);
+		}
+		if (bar) {
+			bar.style.width = `${typing ? 100 : Math.max(0, (this.secondsLeft / HANDOFF_SECONDS) * 100)}%`;
+		}
+		this.handoffCard.classList.toggle('paused', typing);
+	}
+
+	/** Re-measures the transcript viewport after the dock changes height. */
+	private relayoutScroll(): void {
+		dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => this.scrollable.scanDomNode());
 	}
 
 	override focus(): void {
@@ -130,9 +237,10 @@ export class ActiveChatEditor extends EditorPane {
 	}
 
 	override layout(dimension: dom.Dimension): void {
+		// Header and dock size themselves; the transcript viewport takes the rest (CSS flex).
 		this.root.style.height = `${dimension.height}px`;
 		this.root.style.width = `${dimension.width}px`;
-		this.scrollable.getDomNode().style.height = `${Math.max(0, dimension.height - this.header.offsetHeight)}px`;
+		this.root.classList.toggle('compact', dimension.height < 560 || dimension.width < 640);
 		this.scrollable.scanDomNode();
 	}
 
@@ -218,14 +326,27 @@ export class ActiveChatEditor extends EditorPane {
 		const status = this.activeService.walkthroughStatus;
 		const agent = this.activeService.agent;
 		const parts: string[] = [];
-		if (status && status.stage !== 'idle' && status.stage !== 'ready') {
+		const quietlyWatching = status?.stage === 'collecting' && !/preparing|draft/i.test(status.detail);
+		if (status && status.stage !== 'idle' && status.stage !== 'ready' && !quietlyWatching) {
 			parts.push(status.detail);
 		}
 		if (agent.backgroundTasks > 0) {
 			parts.push(localize('backgroundRunning', "{0} background task(s) still running", agent.backgroundTasks));
 		}
-		this.stageLine.textContent = parts.join(' · ');
+		dom.clearNode(this.stageLine);
+		const preparing = !!status && ['collecting', 'drafting', 'waitingForBackground', 'finalizing'].includes(status.stage) && (status.stage !== 'collecting' || /preparing|draft/i.test(status.detail));
+		if (parts.length) {
+			const icon = dom.append(this.stageLine, $('span.stage-icon'));
+			icon.classList.add(...ThemeIcon.asClassNameArray(preparing ? Codicon.loading : Codicon.info));
+			if (preparing) {
+				icon.classList.add('codicon-modifier-spin');
+			}
+			const text = dom.append(this.stageLine, $('span.stage-text'));
+			text.textContent = preparing ? localize('preparingWalkthrough', "Preparing a walkthrough of this change · {0}", parts.join(' · ')) : parts.join(' · ');
+		}
+		this.stageLine.classList.toggle('preparing', preparing);
 		this.stageLine.classList.toggle('hidden', parts.length === 0);
+		this.relayoutScroll();
 	}
 
 	private renderComposerContext(): void {
@@ -244,6 +365,7 @@ export class ActiveChatEditor extends EditorPane {
 		} else {
 			this.mode = 'task';
 		}
+		this.sendButton.textContent = this.mode === 'ask' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
 		this.modeLabel.textContent = this.mode === 'ask' ? localize('explanationSession', "Explanation session (read-only)") : localize('museCode', "Muse Code");
 		this.textarea.placeholder = this.mode === 'ask' ? localize('askPlaceholder', "Ask about this part of the walkthrough…") : localize('taskPlaceholder', "Describe a coding task…");
 		this.updateSendState();

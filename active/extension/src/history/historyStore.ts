@@ -156,6 +156,7 @@ export class HistoryStore {
 			tools: record.tools,
 			edits: record.edits.map(edit => ({ seq: edit.seq, path: edit.path, source: edit.source, added: edit.added, removed: edit.removed, at: edit.at })),
 			walkthrough: record.walkthrough ? { ...record.walkthrough, files } : undefined,
+			files: Object.values(files),
 		};
 	}
 

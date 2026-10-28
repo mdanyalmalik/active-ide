@@ -114,7 +114,8 @@ Use the same names for the same things in narration, diagram labels, equation sy
 Pick the visual that explains best: "diff" when the before/after contrast matters, "code" for another relevant excerpt, "equation" for quantitative rules, "diagram" for flows/relationships, "chart" for numeric behavior. Omit the visual when the highlighted code is enough.
 Narration is spoken aloud: plain sentences, no markdown, no code blocks, no line numbers; 1-3 sentences per segment; use cues so the visual changes in step with the words.
 Ground every implementation claim in the captured code and tool results. Anything not observed (example timings, hypothetical callers) must be framed as an example in the narration and marked "illustrative": true / "source": "illustrative".
-Never say a check passed unless a tool outcome shows it. Mention pending checks as still running.`;
+Never say a check passed unless a tool outcome shows it. Mention pending checks as still running.
+Tool outcome ids exist only for a chart's "evidence" field: never mention ids, "tool outcome", or other internal names in titles or narration. Describe evidence the way the learner saw it (for example "the test run at the end of this turn").`;
 
 function toolSection(tools: readonly ToolOutcome[]): string {
 	if (!tools.length) {

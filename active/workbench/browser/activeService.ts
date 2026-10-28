@@ -55,6 +55,8 @@ export interface IActiveService {
 	/** A finished walkthrough offered to the user (not yet shown because they had navigated elsewhere). */
 	readonly offeredWalkthrough: Walkthrough | undefined;
 	readonly chatContext: ChatContext | undefined;
+	/** A finished walkthrough about to replace chat; chat shows a countdown and can start it or decline. */
+	readonly pendingHandoff: Walkthrough | undefined;
 	/** The folder is in Restricted Mode, so the agent services (which run code in it) are not started. */
 	readonly needsTrust: boolean;
 
@@ -69,6 +71,9 @@ export interface IActiveService {
 	/** Playback state or position changed in the current walkthrough. */
 	readonly onDidChangePlayback: Event<void>;
 	readonly onDidChangeOffer: Event<void>;
+	readonly onDidChangeHandoff: Event<void>;
+	/** Fired just before chat is replaced by a walkthrough, so chat can fade out. */
+	readonly onWillHandOff: Event<void>;
 
 	handleEvent(event: ActiveEvent): void;
 	initialize(): Promise<void>;
@@ -80,8 +85,12 @@ export interface IActiveService {
 	deleteHistory(turnId?: string): Promise<void>;
 	saveProfile(profile: LearningProfile): Promise<void>;
 
+	/** Hands off from chat to the pending walkthrough now. */
+	startHandoff(): Promise<void>;
+	/** Keeps chat open; the walkthrough stays available to play later. */
+	declineHandoff(): void;
 	openChat(fromWalkthrough: boolean): Promise<void>;
-	openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition): Promise<void>;
+	openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs?: number): Promise<void>;
 	resumeWalkthrough(): Promise<void>;
 	openProfile(): Promise<void>;
 	openCurrentFile(): Promise<void>;
@@ -111,6 +120,11 @@ export class ActiveService extends Disposable implements IActiveService {
 	private readonly playbackListener = this._register(new MutableDisposable());
 	private readonly _onDidChangeOffer = this._register(new Emitter<void>());
 	readonly onDidChangeOffer = this._onDidChangeOffer.event;
+	private readonly _onDidChangeHandoff = this._register(new Emitter<void>());
+	readonly onDidChangeHandoff = this._onDidChangeHandoff.event;
+	private readonly _onWillHandOff = this._register(new Emitter<void>());
+	readonly onWillHandOff = this._onWillHandOff.event;
+	private _pendingHandoff: Walkthrough | undefined;
 
 	private _agent: AgentState = { status: 'starting', workspaceName: '', backgroundTasks: 0 };
 	private readonly _chat: ChatEntry[] = [];
@@ -168,6 +182,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	get player(): WalkthroughPlayer | undefined { return this.playerRef.value; }
 	get offeredWalkthrough(): Walkthrough | undefined { return this._offered; }
 	get chatContext(): ChatContext | undefined { return this._chatContext; }
+	get pendingHandoff(): Walkthrough | undefined { return this._pendingHandoff; }
 
 	initialize(): Promise<void> {
 		this.initialized ??= this.doInitialize();
@@ -284,7 +299,13 @@ export class ActiveService extends Disposable implements IActiveService {
 		const onChat = !active || active instanceof ActiveChatInput;
 		const watchingOtherWalkthrough = active instanceof WalkthroughInput && this.player?.playing;
 		if (onChat && !historyOpen && !watchingOtherWalkthrough && !this._chatContext) {
-			await this.openWalkthrough(walkthrough);
+			if (active instanceof ActiveChatInput) {
+				// Chat announces the walkthrough with a short countdown before handing off.
+				this._pendingHandoff = walkthrough;
+				this._onDidChangeHandoff.fire();
+			} else {
+				await this.openWalkthrough(walkthrough);
+			}
 			return;
 		}
 		this.offer(walkthrough);
@@ -292,6 +313,27 @@ export class ActiveService extends Disposable implements IActiveService {
 			label: localize('play', "Play Walkthrough"),
 			run: () => this.openWalkthrough(walkthrough),
 		}]);
+	}
+
+	async startHandoff(): Promise<void> {
+		const walkthrough = this._pendingHandoff;
+		if (!walkthrough) {
+			return;
+		}
+		this._pendingHandoff = undefined;
+		this._onDidChangeHandoff.fire();
+		this._onWillHandOff.fire();
+		await timeout(260);
+		await this.openWalkthrough(walkthrough, undefined, 650);
+	}
+
+	declineHandoff(): void {
+		const walkthrough = this._pendingHandoff;
+		if (walkthrough) {
+			this._pendingHandoff = undefined;
+			this._onDidChangeHandoff.fire();
+			this.offer(walkthrough);
+		}
 	}
 
 	private offer(walkthrough: Walkthrough | undefined): void {
@@ -303,6 +345,12 @@ export class ActiveService extends Disposable implements IActiveService {
 	// ------------------------------------------------------------- extension calls
 
 	async submitTask(text: string): Promise<void> {
+		// A new coding task means the user has moved on from questions about an earlier
+		// walkthrough, so that context must not stop the next walkthrough from taking over.
+		if (this._chatContext) {
+			this._chatContext = undefined;
+			this._onDidChangePlayer.fire();
+		}
 		await this.commandService.executeCommand(ExtensionCommand.SubmitTask, text);
 	}
 
@@ -373,11 +421,14 @@ export class ActiveService extends Disposable implements IActiveService {
 			} else {
 				await this.editorService.openEditor(chat, { pinned: true });
 			}
-			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 		});
 	}
 
-	async openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition): Promise<void> {
+	async openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs = 0): Promise<void> {
+		if (this._pendingHandoff?.id === walkthrough.id) {
+			this._pendingHandoff = undefined;
+			this._onDidChangeHandoff.fire();
+		}
 		let input = this.inputs.get(walkthrough.id);
 		if (!input) {
 			input = new WalkthroughInput(walkthrough);
@@ -411,11 +462,21 @@ export class ActiveService extends Disposable implements IActiveService {
 			} else {
 				await this.editorService.openEditor(input, { pinned: true });
 			}
-			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
-			await this.paneCompositeService.openPaneComposite(EXPLORER_VIEWLET_ID, ViewContainerLocation.Sidebar, false);
+			// Show Explorer (with change counts) only when the editor keeps enough room for the walkthrough.
+			if (this.layoutService.mainContainerDimension.width >= 1000 || this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
+				this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
+				await this.paneCompositeService.openPaneComposite(EXPLORER_VIEWLET_ID, ViewContainerLocation.Sidebar, false);
+			}
 		});
 		this.revealChangedFiles(walkthrough);
-		this.player?.play();
+		const player = this.player;
+		if (playDelayMs > 0) {
+			// Let the walkthrough settle on screen before narration starts.
+			await timeout(playDelayMs);
+		}
+		if (player && player === this.player) {
+			player.play();
+		}
 	}
 
 	/** Expands Explorer to the files this walkthrough covers so their change counts are visible. */

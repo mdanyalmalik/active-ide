@@ -339,6 +339,8 @@ export interface HistoryDetail {
 	readonly tools: ReadonlyArray<ToolOutcome>;
 	readonly edits: ReadonlyArray<{ readonly seq: number; readonly path: string; readonly source: 'agent' | 'user'; readonly added: number; readonly removed: number; readonly at: number }>;
 	readonly walkthrough?: Walkthrough;
+	/** Every file the turn changed, as captured (including turns without a walkthrough). */
+	readonly files: ReadonlyArray<CapturedFile>;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +387,22 @@ export interface ValidationResult {
 	readonly errors: ReadonlyArray<string>;
 	/** Scenes dropped because they referenced code that is no longer part of the turn. */
 	readonly dropped: ReadonlyArray<string>;
+}
+
+/** Finds tool-outcome ids or similar internal names in learner-facing text. */
+function internalReference(text: string, evidenceIds: ReadonlySet<string>): string | undefined {
+	const phrase = /\btool outcomes?\b/i.exec(text);
+	if (phrase) {
+		return phrase[0];
+	}
+	for (const id of evidenceIds) {
+		for (const token of [id, id.split('-').pop() ?? '']) {
+			if (token.length >= 4 && new RegExp(`(^|[^\\w-])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\w-])`).test(text)) {
+				return token;
+			}
+		}
+	}
+	return undefined;
 }
 
 function versionText(file: CapturedFile, version: CapturedVersion): string | null {
@@ -533,6 +551,10 @@ export function validateWalkthrough(raw: unknown, files: Readonly<Record<string,
 			} else {
 				quote = value.quote;
 			}
+		}
+		const leaked = internalReference([value.title, ...narration.map(segment => segment.text)].filter((text): text is string => typeof text === 'string').join(' '), evidenceIds);
+		if (leaked) {
+			sceneErrors.push(`${path}: the title or narration mentions "${leaked}", an internal reference the learner never sees; describe the evidence in plain words`);
 		}
 		const pending = Array.isArray(value.pending) ? value.pending.filter((item): item is string => isString(item, 300)) : undefined;
 		if (sceneErrors.length) {

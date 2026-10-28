@@ -49,6 +49,15 @@ This runs Active against `active/extension/test-fixtures/scripted-muse-host.mjs`
 | `Fix the typo in the README` | tiny change → saved in history, not explained |
 | `Add client-side rate limiting to ApiClient` | 3 files, interacting concepts → diagram, equation, chart, diff; background `npm test` outlasts the timeout and is marked pending |
 
+### Dev only: agent-driven testing with Claude Code subagents
+
+`scripts/run-bridge-demo.sh <name> --remote-debugging-port=9333` opens Active on a fresh, empty workspace with `active.dev.agentBackend: "bridge"`. In this mode the coding and explanation sessions are served by external agents (for example Claude Code subagents) through a mailbox directory instead of Muse Code. Everything downstream is the real pipeline: change capture, worthiness, planning, validation, playback and history.
+
+- `active/extension/test-fixtures/bridge-agent.mjs` is the CLI the coding and explanation agents use to take requests and report messages, reasoning summaries, file edits, commands and background tasks.
+- `active/extension/test-fixtures/ui-driver.mjs` lets an automated user operate the window: observe the screen, chat, use the walkthrough controls, ask questions, and take screenshots.
+
+The chat header labels this mode "Claude Code subagent bridge (dev only)".
+
 ## Using Active
 
 - **Chat** opens across the whole work area on startup. Muse Code is never paused: walkthrough playback, opening files and opening chat only affect the explanation.

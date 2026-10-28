@@ -56,6 +56,26 @@
 					"type": "string",
 					"default": "",
 					"description": "Python interpreter with the `ptts` package (Phonon). Empty uses .tools/tts-venv or ~/.active/tts-venv."
+				},
+				"active.dev.agentBackend": {
+					"type": "string",
+					"enum": [
+						"muse",
+						"bridge"
+					],
+					"default": "muse",
+					"description": "DEV ONLY. `bridge` serves the coding and explanation sessions from external agents (e.g. Claude Code subagents) through a mailbox directory instead of Muse Code.",
+					"tags": [
+						"experimental"
+					]
+				},
+				"active.dev.bridgeDir": {
+					"type": "string",
+					"default": "",
+					"description": "DEV ONLY. Mailbox directory for the `bridge` agent backend.",
+					"tags": [
+						"experimental"
+					]
 				}
 			}
 		}

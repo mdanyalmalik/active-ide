@@ -113,6 +113,11 @@ describe('walkthrough validation', () => {
 		assert.equal(visual?.type === 'chart' && visual.source, 'illustrative');
 	});
 
+	test('narration may not mention internal tool ids', () => {
+		const result = validateWalkthrough({ title: 'T', summary: 'S', scenes: [scene({ narration: [{ text: 'Tool outcome t31701 shows the tests passed.' }] }), scene({ id: 's2', narration: [{ text: 'Run t31701 passed.' }] })] }, files, new Set(['bridge-coding-x-t5-t31701']));
+		assert.equal(result.errors.length, 2);
+	});
+
 	test('extracts fenced JSON', () => {
 		assert.deepStrictEqual(extractJsonObject('Here:\n```json\n{"a": 1}\n```'), { a: 1 });
 	});
@@ -147,6 +152,20 @@ describe('change tracking', () => {
 		await fs.writeFile(path.join(root, 'a.txt'), 'changed later\n');
 		assert.equal(await tracker.observe('a.txt'), undefined);
 		assert.equal(result?.changes[0].final, 'one\nmore\n');
+	});
+
+	test('an earlier agent turn\'s uncommitted output is not mistaken for user changes', async () => {
+		const root = await tempWorkspace({ 'a.txt': 'base\n' });
+		const tracker = new ChangeTracker(new WorkspaceFiles(root));
+		await tracker.beginTurn('t1');
+		await fs.writeFile(path.join(root, 'a.txt'), 'base\nturn one\n');
+		await tracker.observe('a.txt');
+		await tracker.endTurn();
+		await tracker.beginTurn('t2');
+		await fs.writeFile(path.join(root, 'a.txt'), 'base\nturn one\nturn two\n');
+		await tracker.observe('a.txt');
+		const [net] = (await tracker.endTurn())!.changes;
+		assert.deepStrictEqual([net.added, net.preexistingUserChanges], [1, false]);
 	});
 
 	test('excludes pre-existing user changes from the turn diff', async () => {

@@ -67,8 +67,193 @@
 .monaco-workbench .active-chat {
 	display: flex;
 	flex-direction: column;
+	overflow: hidden;
 	background: var(--vscode-editor-background);
 	color: var(--vscode-foreground);
+}
+
+/* Only the transcript scrolls; the header and the dock stay in place. */
+.monaco-workbench .active-chat-scroll {
+	flex: 1;
+	min-height: 0;
+}
+
+.monaco-workbench .active-chat-content {
+	height: 100%;
+}
+
+.monaco-workbench .active-chat-dock {
+	flex: none;
+	padding: 10px 0 14px;
+	background: var(--vscode-editor-background);
+	box-shadow: 0 -1px 0 var(--active-border);
+}
+
+.monaco-workbench .active-chat-dock-column {
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 0 32px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-header {
+	padding: 0 16px;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-column {
+	padding: 20px 16px 16px;
+	gap: 14px;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-dock-column {
+	padding: 0 16px;
+	gap: 8px;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-intro h1 {
+	font-size: 20px;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-intro .lead,
+.monaco-workbench .active-chat.compact .active-chat-tagline,
+.monaco-workbench .active-chat-intro.compact .active-chat-tagline {
+	display: none;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-composer textarea {
+	min-height: 52px;
+	padding: 10px 14px;
+}
+
+.monaco-workbench .active-chat-header > span {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+.monaco-workbench .active-chat-header .agent-status {
+	flex-shrink: 0;
+}
+
+.monaco-workbench .active-chat-notices .notice-actions {
+	flex-wrap: wrap;
+}
+
+/* Walkthrough heads-up in the dock. */
+.monaco-workbench .active-chat-handoff {
+	display: grid;
+	grid-template-columns: auto 1fr auto;
+	grid-template-areas: 'icon text actions' 'bar bar bar';
+	align-items: center;
+	gap: 6px 12px;
+	padding: 12px 14px 0;
+	border: 1px solid var(--active-accent);
+	border-radius: 6px;
+	background: var(--active-card);
+	overflow: hidden;
+	animation: active-rise 280ms ease-out;
+}
+
+.monaco-workbench .active-chat-handoff.hidden {
+	display: none;
+}
+
+.monaco-workbench .active-chat-handoff .handoff-icon {
+	grid-area: icon;
+	font-size: 20px;
+	color: var(--vscode-textLink-foreground);
+}
+
+.monaco-workbench .active-chat-handoff .handoff-text {
+	grid-area: text;
+	min-width: 0;
+}
+
+.monaco-workbench .active-chat-handoff .handoff-title {
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .active-chat-handoff .handoff-detail {
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-chat-handoff .handoff-actions {
+	grid-area: actions;
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
+.monaco-workbench .active-chat-handoff .handoff-progress {
+	grid-area: bar;
+	height: 3px;
+	margin: 6px -14px 0;
+	background: color-mix(in srgb, var(--active-accent) 18%, transparent);
+}
+
+.monaco-workbench .active-chat-handoff .handoff-progress-bar {
+	height: 100%;
+	width: 100%;
+	background: var(--active-accent);
+	transition: width 1s linear;
+}
+
+.monaco-workbench .active-chat-handoff.paused .handoff-progress-bar {
+	opacity: 0.4;
+}
+
+.monaco-workbench .active-chat.compact .active-chat-handoff {
+	grid-template-columns: auto 1fr;
+	grid-template-areas: 'icon text' 'actions actions' 'bar bar';
+}
+
+.monaco-workbench .active-chat.compact .active-chat-handoff .handoff-actions {
+	justify-content: flex-start;
+}
+
+/* Chat gives way to the walkthrough instead of vanishing. */
+.monaco-workbench .active-chat.entering {
+	animation: active-fade-in 220ms ease-out;
+}
+
+.monaco-workbench .active-chat.leaving {
+	opacity: 0;
+	transform: translateY(-8px);
+	transition: opacity 240ms ease-in, transform 240ms ease-in;
+}
+
+.monaco-workbench .active-walkthrough.entering {
+	animation: active-rise 480ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.monaco-workbench .active-walkthrough.entering .active-explain-card {
+	animation: active-rise 620ms 160ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes active-fade-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+
+@keyframes active-rise {
+	from { opacity: 0; transform: translateY(12px); }
+	to { opacity: 1; transform: none; }
+}
+
+.monaco-workbench.monaco-reduce-motion .active-chat,
+.monaco-workbench.monaco-reduce-motion .active-chat-handoff,
+.monaco-workbench.monaco-reduce-motion .active-walkthrough,
+.monaco-workbench.monaco-reduce-motion .active-explain-card {
+	animation: none !important;
+	transition: none !important;
 }
 
 .monaco-workbench .active-chat-header {
@@ -267,8 +452,24 @@
 }
 
 .monaco-workbench .active-chat-stage {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	font-size: 12px;
 	color: var(--active-muted);
+}
+
+.monaco-workbench .active-chat-stage.preparing {
+	padding: 8px 12px;
+	border: 1px dashed var(--active-accent);
+	border-radius: 6px;
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--active-card) 60%, transparent);
+	animation: active-rise 240ms ease-out;
+}
+
+.monaco-workbench .active-chat-stage.preparing .stage-icon {
+	color: var(--vscode-textLink-foreground);
 }
 
 .monaco-workbench .active-chat-stage.hidden,
@@ -370,6 +571,66 @@
 	flex-direction: column;
 	background: var(--vscode-editor-background);
 	outline: none;
+	container-type: inline-size;
+}
+
+.monaco-workbench .walkthrough-controls button.control,
+.monaco-workbench .walkthrough-crumbs .captured-version {
+	white-space: nowrap;
+}
+
+.monaco-workbench .walkthrough-crumbs .breadcrumbs {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Narrow editor: keep every control reachable on one row. */
+@container (max-width: 680px) {
+	.monaco-workbench .walkthrough-controls {
+		gap: 6px;
+		padding: 6px 10px;
+	}
+	.monaco-workbench .walkthrough-controls .spacer,
+	.monaco-workbench .walkthrough-controls .playback-status,
+	.monaco-workbench .walkthrough-crumbs .captured-version {
+		display: none;
+	}
+	.monaco-workbench .walkthrough-controls button.control {
+		padding: 5px 8px;
+	}
+	.monaco-workbench .walkthrough-controls button.control.primary {
+		min-width: 0;
+		flex: 1;
+	}
+	.monaco-workbench .walkthrough-controls button.open-chat {
+		min-width: 0;
+	}
+	.monaco-workbench .walkthrough-controls .progress {
+		min-width: 0;
+	}
+	.monaco-editor .active-explain-card {
+		padding: 14px 16px 16px;
+	}
+	.monaco-editor .active-explain-card h2.title {
+		font-size: 18px;
+	}
+	.monaco-workbench .walkthrough-crumbs {
+		padding: 6px 12px;
+	}
+}
+
+/* Very narrow editor: play/pause gets its own row, the other controls share the next. */
+@container (max-width: 520px) {
+	.monaco-workbench .walkthrough-controls {
+		flex-wrap: wrap;
+		justify-content: space-between;
+	}
+	.monaco-workbench .walkthrough-controls button.control.primary {
+		order: -1;
+		flex-basis: 100%;
+	}
 }
 
 .monaco-workbench .walkthrough-header {

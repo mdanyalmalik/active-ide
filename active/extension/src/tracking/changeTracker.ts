@@ -56,6 +56,8 @@ export class ChangeTracker {
 	private readonly userTyping = new Map<string, number>();
 	private lastScan = 0;
 	private activeToolItemId: string | undefined;
+	/** What earlier agent turns left in each file, so their uncommitted output isn't mistaken for the user's. */
+	private readonly agentAuthored = new Map<string, string | null>();
 
 	constructor(private readonly files: WorkspaceFiles, private readonly now: () => number = Date.now) { }
 
@@ -97,12 +99,24 @@ export class ChangeTracker {
 		this.lastScan = this.now();
 	}
 
+	/** Records content an agent turn produced (also used to seed from saved history). */
+	noteAgentAuthored(path: string, content: string | null): void {
+		this.agentAuthored.set(path, content);
+	}
+
 	async beginTurn(turnId: string): Promise<void> {
 		await this.refresh();
-		const preexisting = await this.files.uncommittedFiles();
 		const baseline = new Map<string, string | null>();
 		for (const [path, entry] of this.mirror) {
 			baseline.set(path, entry.content);
+		}
+		// Uncommitted changes count as the user's only if they aren't exactly what an earlier agent turn left.
+		const preexisting = new Set<string>();
+		for (const path of await this.files.uncommittedFiles()) {
+			const authored = this.agentAuthored.get(path);
+			if (authored === undefined || authored !== (baseline.get(path) ?? null)) {
+				preexisting.add(path);
+			}
 		}
 		this.turn = new TurnLog(turnId, baseline, preexisting);
 		this.activeToolItemId = undefined;
@@ -116,7 +130,13 @@ export class ChangeTracker {
 		}
 		await this.rescan();
 		this.turn = undefined;
-		return { edits: turn.edits, changes: turn.netChanges() };
+		const changes = turn.netChanges();
+		for (const change of changes) {
+			if (!change.userOnly) {
+				this.agentAuthored.set(change.path, change.final);
+			}
+		}
+		return { edits: turn.edits, changes };
 	}
 
 	setActiveTool(itemId: string | undefined): void {

@@ -46,10 +46,25 @@ interface LogicalTurn {
 	stage: WalkthroughStage;
 }
 
-function signatureOf(changes: readonly NetFileChange[]): string {
+/**
+ * Identifies everything a walkthrough plan is based on: the captured files and the
+ * evidence the planner sees (tool outcomes, agent messages, reasoning summaries).
+ * A draft is reused only when none of it changed; a test run after the draft that
+ * touched no tracked file must still reach the walkthrough.
+ */
+function signatureOf(changes: readonly NetFileChange[], turn: LogicalTurn): string {
 	const hash = createHash('sha1');
 	for (const change of changes) {
 		hash.update(change.path).update('\0').update(change.final ?? '\u0001').update('\0');
+	}
+	for (const tool of turn.tools.values()) {
+		hash.update(`tool:${tool.id}:${tool.status}:${tool.output?.length ?? 0}\0`);
+	}
+	for (const message of turn.agentMessages.values()) {
+		hash.update(`message:${message}\0`);
+	}
+	for (const parts of turn.reasoning.values()) {
+		hash.update(`reasoning:${parts.join('\n')}\0`);
 	}
 	return hash.digest('hex');
 }
@@ -179,7 +194,14 @@ export class ActiveController implements AgentSessionListener {
 	private async doConnect(): Promise<void> {
 		this.setStatus('starting');
 		try {
-			this.turnCounter = (await this.history.list()).reduce((max, turn) => Math.max(max, turn.index), 0);
+			const history = await this.history.list();
+			this.turnCounter = history.reduce((max, turn) => Math.max(max, turn.index), 0);
+			// Remember what earlier agent turns wrote, oldest first so the latest content wins.
+			for (const summary of [...history].reverse()) {
+				for (const file of (await this.history.get(summary.turnId))?.files ?? []) {
+					this.tracker.noteAgentAuthored(file.path, file.final);
+				}
+			}
 			await this.tracker.refresh();
 			this.codingHost = await this.options.startCodingHost();
 			this.coding = await this.codingHost.startSession({ workspaceRoot: this.options.workspaceRoot, readOnly: false, listener: this });
@@ -340,7 +362,7 @@ export class ActiveController implements AgentSessionListener {
 
 	private async draft(turn: LogicalTurn): Promise<void> {
 		const changes = this.tracker.currentNetChanges();
-		const signature = signatureOf(changes);
+		const signature = signatureOf(changes, turn);
 		if (turn.draft?.signature === signature) {
 			return;
 		}
@@ -632,7 +654,7 @@ export class ActiveController implements AgentSessionListener {
 
 	private async finalizeWalkthrough(turn: LogicalTurn, files: Record<string, CapturedFile>, changes: readonly NetFileChange[], pending: readonly PendingCheck[]): Promise<Walkthrough | undefined> {
 		await turn.drafting?.catch(() => undefined);
-		const signature = signatureOf(changes);
+		const signature = signatureOf(changes, turn);
 		const evidence = new Set(turn.tools.keys());
 		let result;
 		if (turn.draft && turn.draft.signature === signature && pending.length === 0) {

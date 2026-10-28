@@ -8,6 +8,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { BridgeHost } from './agents/bridgeHost';
 import { locateMuse, MuseHost } from './agents/museHost';
 import { ActiveController } from './controller';
 import { HistoryStore, ProfileStore } from './history/historyStore';
@@ -85,6 +86,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const history = new HistoryStore(path.join(storage, 'history', workspaceKey));
 
 	const startHost = async (cwd: string) => {
+		if (config<string>('dev.agentBackend', 'muse') === 'bridge') {
+			// DEV ONLY: sessions served by external agents through a mailbox directory.
+			const bridgeDir = config<string>('dev.bridgeDir', '') || path.join(storage, 'bridge', workspaceKey);
+			log(`dev bridge backend at ${bridgeDir}`);
+			return new BridgeHost(bridgeDir, cwd === root ? 'coding' : 'explanation');
+		}
 		const muse = locateMuse(config<string>('muse.binaryPath', '') || undefined);
 		if (!muse) {
 			throw new Error(`Muse Code CLI not found. ${INSTALL_HINT}`);

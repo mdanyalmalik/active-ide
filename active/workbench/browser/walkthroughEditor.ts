@@ -204,6 +204,10 @@ export class WalkthroughEditor extends EditorPane {
 
 	override async setInput(input: WalkthroughInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
+		// Ease the walkthrough in rather than swapping it in abruptly.
+		this.root.classList.remove('entering');
+		void this.root.offsetWidth;
+		this.root.classList.add('entering');
 		this.inputStore.clear();
 		this.renderedScene = -1;
 		this.renderedSegment = -1;
