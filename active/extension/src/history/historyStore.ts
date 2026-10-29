@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import type { CapturedFile, ChatEntry, HistoryDetail, ToolOutcome, TurnSummary, Walkthrough } from '../shared/activeProtocol';
+import type { CapturedFile, ChatEntry, HistoryDetail, PendingCheck, ToolOutcome, TurnSummary, Walkthrough } from '../shared/activeProtocol';
 
 interface StoredEdit {
 	readonly seq: number;
@@ -111,6 +111,18 @@ export class HistoryStore {
 		const record: TurnRecord = { summary: input.summary, chat: input.chat, reasoningSummaries: input.reasoningSummaries, tools: input.tools, edits, files, walkthrough, worthiness: input.worthiness };
 		const target = path.join(this.turnsDir, `${input.summary.turnId}.json`);
 		await fs.writeFile(`${target}.tmp`, JSON.stringify(record), 'utf8');
+		await fs.rename(`${target}.tmp`, target);
+	}
+
+	/** Records how a background check that was pending when the walkthrough was made turned out. */
+	async updatePendingCheck(turnId: string, check: PendingCheck): Promise<void> {
+		const record = await this.readRecord(turnId);
+		if (!record?.walkthrough) {
+			return;
+		}
+		const updated: TurnRecord = { ...record, walkthrough: { ...record.walkthrough, pending: record.walkthrough.pending.map(candidate => candidate.id === check.id ? check : candidate) } };
+		const target = path.join(this.turnsDir, `${path.basename(turnId)}.json`);
+		await fs.writeFile(`${target}.tmp`, JSON.stringify(updated), 'utf8');
 		await fs.rename(`${target}.tmp`, target);
 	}
 

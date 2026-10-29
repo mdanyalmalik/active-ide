@@ -6,10 +6,10 @@
 import { createHash } from 'node:crypto';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
 import { ExplanationAgent, WalkthroughPlanner } from './explain/planner';
-import { buildQuestionPrompt } from './explain/prompts';
+import { buildElaborationPrompt, buildQuestionPrompt } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import { HistoryStore } from './history/historyStore';
-import type { ActiveEvent, AgentState, AgentStatus, AskRequest, CapturedFile, ChatEntry, InitialState, LearningProfile, PendingCheck, ToolOutcome, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
+import type { ActiveEvent, AgentProviderInfo, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, LearningProfile, PendingCheck, ToolOutcome, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 
 export interface ControllerOptions {
@@ -20,6 +20,15 @@ export interface ControllerOptions {
 	readonly profile: () => LearningProfile;
 	readonly emit: (event: ActiveEvent) => void;
 	readonly log: (line: string) => void;
+	/** The coding agent platform in use (Muse Code by default). */
+	readonly provider: AgentProviderInfo;
+	/** First-run setup: whether the agent still needs installing or signing in, and its current state. */
+	readonly needsSetup: () => boolean;
+	readonly setupState: () => SetupState | undefined;
+	readonly isAuthFailure: (errorKind: string | undefined, message: string | undefined) => boolean;
+	readonly onAuthRequired: (reason: string | undefined) => void;
+	/** How the user is signed in, when known without a model call (e.g. "API key"). */
+	readonly accountHint: () => Promise<string | undefined>;
 	/** Starts the coding agent host; throws with a human-readable blocker when unavailable. */
 	readonly startCodingHost: () => Promise<AgentHost>;
 	readonly startExplanationHost: () => Promise<AgentHost>;
@@ -120,6 +129,8 @@ export class ActiveController implements AgentSessionListener {
 	private readonly itemEntries = new Map<string, string>();
 	private backgroundTasks = 0;
 	private pendingWalkthrough: Walkthrough | undefined;
+	/** Background checks that were still running when their walkthrough was prepared, by task id. */
+	private readonly openChecks = new Map<string, { turnId: string; walkthroughId?: string; check: PendingCheck; result?: PendingCheck['state'] }>();
 	private readonly walkthroughs = new Map<string, Walkthrough>();
 	private connecting: Promise<void> | undefined;
 	private turnCounter = 0;
@@ -134,8 +145,38 @@ export class ActiveController implements AgentSessionListener {
 
 	// ---------------------------------------------------------------- state
 
+	private account: string | undefined;
+
 	private agentState(): AgentState {
-		return { status: this.status, blocker: this.blocker, workspaceName: this.options.workspaceName, sessionId: this.coding?.sessionId, host: this.codingHost?.description, backgroundTasks: this.backgroundTasks };
+		return {
+			status: this.status,
+			provider: this.options.provider,
+			setup: this.options.setupState(),
+			account: this.account,
+			blocker: this.blocker,
+			workspaceName: this.options.workspaceName,
+			sessionId: this.coding?.sessionId,
+			host: this.codingHost?.description,
+			backgroundTasks: this.backgroundTasks,
+		};
+	}
+
+	/** Re-sends the agent state (for example after setup progress). */
+	refreshAgentState(): void {
+		this.options.emit({ type: 'agent', agent: this.agentState() });
+	}
+
+	/** Restarts the agent hosts, e.g. after installing or signing in. */
+	async reconnect(): Promise<void> {
+		const hosts = [this.codingHost, this.explanationHost];
+		this.coding = undefined;
+		this.codingHost = undefined;
+		this.explanationHost = undefined;
+		this.explainer.reset();
+		for (const host of hosts) {
+			await host?.dispose().catch(() => undefined);
+		}
+		await this.connect();
 	}
 
 	private setStatus(status: AgentStatus, blocker?: string): void {
@@ -203,14 +244,23 @@ export class ActiveController implements AgentSessionListener {
 				}
 			}
 			await this.tracker.refresh();
+			if (this.options.needsSetup()) {
+				this.setStatus('unavailable', `Set up ${this.options.provider.name} to start.`);
+				return;
+			}
 			this.codingHost = await this.options.startCodingHost();
 			this.coding = await this.codingHost.startSession({ workspaceRoot: this.options.workspaceRoot, readOnly: false, listener: this });
 			this.options.log(`coding session ${this.coding.sessionId} on ${this.codingHost.description}`);
-			void this.codingHost.exited.then(reason => {
+			const host = this.codingHost;
+			void host.exited.then(reason => {
+				if (this.codingHost !== host) {
+					return; // replaced by a reconnect
+				}
 				this.coding = undefined;
 				this.codingHost = undefined;
 				this.setStatus('unavailable', reason);
 			});
+			this.account = (await this.coding.accountSummary?.().catch(() => undefined)) ?? await this.options.accountHint();
 			this.setStatus('idle');
 		} catch (error) {
 			this.coding = undefined;
@@ -229,7 +279,7 @@ export class ActiveController implements AgentSessionListener {
 			await this.connect();
 		}
 		if (!this.coding) {
-			this.system(`Muse Code is not available: ${this.blocker ?? 'unknown error'}`);
+			this.system(`${this.options.provider.name} is not available: ${this.blocker ?? 'unknown error'}`);
 			return;
 		}
 		if (this.turn && !this.turn.codingDone) {
@@ -269,7 +319,7 @@ export class ActiveController implements AgentSessionListener {
 				const protocolTurn = await this.coding!.startTurn(task);
 				turn.protocolTurns.add(protocolTurn);
 			} catch (error) {
-				this.system(`Muse Code rejected the task: ${error instanceof Error ? error.message : String(error)}`, turn.id);
+				this.system(`${this.options.provider.name} rejected the task: ${error instanceof Error ? error.message : String(error)}`, turn.id);
 				await this.finishCoding(turn, 'failed');
 			}
 		}
@@ -294,6 +344,22 @@ export class ActiveController implements AgentSessionListener {
 			update(reply, 'done');
 		} catch (error) {
 			update(`The explanation session could not answer: ${error instanceof Error ? error.message : String(error)}`, 'error');
+		}
+	}
+
+	/** Re-explains one scene in more depth through the read-only explanation session, streaming the text back. */
+	async elaborate(request: ElaborateRequest): Promise<void> {
+		const emit = (text: string, status: 'streaming' | 'done' | 'error') => this.options.emit({ type: 'elaboration', requestId: request.requestId, text, status });
+		try {
+			const walkthrough = this.walkthroughs.get(request.walkthroughId) ?? (await this.loadWalkthrough(request.walkthroughId));
+			if (!walkthrough) {
+				throw new Error('that walkthrough is no longer in history');
+			}
+			await this.syncExplanationWorkspace(walkthrough);
+			const reply = await this.explainer.ask(buildElaborationPrompt(walkthrough, request.sceneId, this.options.profile()), text => emit(text, 'streaming'));
+			emit(reply, 'done');
+		} catch (error) {
+			emit(`Couldn't get a deeper explanation: ${error instanceof Error ? error.message : String(error)}`, 'error');
 		}
 	}
 
@@ -366,7 +432,7 @@ export class ActiveController implements AgentSessionListener {
 		if (turn.draft?.signature === signature) {
 			return;
 		}
-		this.setStage(turn, 'drafting', 'Drafting the walkthrough while Muse Code works');
+		this.setStage(turn, 'drafting', `Drafting the walkthrough while ${this.options.provider.name} works`);
 		try {
 			await this.syncExplanationWorkspace();
 			const result = await this.planner.plan(await this.planningContext(turn, changes, [], false), turn.draft?.draft);
@@ -455,6 +521,9 @@ export class ActiveController implements AgentSessionListener {
 				if (item.status === 'inProgress' && !item.background) {
 					this.tracker.setActiveTool(item.id);
 				}
+				if (completed && item.background) {
+					this.resolveCheck([item.id], command, item.status);
+				}
 				if (completed || item.background) {
 					void this.tracker.rescan().then(edits => this.afterEdits(edits));
 					if (completed && turn && item.outputRef && !item.output) {
@@ -470,6 +539,9 @@ export class ActiveController implements AgentSessionListener {
 			}
 			case 'backgroundTerminalCompletion': {
 				const completion = item.backgroundCompletion;
+				if (completion) {
+					this.resolveCheck([completion.toolCallId, item.id], completion.command, completion.terminalStatus);
+				}
 				if (completion && turn) {
 					for (const [id, tool] of turn.tools) {
 						if (tool.background && (tool.command === completion.command || id === completion.toolCallId)) {
@@ -532,13 +604,16 @@ export class ActiveController implements AgentSessionListener {
 		}
 	}
 
-	onTurnCompleted(protocolTurnId: string, terminal: string, error?: string): void {
+	onTurnCompleted(protocolTurnId: string, terminal: string, error?: string, errorKind?: string): void {
 		const turn = this.turn;
 		if (!turn || !turn.protocolTurns.has(protocolTurnId) || turn.codingDone) {
 			return;
 		}
-		if (error) {
-			this.system(`Muse Code: ${error}`, turn.id);
+		if (terminal === 'failed' && this.options.isAuthFailure(errorKind, error)) {
+			this.system(`${this.options.provider.name} needs you to sign in before it can work on this.`, turn.id);
+			this.options.onAuthRequired(error);
+		} else if (error) {
+			this.system(`${this.options.provider.name}: ${error}`, turn.id);
 		}
 		void this.finishCoding(turn, terminal);
 	}
@@ -578,6 +653,9 @@ export class ActiveController implements AgentSessionListener {
 				void this.beginLogicalTurn(next);
 			}
 			const pending = await this.waitForBackground(turn);
+			for (const check of pending) {
+				this.openChecks.set(check.id, { turnId: turn.id, check });
+			}
 			this.setStage(turn, 'finalizing', 'Reconciling the explanation with the final changes');
 			try {
 				walkthrough = await this.finalizeWalkthrough(turn, files, changes, pending);
@@ -618,12 +696,60 @@ export class ActiveController implements AgentSessionListener {
 			this.pendingWalkthrough = walkthrough;
 			this.options.emit({ type: 'walkthroughReady', walkthrough });
 		}
+		for (const [taskId, open] of this.openChecks) {
+			if (open.turnId !== turn.id) {
+				continue;
+			}
+			if (!walkthrough) {
+				this.openChecks.delete(taskId);
+				continue;
+			}
+			open.walkthroughId = walkthrough.id;
+			if (open.result) {
+				// The task finished while the walkthrough was being written.
+				void this.settleCheck(taskId, open.result);
+			}
+		}
 		if (this.turn === turn) {
 			this.turn = undefined;
 		}
 		if (next && !verdict.worthy) {
 			await this.beginLogicalTurn(next);
 		}
+	}
+
+	/** A background task reported back: mark its pending check finished or failed. */
+	private resolveCheck(ids: ReadonlyArray<string | undefined>, command: string | undefined, status: string | undefined): void {
+		const state: PendingCheck['state'] = /fail|error|cancel|interrupt|kill/i.test(status ?? '') ? 'failed' : 'finished';
+		for (const [taskId, open] of this.openChecks) {
+			if (ids.includes(taskId) || (command && open.check.label === command)) {
+				if (open.walkthroughId) {
+					void this.settleCheck(taskId, state);
+				} else {
+					open.result = state;
+				}
+				return;
+			}
+		}
+	}
+
+	private async settleCheck(taskId: string, state: PendingCheck['state']): Promise<void> {
+		const open = this.openChecks.get(taskId);
+		if (!open?.walkthroughId) {
+			return;
+		}
+		this.openChecks.delete(taskId);
+		const check: PendingCheck = { ...open.check, state };
+		const walkthrough = this.walkthroughs.get(open.walkthroughId);
+		if (walkthrough) {
+			const updated: Walkthrough = { ...walkthrough, pending: walkthrough.pending.map(candidate => candidate.id === taskId ? check : candidate) };
+			this.walkthroughs.set(updated.id, updated);
+			if (this.pendingWalkthrough?.id === updated.id) {
+				this.pendingWalkthrough = updated;
+			}
+		}
+		await this.history.updatePendingCheck(open.turnId, check).catch(error => this.options.log(`history update failed: ${error}`));
+		this.options.emit({ type: 'checkUpdate', walkthroughId: open.walkthroughId, check });
 	}
 
 	/** Waits up to the configured timeout for background tasks; unfinished ones become pending checks. They keep running. */

@@ -298,6 +298,16 @@
 	background: var(--vscode-editorError-foreground);
 }
 
+.monaco-workbench .active-chat-header .agent-status.setup::before {
+	content: '';
+	display: inline-block;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	margin-right: 6px;
+	background: var(--vscode-editorWarning-foreground);
+}
+
 .monaco-workbench .active-chat-column {
 	max-width: 760px;
 	margin: 0 auto;
@@ -638,15 +648,53 @@
 	border-bottom: 1px solid var(--active-border);
 }
 
-.monaco-workbench .walkthrough-files {
+.monaco-workbench .walkthrough-top {
 	display: flex;
-	gap: 2px;
-	padding: 0 12px;
+	align-items: stretch;
 	background: var(--vscode-editorGroupHeader-tabsBackground);
 }
 
-.monaco-workbench .walkthrough-files:empty {
-	display: none;
+.monaco-workbench .walkthrough-files {
+	display: flex;
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	gap: 2px;
+	padding: 0 12px;
+}
+
+/* History and Open File: panel-wide actions at the top right. */
+.monaco-workbench .walkthrough-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 10px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .walkthrough-actions .walkthrough-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 9px !important;
+	font-size: 12px !important;
+	border-radius: 4px !important;
+	border: 1px solid transparent !important;
+	background: transparent !important;
+	color: var(--vscode-foreground) !important;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.monaco-workbench .walkthrough-actions .walkthrough-action:hover {
+	background: var(--vscode-toolbar-hoverBackground) !important;
+	border-color: var(--active-border) !important;
+}
+
+@container (max-width: 680px) {
+	.monaco-workbench .walkthrough-actions .walkthrough-action .label {
+		display: none;
+	}
 }
 
 .monaco-workbench .walkthrough-file-tab {
@@ -759,7 +807,10 @@
 	align-items: center;
 }
 
-.monaco-editor .active-explain-card .open-file {
+.monaco-editor .active-explain-card .more-detail {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
 	font-family: inherit;
 	font-size: 13px;
 	padding: 4px 12px;
@@ -770,7 +821,7 @@
 	border-radius: 3px;
 }
 
-.monaco-editor .active-explain-card .open-file:hover {
+.monaco-editor .active-explain-card .more-detail:hover {
 	border-color: var(--active-accent);
 }
 
@@ -833,6 +884,82 @@
 	border-radius: 10px;
 	border: 1px solid var(--vscode-editorWarning-foreground);
 	color: var(--vscode-editorWarning-foreground);
+	transition: color 300ms ease, border-color 300ms ease;
+}
+
+.monaco-editor .active-explain-card .pending-pill.finished {
+	border-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+	color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+
+.monaco-editor .active-explain-card .pending-pill.failed {
+	border-color: var(--vscode-errorForeground);
+	color: var(--vscode-errorForeground);
+}
+
+.monaco-editor .active-explain-card .pending.hidden,
+.monaco-editor .active-explain-card .deeper.hidden {
+	display: none;
+}
+
+/* "More detail": a deeper pass over the current scene */
+.monaco-editor .active-explain-card .deeper {
+	margin-top: 16px;
+	padding: 14px 16px;
+	border-left: 3px solid var(--active-accent);
+	border-radius: 0 6px 6px 0;
+	background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+	animation: active-deeper-in 220ms ease-out;
+}
+
+@keyframes active-deeper-in {
+	from { opacity: 0; transform: translateY(-4px); }
+	to { opacity: 1; transform: none; }
+}
+
+.monaco-editor .active-explain-card .deeper-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--active-muted);
+}
+
+.monaco-editor .active-explain-card .deeper-body p {
+	font-size: 14px;
+	line-height: 1.6;
+	margin: 10px 0 0;
+	max-width: 80ch;
+}
+
+.monaco-editor .active-explain-card .deeper-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+.monaco-editor .active-explain-card .deeper-actions button {
+	font-family: inherit;
+	font-size: 12px;
+	padding: 4px 12px;
+	border-radius: 3px;
+	cursor: pointer;
+	border: 1px solid var(--active-border);
+	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+}
+
+.monaco-editor .active-explain-card .deeper-actions button.primary {
+	border-color: transparent;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.monaco-editor .active-explain-card .deeper-actions button.primary:hover {
+	background: var(--vscode-button-hoverBackground);
 }
 
 /* visuals */
@@ -1320,4 +1447,468 @@
 .monaco-workbench .active-session-view .status {
 	color: var(--active-muted);
 	font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ agent setup */
+
+.monaco-workbench .active-setup {
+	border: 1px solid var(--active-border);
+	border-radius: 10px;
+	background: linear-gradient(180deg, var(--active-card), var(--active-surface) 70%);
+	padding: 22px 24px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+	animation: active-rise 320ms ease-out;
+}
+
+.monaco-workbench .active-setup .setup-head {
+	display: flex;
+	gap: 14px;
+	align-items: flex-start;
+}
+
+.monaco-workbench .active-setup .setup-mark {
+	font-size: 22px;
+	color: var(--vscode-textLink-foreground);
+	background: color-mix(in srgb, var(--vscode-textLink-foreground) 14%, transparent);
+	border-radius: 10px;
+	padding: 8px;
+}
+
+.monaco-workbench .active-setup h2 {
+	margin: 0 0 4px;
+	font-size: 18px;
+	font-weight: 500;
+}
+
+.monaco-workbench .active-setup .setup-titles p,
+.monaco-workbench .active-setup .setup-text {
+	margin: 0;
+	color: var(--active-muted);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.monaco-workbench .active-setup .setup-steps {
+	display: flex;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	gap: 8px;
+	align-items: center;
+}
+
+.monaco-workbench .active-setup .setup-steps li {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--active-muted);
+	font-size: 12px;
+	flex: 1;
+}
+
+.monaco-workbench .active-setup .setup-steps li:not(:last-child)::after {
+	content: '';
+	flex: 1;
+	height: 1px;
+	background: var(--active-border);
+	margin-left: 4px;
+}
+
+.monaco-workbench .active-setup .setup-steps li.done:not(:last-child)::after {
+	background: var(--active-accent);
+}
+
+.monaco-workbench .active-setup .setup-steps .bullet {
+	width: 22px;
+	height: 22px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--active-border);
+	font-size: 11px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .active-setup .setup-steps li.current {
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-setup .setup-steps li.current .bullet {
+	border-color: var(--active-accent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--active-accent) 22%, transparent);
+}
+
+.monaco-workbench .active-setup .setup-steps li.done .bullet {
+	background: var(--active-accent);
+	border-color: var(--active-accent);
+	color: var(--vscode-button-foreground);
+}
+
+.monaco-workbench .active-setup .setup-body {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.monaco-workbench .active-setup .setup-command {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 12px;
+	border-radius: 6px;
+	background: var(--vscode-textCodeBlock-background);
+	font-size: 12px;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .active-setup .setup-command code {
+	font-family: var(--monaco-monospace-font);
+	flex: 1;
+	min-width: 0;
+	word-break: break-all;
+}
+
+.monaco-workbench .active-setup .setup-code {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .active-setup .setup-code code {
+	font-family: var(--monaco-monospace-font);
+	font-size: 18px;
+	font-weight: 600;
+	letter-spacing: 0.12em;
+	padding: 6px 12px;
+	border-radius: 6px;
+	color: var(--vscode-foreground);
+	background: var(--vscode-textCodeBlock-background);
+	user-select: all;
+}
+
+.monaco-workbench .active-setup .setup-link {
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.monaco-workbench .active-setup .setup-link:hover {
+	text-decoration: underline;
+}
+
+.monaco-workbench .active-setup .setup-actions {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .active-setup button.link {
+	color: var(--active-muted);
+	padding-left: 4px;
+	padding-right: 4px;
+}
+
+.monaco-workbench .active-setup button.link:hover {
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-setup .setup-progress {
+	height: 4px;
+	border-radius: 2px;
+	overflow: hidden;
+	background: color-mix(in srgb, var(--active-accent) 16%, transparent);
+	position: relative;
+}
+
+.monaco-workbench .active-setup .setup-progress-bar.indeterminate {
+	position: absolute;
+	inset: 0 auto 0 0;
+	width: 35%;
+	border-radius: 2px;
+	background: var(--active-accent);
+	animation: active-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes active-indeterminate {
+	from { transform: translateX(-100%); }
+	to { transform: translateX(300%); }
+}
+
+.monaco-workbench .active-setup .setup-status {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 13px;
+}
+
+.monaco-workbench .active-setup .setup-status .setup-icon {
+	color: var(--vscode-textLink-foreground);
+}
+
+.monaco-workbench .active-setup .setup-status.error .setup-icon {
+	color: var(--vscode-editorError-foreground);
+}
+
+.monaco-workbench .active-setup .setup-status.success {
+	font-size: 15px;
+}
+
+.monaco-workbench .active-setup .setup-status.success .setup-icon {
+	color: var(--active-added);
+	font-size: 18px;
+}
+
+.monaco-workbench .active-setup .setup-log {
+	max-height: 160px;
+	overflow: auto;
+	margin: 0;
+	padding: 10px 12px;
+	border-radius: 6px;
+	background: var(--vscode-textCodeBlock-background);
+	font-family: var(--monaco-monospace-font);
+	font-size: 11px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-setup .setup-question {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 500;
+}
+
+.monaco-workbench .active-setup .setup-choices {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	gap: 10px;
+}
+
+.monaco-workbench .active-setup button.setup-choice {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	text-align: left;
+	padding: 14px 14px;
+	border: 1px solid var(--active-border);
+	border-radius: 8px;
+	background: var(--vscode-editor-background);
+	transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+
+.monaco-workbench .active-setup button.setup-choice:hover:not(:disabled),
+.monaco-workbench .active-setup button.setup-choice:focus-visible {
+	border-color: var(--active-accent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--active-accent) 18%, transparent);
+	transform: translateY(-1px);
+}
+
+.monaco-workbench .active-setup button.setup-choice:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.monaco-workbench .active-setup .setup-choice > .setup-icon:first-child {
+	font-size: 22px;
+	color: var(--vscode-textLink-foreground);
+}
+
+.monaco-workbench .active-setup .choice-text {
+	flex: 1;
+	min-width: 0;
+}
+
+.monaco-workbench .active-setup .choice-label {
+	font-weight: 600;
+	margin-bottom: 2px;
+}
+
+.monaco-workbench .active-setup .choice-description {
+	font-size: 12px;
+	color: var(--active-muted);
+	line-height: 1.4;
+}
+
+.monaco-workbench .active-setup .choice-go {
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-setup .setup-key-row {
+	display: flex;
+	gap: 8px;
+}
+
+.monaco-workbench .active-setup input.setup-key {
+	flex: 1;
+	min-width: 0;
+	padding: 7px 10px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-input-border, var(--active-border));
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font-family: var(--monaco-monospace-font);
+}
+
+.monaco-workbench .active-setup input.setup-key:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+}
+
+.monaco-workbench .active-setup .setup-help,
+.monaco-workbench .active-setup .setup-back {
+	font-size: 12px;
+}
+
+.monaco-workbench .active-chat-header .agent-account {
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench.monaco-reduce-motion .active-setup,
+.monaco-workbench.monaco-reduce-motion .active-setup .setup-progress-bar {
+	animation: none !important;
+}
+
+
+/* ------------------------------------------------------------------ detail feedback */
+
+.monaco-workbench .active-walkthrough {
+	position: relative;
+}
+
+.monaco-workbench .active-walkthrough .detail-feedback {
+	position: absolute;
+	left: 50%;
+	bottom: 64px;
+	transform: translateX(-50%);
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px 14px;
+	max-width: calc(100% - 32px);
+	padding: 12px 14px 12px 18px;
+	border-radius: 8px;
+	border: 1px solid var(--active-border);
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+	box-shadow: 0 6px 24px var(--vscode-widget-shadow);
+	animation: active-feedback-in 240ms ease-out;
+}
+
+@keyframes active-feedback-in {
+	from { opacity: 0; transform: translate(-50%, 8px); }
+	to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.monaco-workbench .active-walkthrough .detail-feedback .feedback-question {
+	font-size: 13px;
+}
+
+.monaco-workbench .active-walkthrough .detail-feedback .feedback-options {
+	display: flex;
+	gap: 6px;
+}
+
+.monaco-workbench .active-walkthrough .detail-feedback .feedback-thanks {
+	font-size: 13px;
+	padding-right: 8px;
+}
+
+.monaco-workbench .active-walkthrough .detail-feedback .feedback-dismiss {
+	background: transparent !important;
+	border: none !important;
+	color: var(--active-muted) !important;
+	padding: 2px !important;
+	cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ floating buttons */
+
+.monaco-workbench .active-fab-stack {
+	position: absolute;
+	right: 20px;
+	bottom: 20px;
+	z-index: 30;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 8px;
+	pointer-events: none;
+	transition: bottom 200ms ease;
+}
+
+.monaco-workbench .active-fab-stack.over-walkthrough {
+	bottom: 68px;
+}
+
+.monaco-workbench .active-fab {
+	pointer-events: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 14px 8px 12px;
+	border-radius: 20px;
+	border: 1px solid var(--active-border);
+	background: var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	font-family: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+	transition: transform 120ms ease, background 120ms ease, opacity 160ms ease;
+	animation: active-fab-in 200ms ease-out;
+}
+
+.monaco-workbench .active-fab:hover {
+	transform: translateY(-1px);
+	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+.monaco-workbench .active-fab.primary {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border-color: transparent;
+}
+
+.monaco-workbench .active-fab.primary:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.monaco-workbench .active-fab.hidden {
+	display: none;
+}
+
+@keyframes active-fab-in {
+	from { opacity: 0; transform: translateY(6px); }
+	to { opacity: 1; transform: none; }
+}
+
+.monaco-reduce-motion .active-fab,
+.monaco-reduce-motion .active-walkthrough .detail-feedback,
+.monaco-reduce-motion .active-explain-card .deeper {
+	animation: none;
+}
+
+/* ------------------------------------------------------------------ learning profile */
+
+.monaco-workbench .active-profile {
+	overflow-y: auto;
+	overflow-x: hidden;
+}
+
+.monaco-workbench .active-profile-form .help.learned {
+	margin-top: 8px;
+	font-style: italic;
+}
+
+.monaco-workbench .active-profile-form select.voice-select {
+	min-width: 180px;
 }

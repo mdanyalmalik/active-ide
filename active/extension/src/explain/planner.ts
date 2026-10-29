@@ -29,6 +29,12 @@ export class ExplanationAgent {
 
 	constructor(private readonly openSession: (listener: ExplanationAgent) => Promise<AgentSession>, readonly workspace: string) { }
 
+	/** Forgets the session (after a reconnect the old host is gone). */
+	reset(): void {
+		this.session = undefined;
+		this.queue = Promise.resolve();
+	}
+
 	private async ensureSession(): Promise<AgentSession> {
 		this.session ??= await this.openSession(this);
 		return this.session;

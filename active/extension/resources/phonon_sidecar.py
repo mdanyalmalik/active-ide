@@ -36,11 +36,14 @@ def main():
     except Exception as error:  # noqa: BLE001 - reported to the extension verbatim
         print(json.dumps({"ready": False, "error": f"{type(error).__name__}: {error}"}), flush=True)
         return 1
-    voices = []
+    voices = [{"name": "default", "description": "Phonon's built-in voice"}]
     try:
-        voices = list(tts.voices() if callable(tts.voices) else tts.voices)
-    except Exception:  # noqa: BLE001
-        pass
+        # English voices from the Phonon voice catalog; each downloads on first use.
+        for entry in ptts.catalog_voices():
+            if entry.get("language") == "en" and entry.get("name"):
+                voices.append({"name": entry["name"], "description": entry.get("description") or ""})
+    except Exception as error:  # noqa: BLE001 - the built-in voice still works offline
+        print(f"voice catalog unavailable: {error}", file=sys.stderr, flush=True)
     print(json.dumps({"ready": True, "sampleRate": tts.sample_rate, "voices": voices, "model": "phonon-31m-en"}), flush=True)
     for line in sys.stdin:
         line = line.strip()

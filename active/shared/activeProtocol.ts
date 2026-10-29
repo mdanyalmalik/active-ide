@@ -24,16 +24,25 @@ export interface LearningProfile {
 	readonly background: string;
 	readonly yearsProgramming: number;
 	readonly languages: ReadonlyArray<{ readonly name: string; readonly familiarity: Familiarity }>;
-	readonly concepts: ReadonlyArray<{ readonly name: string; readonly familiarity: Familiarity }>;
+	readonly concepts: ReadonlyArray<ConceptKnowledge>;
 	readonly wantToLearn: string;
 	readonly glossOver: string;
 	readonly depth: ExplanationDepth;
+	/** Fine-tuning within `depth` learned from feedback: -1 (less detail) to 1 (more detail). */
+	readonly detailBias: number;
 	readonly math: MathComfort;
 	readonly preferredVisuals: ReadonlyArray<VisualKind>;
 	/** Narration playback rate, 0.75–1.75. */
 	readonly narrationRate: number;
 	readonly voice: string;
 	readonly notes: string;
+}
+
+export interface ConceptKnowledge {
+	readonly name: string;
+	readonly familiarity: Familiarity;
+	/** Continuous level behind `familiarity` (0 new … 3 expert), nudged by feedback. */
+	readonly level?: number;
 }
 
 export const DEFAULT_PROFILE: LearningProfile = {
@@ -46,12 +55,61 @@ export const DEFAULT_PROFILE: LearningProfile = {
 	wantToLearn: '',
 	glossOver: '',
 	depth: 'balanced',
+	detailBias: 0,
 	math: 'light',
 	preferredVisuals: ['code', 'diff', 'diagram', 'equation', 'chart'],
 	narrationRate: 1,
 	voice: 'default',
 	notes: '',
 };
+
+export type DetailFeedback = 'tooMuch' | 'right' | 'tooLittle';
+
+const FAMILIARITY_ORDER: readonly Familiarity[] = ['new', 'some', 'comfortable', 'expert'];
+const DEPTH_ORDER: readonly ExplanationDepth[] = ['overview', 'balanced', 'deep'];
+/** How far one answer moves the general detail preference (a full step is 1). */
+export const DETAIL_FEEDBACK_STEP = 0.2;
+/** How far one answer moves knowledge of the walkthrough's topics (a familiarity step is 1). */
+export const TOPIC_FEEDBACK_STEP = 0.5;
+
+/**
+ * Applies "was that too much / about right / too little detail?" to the profile:
+ * the general detail preference moves slightly, and knowledge of the topics the
+ * explanation covered moves more (too much detail suggests the learner already
+ * knows them better than assumed). Crossing a full step changes `depth`.
+ */
+export function applyDetailFeedback(profile: LearningProfile, feedback: DetailFeedback, topics: readonly string[]): LearningProfile {
+	if (feedback === 'right') {
+		// Confirms the current setting: settle the fine-tuning a little toward neutral.
+		return { ...profile, detailBias: Math.round(profile.detailBias * 0.8 * 100) / 100 };
+	}
+	const direction = feedback === 'tooMuch' ? -1 : 1;
+	let depth = profile.depth;
+	let bias = (profile.detailBias ?? 0) + direction * DETAIL_FEEDBACK_STEP;
+	const depthIndex = DEPTH_ORDER.indexOf(depth);
+	if (bias >= 1 && depthIndex < DEPTH_ORDER.length - 1) {
+		depth = DEPTH_ORDER[depthIndex + 1];
+		bias -= 1;
+	} else if (bias <= -1 && depthIndex > 0) {
+		depth = DEPTH_ORDER[depthIndex - 1];
+		bias += 1;
+	}
+	bias = Math.max(-1, Math.min(1, Math.round(bias * 100) / 100));
+	const concepts = [...profile.concepts];
+	for (const topic of topics.map(name => name.trim()).filter(Boolean)) {
+		const index = concepts.findIndex(concept => concept.name.toLowerCase() === topic.toLowerCase());
+		const existing = index >= 0 ? concepts[index] : undefined;
+		const current = existing ? existing.level ?? FAMILIARITY_ORDER.indexOf(existing.familiarity) : 1;
+		const level = Math.max(0, Math.min(3, Math.round((current - direction * TOPIC_FEEDBACK_STEP) * 100) / 100));
+		const updated: ConceptKnowledge = { name: existing?.name ?? topic, familiarity: FAMILIARITY_ORDER[Math.round(level)], level };
+		if (index >= 0) {
+			concepts[index] = updated;
+		} else {
+			concepts.push(updated);
+		}
+	}
+	return { ...profile, depth, detailBias: bias, concepts };
+}
 
 // ---------------------------------------------------------------------------
 // Walkthrough
@@ -192,7 +250,8 @@ export interface Scene {
 export interface PendingCheck {
 	readonly id: string;
 	readonly label: string;
-	readonly state: 'running' | 'unknown';
+	/** `running` until the background task reports back; it keeps running after the walkthrough starts. */
+	readonly state: 'running' | 'unknown' | 'finished' | 'failed';
 }
 
 export interface ToolOutcome {
@@ -226,8 +285,51 @@ export interface Walkthrough {
 
 export type AgentStatus = 'unavailable' | 'starting' | 'idle' | 'running' | 'error';
 
+export type SignInMethod = 'subscription' | 'apiKey';
+
+/** First-run setup of the coding agent: install, choose how to sign in, sign in. */
+export interface SetupState {
+	readonly step: 'install' | 'chooseMethod' | 'signIn' | 'done';
+	readonly install: {
+		readonly status: 'idle' | 'running' | 'done' | 'failed';
+		/** The command Active will run, shown before the user agrees. */
+		readonly command?: string;
+		readonly scriptUrl?: string;
+		readonly line?: string;
+		readonly log: readonly string[];
+		readonly error?: string;
+		/** Active cannot install this agent on this platform. */
+		readonly unavailable?: string;
+	};
+	readonly methods: ReadonlyArray<{ readonly id: SignInMethod; readonly label: string; readonly description: string; readonly unavailable?: string }>;
+	readonly method?: SignInMethod;
+	readonly signIn: {
+		readonly status: 'idle' | 'running' | 'waitingForBrowser' | 'done' | 'failed';
+		readonly message?: string;
+		readonly url?: string;
+		/** Device code the user should see on the sign-in page. */
+		readonly code?: string;
+	};
+	readonly apiKeyEnvVar?: string;
+	readonly apiKeyHelpUrl?: string;
+	/** Why setup is showing again, e.g. the agent reported it needs sign-in. */
+	readonly reason?: string;
+}
+
+export interface AgentProviderInfo {
+	readonly id: string;
+	readonly name: string;
+	readonly shortName: string;
+	readonly devOnly: boolean;
+}
+
 export interface AgentState {
 	readonly status: AgentStatus;
+	readonly provider: AgentProviderInfo;
+	/** Present while the agent still needs installing or signing in. */
+	readonly setup?: SetupState;
+	/** A short account description once known, e.g. "Pro plan" or "API key". */
+	readonly account?: string;
 	/** A human-readable integration blocker, when the agent cannot run. */
 	readonly blocker?: string;
 	readonly workspaceName: string;
@@ -290,8 +392,28 @@ export interface InitialState {
 	readonly profile: LearningProfile;
 	readonly history: ReadonlyArray<TurnSummary>;
 	readonly turnChanges: ReadonlyArray<FileChangeStat>;
-	readonly narration: { readonly available: boolean; readonly detail: string };
+	readonly narration: NarrationStatus;
 	readonly pendingWalkthrough?: Walkthrough;
+}
+
+export interface VoiceInfo {
+	readonly name: string;
+	readonly description?: string;
+	/** Character voices (storytelling) are listed separately from everyday narrators. */
+	readonly character?: boolean;
+}
+
+export interface NarrationStatus {
+	readonly available: boolean;
+	readonly detail: string;
+	/** Voices the narrator offers; `default` is the model's built-in voice. */
+	readonly voices?: ReadonlyArray<VoiceInfo>;
+}
+
+export interface ElaborateRequest {
+	readonly requestId: string;
+	readonly walkthroughId: string;
+	readonly sceneId: string;
 }
 
 export type ActiveEvent =
@@ -301,7 +423,9 @@ export type ActiveEvent =
 	| { readonly type: 'walkthroughStatus'; readonly status: WalkthroughStatus }
 	| { readonly type: 'walkthroughReady'; readonly walkthrough: Walkthrough }
 	| { readonly type: 'history'; readonly history: ReadonlyArray<TurnSummary> }
-	| { readonly type: 'narration'; readonly available: boolean; readonly detail: string }
+	| ({ readonly type: 'narration' } & NarrationStatus)
+	| { readonly type: 'checkUpdate'; readonly walkthroughId: string; readonly check: PendingCheck }
+	| { readonly type: 'elaboration'; readonly requestId: string; readonly text: string; readonly status: 'streaming' | 'done' | 'error' }
 	| { readonly type: 'profile'; readonly profile: LearningProfile };
 
 /** Command ids the extension registers. */
@@ -314,6 +438,14 @@ export const enum ExtensionCommand {
 	HistoryGet = 'active.ext.historyGet',
 	HistoryDelete = 'active.ext.historyDelete',
 	ProfileSet = 'active.ext.profileSet',
+	SetupInstall = 'active.ext.setupInstall',
+	SetupChooseMethod = 'active.ext.setupChooseMethod',
+	SetupSignIn = 'active.ext.setupSignIn',
+	SetupSaveApiKey = 'active.ext.setupSaveApiKey',
+	SetupCancel = 'active.ext.setupCancel',
+	SetupRestart = 'active.ext.setupRestart',
+	Reconnect = 'active.ext.reconnect',
+	Elaborate = 'active.ext.elaborate',
 }
 
 /** Command id the workbench registers for extension → workbench events. */

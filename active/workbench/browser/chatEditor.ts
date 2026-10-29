@@ -14,10 +14,10 @@ import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
-import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
+import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
@@ -27,16 +27,16 @@ import { IEditorGroup } from '../../../services/editor/common/editorGroupsServic
 import type { ChatEntry } from '../common/activeProtocol.js';
 import { ActiveChatInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
+import { renderSetupPanel, SetupPanelViewState } from './setupPanel.js';
 
 const $ = dom.$;
-const INSTALL_COMMAND = 'curl -fsSL https://dev.meta.ai/install.sh | sh';
 
 type ComposerMode = 'task' | 'ask';
 
 const HANDOFF_SECONDS = 4;
 
 /**
- * Full-work-area chat with Muse Code. Auto mode shows messages, compact tool
+ * Full-work-area chat with the coding agent. Auto mode shows messages, compact tool
  * rows and approvals — never a scrolling reasoning trace.
  */
 export class ActiveChatEditor extends EditorPane {
@@ -61,6 +61,8 @@ export class ActiveChatEditor extends EditorPane {
 	private readonly noticeStore = this._register(new DisposableStore());
 	private readonly footerStore = this._register(new DisposableStore());
 	private readonly handoffStore = this._register(new DisposableStore());
+	private introLead!: HTMLElement;
+	private readonly setupView: SetupPanelViewState = { showLog: false, apiKeyDraft: '' };
 	private handoffCard!: HTMLElement;
 
 	constructor(
@@ -70,7 +72,7 @@ export class ActiveChatEditor extends EditorPane {
 		@IStorageService storageService: IStorageService,
 		@IActiveService private readonly activeService: IActiveService,
 		@IMarkdownRendererService private readonly markdownRenderer: IMarkdownRendererService,
-		@IClipboardService private readonly clipboardService: IClipboardService,
+		@IOpenerService private readonly openerService: IOpenerService,
 		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super(ActiveChatEditor.ID, group, telemetryService, themeService, storageService);
@@ -87,7 +89,7 @@ export class ActiveChatEditor extends EditorPane {
 		this.intro = dom.append(column, $('.active-chat-intro'));
 		dom.append(this.intro, $('.eyebrow')).textContent = localize('introEyebrow', "Your workspace, with Active");
 		dom.append(this.intro, $('h1')).textContent = localize('introTitle', "What would you like to build?");
-		dom.append(this.intro, $('p.lead')).textContent = localize('introLead', "Work with Muse Code, then follow a walkthrough shaped around what you know and want to learn.");
+		this.introLead = dom.append(this.intro, $('p.lead'));
 		this.notices = dom.append(column, $('.active-chat-notices'));
 		this.transcript = dom.append(column, $('.active-chat-transcript'));
 
@@ -129,7 +131,8 @@ export class ActiveChatEditor extends EditorPane {
 	override async setInput(input: ActiveChatInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		this.inputStore.clear();
-		this.mode = this.activeService.chatContext ? 'ask' : 'task';
+		// Reopening chat always starts on a new coding task; asking about the walkthrough is one click away.
+		this.mode = 'task';
 		this.root.classList.remove('leaving');
 		this.root.classList.remove('entering');
 		void this.root.offsetWidth;
@@ -250,14 +253,19 @@ export class ActiveChatEditor extends EditorPane {
 		}
 		const agent = this.activeService.agent;
 		dom.clearNode(this.header);
-		dom.append(this.header, $('span.title')).textContent = localize('headerTitle', "Muse Code · {0}", agent.workspaceName || localize('noWorkspace', "no folder"));
+		dom.append(this.header, $('span.title')).textContent = localize('headerTitle', "{0} · {1}", agent.provider.name, agent.workspaceName || localize('noWorkspace', "no folder"));
+		this.introLead.textContent = localize('introLead', "Work with {0}, then follow a walkthrough shaped around what you know and want to learn.", agent.provider.name);
+		if (agent.account) {
+			const account = dom.append(this.header, $('span.agent-account'));
+			account.textContent = agent.account;
+		}
 		if (agent.host) {
 			const host = dom.append(this.header, $('span.agent-host'));
 			host.textContent = agent.host;
 			host.classList.toggle('test-double', /test double/i.test(agent.host));
 		}
-		const status = dom.append(this.header, $(`span.agent-status.${agent.status}`));
-		status.textContent = {
+		const status = dom.append(this.header, $(`span.agent-status.${agent.setup ? 'setup' : agent.status}`));
+		status.textContent = agent.setup ? localize('statusSetup', "Setup needed") : {
 			unavailable: localize('statusUnavailable', "Unavailable"),
 			starting: localize('statusStarting', "Connecting…"),
 			idle: localize('statusIdle', "Ready"),
@@ -275,9 +283,11 @@ export class ActiveChatEditor extends EditorPane {
 		this.noticeStore.clear();
 		dom.clearNode(this.notices);
 		const agent = this.activeService.agent;
-		if (agent.status === 'unavailable' && agent.blocker) {
+		if (agent.setup && !this.activeService.needsTrust) {
+			renderSetupPanel(this.notices, agent.setup, agent.provider, this.setupView, () => this.renderNotices(), this.noticeStore, this.activeService, this.openerService);
+		} else if (agent.status === 'unavailable' && agent.blocker) {
 			const card = dom.append(this.notices, $('.notice.blocker'));
-			dom.append(card, $('.notice-title')).textContent = localize('blockerTitle', "Muse Code is not connected");
+			dom.append(card, $('.notice-title')).textContent = localize('blockerTitle', "{0} is not connected", agent.provider.name);
 			dom.append(card, $('pre.notice-detail')).textContent = agent.blocker;
 			const actions = dom.append(card, $('.notice-actions'));
 			if (this.activeService.needsTrust) {
@@ -285,10 +295,10 @@ export class ActiveChatEditor extends EditorPane {
 				trust.textContent = localize('trustFolder', "Manage Workspace Trust");
 				this.noticeStore.add(dom.addDisposableListener(trust, dom.EventType.CLICK, () => this.commandService.executeCommand('workbench.trust.manage')));
 			}
-			if (!this.activeService.needsTrust && /not found|install/i.test(agent.blocker)) {
-				const copy = dom.append(actions, $('button.secondary'));
-				copy.textContent = localize('copyInstall', "Copy Install Command");
-				this.noticeStore.add(dom.addDisposableListener(copy, dom.EventType.CLICK, () => this.clipboardService.writeText(INSTALL_COMMAND)));
+			if (!this.activeService.needsTrust) {
+				const reconnect = dom.append(actions, $('button.secondary'));
+				reconnect.textContent = localize('reconnect', "Reconnect");
+				this.noticeStore.add(dom.addDisposableListener(reconnect, dom.EventType.CLICK, () => this.activeService.reconnect()));
 			}
 		}
 		if (!this.activeService.profile.configured) {
@@ -311,7 +321,7 @@ export class ActiveChatEditor extends EditorPane {
 				: localize('walkthroughPausedTitle', "Walkthrough paused: {0}", target.title);
 			if (!offered && player) {
 				dom.append(card, $('.notice-detail')).textContent = context
-					? localize('pausedAtScene', "Paused at {0} of {1}: “{2}”. Questions you ask here use this explanation as context.", context.sceneIndex + 1, player.walkthrough.scenes.length, context.title)
+					? localize('pausedAtScene', "Paused at {0} of {1}: “{2}”. To ask about it, pick “Ask About” below the message box.", context.sceneIndex + 1, player.walkthrough.scenes.length, context.title)
 					: localize('pausedAt', "Paused at idea {0} of {1}.", player.position.scene + 1, player.walkthrough.scenes.length);
 			}
 			const actions = dom.append(card, $('.notice-actions'));
@@ -354,19 +364,19 @@ export class ActiveChatEditor extends EditorPane {
 		const context = this.activeService.chatContext;
 		this.composerContext.classList.toggle('hidden', !context);
 		if (context) {
-			const ask = dom.append(this.composerContext, $('button.mode'));
-			ask.textContent = localize('askMode', "Ask About “{0}”", context.title);
-			ask.classList.toggle('selected', this.mode === 'ask');
 			const task = dom.append(this.composerContext, $('button.mode'));
 			task.textContent = localize('taskMode', "New Coding Task");
 			task.classList.toggle('selected', this.mode === 'task');
+			const ask = dom.append(this.composerContext, $('button.mode'));
+			ask.textContent = localize('askMode', "Ask About “{0}”", context.title);
+			ask.classList.toggle('selected', this.mode === 'ask');
 			this.inputStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => { this.mode = 'ask'; this.renderComposerContext(); }));
 			this.inputStore.add(dom.addDisposableListener(task, dom.EventType.CLICK, () => { this.mode = 'task'; this.renderComposerContext(); }));
 		} else {
 			this.mode = 'task';
 		}
 		this.sendButton.textContent = this.mode === 'ask' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
-		this.modeLabel.textContent = this.mode === 'ask' ? localize('explanationSession', "Explanation session (read-only)") : localize('museCode', "Muse Code");
+		this.modeLabel.textContent = this.mode === 'ask' ? localize('explanationSession', "Explanation session (read-only)") : this.activeService.agent.provider.name;
 		this.textarea.placeholder = this.mode === 'ask' ? localize('askPlaceholder', "Ask about this part of the walkthrough…") : localize('taskPlaceholder', "Describe a coding task…");
 		this.updateSendState();
 	}
@@ -382,7 +392,7 @@ export class ActiveChatEditor extends EditorPane {
 	private updateSendState(): void {
 		const agent = this.activeService.agent;
 		const empty = !this.textarea.value.trim();
-		this.sendButton.disabled = empty || (this.mode === 'task' && agent.status === 'starting');
+		this.sendButton.disabled = empty || (this.mode === 'task' && (agent.status === 'starting' || !!agent.setup));
 	}
 
 	private async send(): Promise<void> {
@@ -438,7 +448,7 @@ export class ActiveChatEditor extends EditorPane {
 				break;
 			case 'agent':
 			case 'explainer': {
-				eyebrow(entry.role === 'agent' ? localize('muse', "Muse") : localize('explainer', "Active · explanation"));
+				eyebrow(entry.role === 'agent' ? this.activeService.agent.provider.shortName : localize('explainer', "Active · explanation"));
 				const body = dom.append(node, $('.text.markdown'));
 				if (entry.text) {
 					const rendered = slot.store.add(this.markdownRenderer.render(new MarkdownString(entry.text)));
@@ -464,7 +474,7 @@ export class ActiveChatEditor extends EditorPane {
 			}
 			case 'approval': {
 				const approval = entry.approval;
-				eyebrow(localize('approval', "Muse Code asks"));
+				eyebrow(localize('approval', "{0} asks", this.activeService.agent.provider.name));
 				dom.append(node, $('.text')).textContent = approval?.title ?? entry.text;
 				if (approval?.detail) {
 					dom.append(node, $('pre.detail')).textContent = approval.detail;

@@ -16,4 +16,8 @@ export const enum ActiveCommandIds {
 	OpenChat = 'active.openChat',
 	OpenProfile = 'active.openLearningProfile',
 	DeleteAllHistory = 'active.history.deleteAll',
+	SignIn = 'active.signInToAgent',
+	PickVoice = 'active.pickNarrationVoice',
+	OpenRecentWalkthrough = 'active.openRecentWalkthrough',
+	WalkthroughHistory = 'active.walkthroughHistory',
 }

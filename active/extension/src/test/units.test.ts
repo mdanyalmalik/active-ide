@@ -9,10 +9,10 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
-import { buildPlanningPrompt } from '../explain/prompts';
+import { buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
 import { assessWorthiness } from '../explain/worthiness';
 import { HistoryStore } from '../history/historyStore';
-import { CapturedFile, DEFAULT_PROFILE, extractJsonObject, validateWalkthrough } from '../shared/activeProtocol';
+import { applyDetailFeedback, CapturedFile, DEFAULT_PROFILE, extractJsonObject, LearningProfile, validateWalkthrough, Walkthrough } from '../shared/activeProtocol';
 import { ChangeTracker, NetFileChange } from '../tracking/changeTracker';
 import { diffLines, diffStats, unifiedDiff } from '../tracking/lineDiff';
 import { WorkspaceFiles } from '../tracking/workspaceFiles';
@@ -213,5 +213,31 @@ describe('personalization', () => {
 			[novice.includes('Aim for 3-4 scenes'), novice.includes('Avoid equations.'), novice.includes('Gloss over: CSS'), novice.includes('Wants to learn: async timing'), expert.includes('Aim for 6-9 scenes'), expert.includes('Avoid equations.'), novice.includes('- npm test'), novice.includes('exposed summary')],
 			[true, true, true, true, true, false, true, true],
 		);
+	});
+
+	test('detail feedback nudges the detail preference slightly and topic knowledge more', () => {
+		const start: LearningProfile = { ...DEFAULT_PROFILE, concepts: [{ name: 'Token bucket', familiarity: 'some' }] };
+		const lighter = applyDetailFeedback(start, 'tooMuch', ['token bucket', 'Retry-After']);
+		assert.equal(lighter.detailBias, -0.2);
+		assert.equal(lighter.depth, 'balanced');
+		assert.deepStrictEqual(lighter.concepts, [
+			{ name: 'Token bucket', familiarity: 'comfortable', level: 1.5 },
+			{ name: 'Retry-After', familiarity: 'comfortable', level: 1.5 },
+		]);
+		// Repeated "too little" eventually moves to the next depth.
+		let deeper = start;
+		for (let i = 0; i < 5; i++) {
+			deeper = applyDetailFeedback(deeper, 'tooLittle', []);
+		}
+		assert.deepStrictEqual([deeper.depth, deeper.detailBias], ['deep', 0]);
+		assert.equal(applyDetailFeedback({ ...start, detailBias: 0.5 }, 'right', ['x']).detailBias, 0.4);
+		assert.ok(buildPlanningPrompt({ task: 't', turnIndex: 1, files: {}, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, profile: lighter }).includes('lean slightly toward less detail'));
+	});
+
+	test('the deeper explanation prompt targets one scene', () => {
+		const walkthrough = { id: 'wt-1', title: 'Rate limiting', summary: 's', task: 't', scenes: [{ id: 'model', title: 'Token bucket', file: 'a.js', version: 'final', anchorLine: 1, focus: [{ startLine: 1, endLine: 1 }], narration: [{ text: 'Tokens refill.' }] }], files: { 'a.js': { path: 'a.js', baseline: null, final: 'refill()\n', added: 1, removed: 0 } } } as unknown as Walkthrough;
+		const prompt = buildElaborationPrompt(walkthrough, 'model', DEFAULT_PROFILE);
+		assert.match(prompt, /QUESTION\nMORE DETAIL: Re-explain "Token bucket"/);
+		assert.match(prompt, /THE LEARNER PAUSED ON: "Token bucket"/);
 	});
 });

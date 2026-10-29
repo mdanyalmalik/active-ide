@@ -65,6 +65,14 @@ function familiarityList(items: LearningProfile['languages']): string {
 	return items.length ? items.map(item => `${item.name} (${item.familiarity})`).join(', ') : 'not specified';
 }
 
+function detailLean(bias: number | undefined): string {
+	if (!bias || Math.abs(bias) < 0.1) {
+		return '';
+	}
+	const amount = Math.abs(bias) >= 0.6 ? 'noticeably' : 'slightly';
+	return ` (from their feedback: lean ${amount} toward ${bias > 0 ? 'more' : 'less'} detail within this depth)`;
+}
+
 export function describeProfile(profile: LearningProfile): string {
 	return [
 		`Background: ${profile.background || 'not specified'} (${profile.yearsProgramming} years programming)`,
@@ -72,7 +80,7 @@ export function describeProfile(profile: LearningProfile): string {
 		`Concepts: ${familiarityList(profile.concepts)}`,
 		`Wants to learn: ${profile.wantToLearn || 'not specified'}`,
 		`Gloss over: ${profile.glossOver || 'not specified'}`,
-		`Depth: ${profile.depth}. Mathematical notation: ${profile.math}.`,
+		`Depth: ${profile.depth}${detailLean(profile.detailBias)}. Mathematical notation: ${profile.math}.`,
 		`Useful visuals: ${profile.preferredVisuals.join(', ') || 'any'}`,
 		profile.notes ? `Notes: ${profile.notes}` : '',
 	].filter(Boolean).join('\n');
@@ -159,6 +167,13 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 
 export function buildRepairPrompt(errors: readonly string[]): string {
 	return `The walkthrough JSON failed validation against the captured files:\n${errors.slice(0, 30).map(error => `- ${error}`).join('\n')}\nReply with the corrected complete JSON object only, in one \`\`\`json block.`;
+}
+
+/** Asks the read-only explanation session to re-explain one scene in greater depth. */
+export function buildElaborationPrompt(walkthrough: Walkthrough, sceneId: string, profile: LearningProfile): string {
+	const scene = walkthrough.scenes.find(candidate => candidate.id === sceneId);
+	const question = `MORE DETAIL: Re-explain "${scene?.title ?? 'this part'}" in greater depth than the walkthrough did. Go a level deeper: how the focused lines work step by step, why they are written this way, edge cases and what would break if they were different. Assume the learner understood the short version. Use 2-4 short paragraphs of plain spoken prose (it will be read aloud), no headings or bullet lists, and refer to code by name rather than pasting it.`;
+	return buildQuestionPrompt(question, walkthrough, sceneId, profile);
 }
 
 export function buildQuestionPrompt(question: string, walkthrough: Walkthrough | undefined, sceneId: string | undefined, profile: LearningProfile): string {

@@ -121,7 +121,19 @@ async function runExplanation(session, turnId, prompt) {
 		const question = prompt.split('QUESTION\n')[1] ?? '';
 		const scene = /THE LEARNER PAUSED ON: "([^"]+)"/.exec(prompt)?.[1];
 		const template = scenario.answers?.find(answer => question.toLowerCase().includes(answer.match));
-		reply = template?.text ?? `About ${scene ? `"${scene}"` : 'this change'}: ${scenario.defaultAnswer ?? 'the captured code shows how the change works.'}`;
+		if (question.startsWith('MORE DETAIL:')) {
+			// A deeper pass over the scene, assembled from what the prompt shows (this is a test double).
+			const narration = /\nNarration: ([^\n]+)/.exec(prompt)?.[1] ?? '';
+			const code = (/\nFocused code:\n([\s\S]*?)\n\nCaptured files:/.exec(prompt)?.[1] ?? '').split('\n').map(line => line.split('│')[1]?.trim()).filter(Boolean);
+			const names = [...new Set(code.join(' ').match(/\b[A-Za-z_]\w{3,}(?=\s*\()/g) ?? [])].slice(0, 3);
+			reply = [
+				`Let's slow down on ${scene ? `"${scene}"` : 'this part'}. The short version was: ${narration}`,
+				`Step by step, the focused lines ${names.length ? `lean on ${names.join(', ')}` : 'do one small job each'}: each line takes the value the previous one produced and narrows it, so by the end only the case the change cares about is left. That ordering matters, because swapping two of these steps would let an unchecked value through.`,
+				'The edge cases are where this earns its keep: empty input, a value at exactly the limit, and a call that arrives before anything has been set up. Each one falls through to the same guarded path instead of needing its own branch.',
+			].join('\n\n');
+		} else {
+			reply = template?.text ?? `About ${scene ? `"${scene}"` : 'this change'}: ${scenario.defaultAnswer ?? 'the captured code shows how the change works.'}`;
+		}
 	} else if (prompt.startsWith('The walkthrough JSON failed validation')) {
 		reply = '```json\n{}\n```';
 	} else {
@@ -245,6 +257,11 @@ input.on('line', line => {
 	const reply = result => send({ id, result });
 	switch (method) {
 		case 'initialize':
+			// Real Muse Code rejects client names that aren't machine identifiers (SS1.4.1).
+			if (!/^[a-z0-9_]+$/.test(params.clientInfo?.name ?? '')) {
+				send({ id, error: { code: -32602, message: 'invalid initialize params: clientInfo.name must be a machine identifier matching ^[a-z0-9_]+$ (SS1.4.1)', data: { kind: 'invalidParams', retryable: false } } });
+				break;
+			}
 			reply({
 				serverInfo: { name: 'scripted-muse-host (test double)', version: '0.0.0' },
 				userAgent: 'scripted-muse-host/0.0.0', museHome: '/tmp/scripted-muse', platformFamily: 'unix', platformOs: process.platform,

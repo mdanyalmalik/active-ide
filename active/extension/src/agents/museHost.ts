@@ -3,31 +3,16 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { existsSync } from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { SpawnedMspConnection } from '@muse-code/sdk' with { 'resolution-mode': 'import' };
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener, AgentSessionOptions, AgentTask } from './agentTypes';
 
 type Params = Record<string, unknown>;
 
-const CLIENT_INFO = { name: 'active-ide', version: '0.1.0' };
+const CLIENT_INFO = { name: 'active_ide', title: 'Active', version: '0.1.0' };
 /** Profile ids tried, in order, for the explanation session. The stable MSP surface does not list profiles. */
 const READ_ONLY_PROFILE_IDS = ['read-only', 'readOnly', 'read_only'];
 
 export class MuseUnavailableError extends Error { }
-
-/** Finds the `muse` binary: explicit setting, PATH, then the installer's default location. */
-export function locateMuse(configured: string | undefined): string | undefined {
-	if (configured) {
-		return existsSync(configured) ? configured : undefined;
-	}
-	const candidates = [
-		...(process.env.PATH ?? '').split(path.delimiter).map(dir => path.join(dir, 'muse')),
-		path.join(os.homedir(), '.local', 'bin', 'muse'),
-	];
-	return candidates.find(candidate => existsSync(candidate));
-}
 
 function asString(value: unknown): string | undefined {
 	return typeof value === 'string' ? value : undefined;
@@ -98,14 +83,14 @@ export class MuseHost implements AgentHost {
 		});
 	}
 
-	static async spawn(museBin: string, cwd: string, log: (line: string) => void): Promise<MuseHost> {
+	static async spawn(museBin: string, cwd: string, log: (line: string) => void, extraEnv: Readonly<Record<string, string>> = {}): Promise<MuseHost> {
 		const sdk = await import('@muse-code/sdk');
 		const stderr: string[] = [];
 		const handshake = sdk.spawnMspConnection({
 			command: museBin,
 			args: ['serve'],
 			cwd,
-			env: { ...process.env },
+			env: { ...process.env, ...extraEnv },
 			onStderr: chunk => {
 				stderr.push(chunk);
 				if (stderr.length > 200) {
@@ -240,7 +225,7 @@ class MuseSession implements AgentSession {
 			}
 			case 'turn/completed': {
 				const error = params.error as Params | undefined;
-				this.listener.onTurnCompleted?.(String(params.turnId), String(params.terminal ?? 'completed'), asString(error?.message) ?? asString(params.reason));
+				this.listener.onTurnCompleted?.(String(params.turnId), String(params.terminal ?? 'completed'), asString(error?.message) ?? asString(params.reason), asString(error?.kind));
 				break;
 			}
 			case 'turn/unqueued':
@@ -312,6 +297,13 @@ class MuseSession implements AgentSession {
 			command: asString(task.command),
 			background: task.executionMode === undefined || task.executionMode === 'background',
 		}));
+	}
+
+	async accountSummary(): Promise<string | undefined> {
+		// `usage/read` reports the subscription tier once Muse has observed usage; absence is normal.
+		const result = await this.msp.connection.request('usage/read', { sessionId: this.sessionId });
+		const tier = asString((result.usage as Params | undefined)?.tier);
+		return tier ? `${tier} plan` : undefined;
 	}
 
 	async readOutput(itemId: string, outputRef: string, maxBytes = 64 * 1024): Promise<string | undefined> {

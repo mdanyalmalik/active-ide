@@ -52,7 +52,8 @@ export interface AgentSessionListener {
 	onTurnStarted?(turnId: string): void;
 	onItem?(item: AgentItem, completed: boolean): void;
 	onDelta?(itemId: string, field: string, delta: string): void;
-	onTurnCompleted?(turnId: string, terminal: string, error?: string): void;
+	/** `errorKind` is the provider's failure class (e.g. Muse's `authRequired`), when it reports one. */
+	onTurnCompleted?(turnId: string, terminal: string, error?: string, errorKind?: string): void;
 	onApproval?(approval: AgentApproval): void;
 	onApprovalResolved?(approvalId: string, decision: string): void;
 }
@@ -64,6 +65,8 @@ export interface AgentSession {
 	decideApproval(approvalId: string, choiceId: string): Promise<void>;
 	listTasks(): Promise<AgentTask[]>;
 	readOutput(itemId: string, outputRef: string, maxBytes?: number): Promise<string | undefined>;
+	/** A short description of the signed-in account (e.g. a subscription tier), when the provider reports one. */
+	accountSummary?(): Promise<string | undefined>;
 }
 
 export interface AgentSessionOptions {

@@ -14,6 +14,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { MuseHost } from '../agents/museHost';
+import { MuseProvider } from '../agents/providers';
 import { ActiveController } from '../controller';
 import { HistoryStore } from '../history/historyStore';
 import { ActiveEvent, ChatEntry, DEFAULT_PROFILE, Walkthrough, WalkthroughStage } from '../shared/activeProtocol';
@@ -54,6 +55,12 @@ async function harness(backgroundTimeoutMs: number): Promise<Harness> {
 		}
 	};
 	controller = new ActiveController({
+		provider: { id: 'muse', name: 'Muse Code', shortName: 'Muse', devOnly: false },
+		needsSetup: () => false,
+		setupState: () => undefined,
+		isAuthFailure: (kind, message) => new MuseProvider().isAuthFailure(kind, message),
+		onAuthRequired: () => undefined,
+		accountHint: async () => undefined,
 		workspaceName: 'ledger-api',
 		workspaceRoot: root,
 		explanationWorkspace: explain,
@@ -146,6 +153,26 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		const detail = await h.history.get(walkthrough.turnId);
 		assert.match(detail!.walkthrough!.files['src/rateLimiter.js'].final!, /class RateLimiter/);
 		assert.equal(detail!.walkthrough!.scenes.length, 6);
+	});
+
+	test('a pending check updates when its background task finishes, and history records it', async () => {
+		const turns = await h.history.list();
+		const walkthroughId = turns[0].walkthroughId!;
+		const update = h.events.find(event => event.type === 'checkUpdate') as Extract<ActiveEvent, { type: 'checkUpdate' }> | undefined
+			?? await h.waitFor((event): event is Extract<ActiveEvent, { type: 'checkUpdate' }> => event.type === 'checkUpdate', 30000);
+		assert.deepStrictEqual([update.walkthroughId, update.check.label, update.check.state], [walkthroughId, 'npm test', 'finished']);
+		await new Promise(resolve => setTimeout(resolve, 100));
+		const detail = await h.history.get(turns[0].turnId);
+		assert.deepStrictEqual(detail!.walkthrough!.pending.map(check => check.state), ['finished']);
+	});
+
+	test('"more detail" streams a deeper explanation of one scene', async () => {
+		const turns = await h.history.list();
+		const done = h.waitFor((event): event is Extract<ActiveEvent, { type: 'elaboration' }> => event.type === 'elaboration' && event.status === 'done');
+		await h.controller.elaborate({ requestId: 'r1', walkthroughId: turns[0].walkthroughId!, sceneId: 'model' });
+		const { text, requestId } = await done as Extract<ActiveEvent, { type: 'elaboration' }>;
+		assert.equal(requestId, 'r1');
+		assert.match(text, /slow down on/);
 	});
 
 	test('questions about a walkthrough go to the read-only explanation session', async () => {

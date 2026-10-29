@@ -8,16 +8,14 @@ import { existsSync, mkdirSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { BridgeHost } from './agents/bridgeHost';
-import { locateMuse, MuseHost } from './agents/museHost';
+import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, AskRequest, DEFAULT_PROFILE, ExtensionCommand, LearningProfile, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, AskRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, LearningProfile, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
+import { AgentSetup } from './setup/agentSetup';
 import { PhononNarrator } from './tts/phonon';
-
-const INSTALL_HINT = 'Install Muse Code with `curl -fsSL https://dev.meta.ai/install.sh | sh`, run `muse` once in a terminal to sign in with your subscription, then reload Active. You can also set `active.muse.binaryPath`.';
 
 function config<T>(key: string, fallback: T): T {
 	return vscode.workspace.getConfiguration('active').get<T>(key, fallback);
@@ -42,7 +40,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	let profile: LearningProfile = DEFAULT_PROFILE;
 	const profileStore = new ProfileStore(path.join(context.globalStorageUri.fsPath, 'profile.json'));
-	profile = await profileStore.read(DEFAULT_PROFILE);
+	// Older saved profiles may lack newer fields.
+	profile = { ...DEFAULT_PROFILE, ...(await profileStore.read(DEFAULT_PROFILE)) };
 
 	const emit = (event: ActiveEvent) => {
 		void vscode.commands.executeCommand(WORKBENCH_EVENT_COMMAND, event).then(undefined, () => undefined);
@@ -67,17 +66,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		emit({ type: 'profile', profile });
 	});
 
+	const storage = context.globalStorageUri.fsPath;
+	const workspaceKey = folder ? createHash('sha1').update(folder.uri.fsPath).digest('hex').slice(0, 16) : 'none';
+	// The coding agent platform. Muse Code is the default; the bridge is a dev-only provider.
+	const providerId = config<string>('agent.provider', '') || (config<string>('dev.agentBackend', 'muse') === 'bridge' ? 'bridge' : 'muse');
+	const provider: AgentProvider = providerId === 'bridge'
+		? new BridgeProvider(config<string>('dev.bridgeDir', '') || path.join(storage, 'bridge', workspaceKey))
+		: new MuseProvider();
+	const providerInfo = { id: provider.id, name: provider.displayName, shortName: provider.shortName, devOnly: provider.devOnly };
+
 	if (!folder || folder.uri.scheme !== 'file') {
 		register(ExtensionCommand.Init, async () => ({
-			agent: { status: 'unavailable', blocker: 'Open a folder to work with Muse Code in Active.', workspaceName: 'No folder', backgroundTasks: 0 },
+			agent: { status: 'unavailable', provider: providerInfo, blocker: `Open a folder to work with ${provider.displayName} in Active.`, workspaceName: 'No folder', backgroundTasks: 0 },
 			chat: [], profile, history: [], turnChanges: [], narration: narrator.currentStatus,
 		}));
 		return;
 	}
 
 	const root = folder.uri.fsPath;
-	const workspaceKey = createHash('sha1').update(root).digest('hex').slice(0, 16);
-	const storage = context.globalStorageUri.fsPath;
 	const explanationWorkspace = path.join(storage, 'explain-workspaces', workspaceKey);
 	mkdirSync(explanationWorkspace, { recursive: true });
 
@@ -85,25 +91,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const tracker = new ChangeTracker(files);
 	const history = new HistoryStore(path.join(storage, 'history', workspaceKey));
 
+	let controller: ActiveController | undefined;
+	const setup = new AgentSetup(provider, {
+		platform: process.platform,
+		configuredPath: () => config<string>('muse.binaryPath', '') || undefined,
+		secrets: context.secrets,
+		signInScript: context.asAbsolutePath(path.join('resources', 'agent_signin.py')),
+		python: () => ['/usr/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3', resolvePython(context.extensionPath)].find(candidate => existsSync(candidate)),
+		scratchDir: path.join(storage, 'sign-in'),
+		installerOverride: () => {
+			// DEV ONLY: lets the setup flow be exercised with a stand-in installer.
+			const command = config<string>('dev.installCommand', '');
+			return command ? { display: command, command: '/bin/sh', args: ['-c', command] } as InstallerSpec : undefined;
+		},
+		emit: () => controller?.refreshAgentState(),
+		onReady: async () => { await controller?.reconnect(); },
+		log,
+	});
+
 	const startHost = async (cwd: string) => {
-		if (config<string>('dev.agentBackend', 'muse') === 'bridge') {
-			// DEV ONLY: sessions served by external agents through a mailbox directory.
-			const bridgeDir = config<string>('dev.bridgeDir', '') || path.join(storage, 'bridge', workspaceKey);
-			log(`dev bridge backend at ${bridgeDir}`);
-			return new BridgeHost(bridgeDir, cwd === root ? 'coding' : 'explanation');
-		}
-		const muse = locateMuse(config<string>('muse.binaryPath', '') || undefined);
-		if (!muse) {
-			throw new Error(`Muse Code CLI not found. ${INSTALL_HINT}`);
+		const bin = setup.locate();
+		if (!bin) {
+			throw new Error(`${provider.displayName} is not installed.`);
 		}
 		try {
-			return await MuseHost.spawn(muse, cwd, line => log(`[muse] ${line}`));
+			return await provider.startHost(bin, { role: cwd === root ? 'coding' : 'explanation', cwd, env: await setup.agentEnv(), log: line => log(`[${provider.id}] ${line}`) });
 		} catch (error) {
-			throw new Error(`Could not start \`muse serve\` (${muse}): ${error instanceof Error ? error.message : String(error)}\n${INSTALL_HINT}`);
+			throw new Error(`Could not start ${provider.displayName} (${bin}): ${error instanceof Error ? error.message : String(error)}`);
 		}
 	};
 
-	const controller = new ActiveController({
+	const active = new ActiveController({
+		provider: providerInfo,
+		needsSetup: () => setup.evaluate(),
+		setupState: () => setup.current,
+		isAuthFailure: (kind, message) => provider.isAuthFailure(kind, message),
+		onAuthRequired: reason => setup.requireSignIn(reason),
+		accountHint: async () => (await setup.usesApiKey()) ? 'API key' : undefined,
 		workspaceName: folder.name,
 		workspaceRoot: root,
 		explanationWorkspace,
@@ -116,7 +140,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		startCodingHost: () => startHost(root),
 		startExplanationHost: () => startHost(explanationWorkspace),
 	}, tracker, history);
-	context.subscriptions.push({ dispose: () => void controller.dispose() });
+	controller = active;
+	context.subscriptions.push({ dispose: () => void active.dispose() });
 
 	// Capture every change on disk (file tools and shell commands alike).
 	const timers = new Map<string, NodeJS.Timeout>();
@@ -128,7 +153,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		clearTimeout(timers.get(relative));
 		timers.set(relative, setTimeout(() => {
 			timers.delete(relative);
-			void controller.onFileChanged(relative).catch(error => log(`tracking ${relative} failed: ${error}`));
+			void active.onFileChanged(relative).catch(error => log(`tracking ${relative} failed: ${error}`));
 		}, 120));
 	};
 	const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '**/*'));
@@ -139,19 +164,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (event.contentChanges.length && event.document.isDirty && event.document.uri.scheme === 'file') {
 			const relative = files.relative(event.document.uri.fsPath);
 			if (relative) {
-				controller.noteUserTyping(relative);
+				active.noteUserTyping(relative);
 			}
 		}
 	}));
 
-	register(ExtensionCommand.Init, async () => ({ ...(await controller.initialState()), narration: narrator.currentStatus, profile }));
-	register(ExtensionCommand.SubmitTask, (text: string) => controller.submitTask(text));
-	register(ExtensionCommand.Ask, (request: AskRequest) => controller.ask(request));
-	register(ExtensionCommand.DecideApproval, (request: { approvalId: string; choiceId: string }) => controller.decideApproval(request.approvalId, request.choiceId));
-	register(ExtensionCommand.HistoryGet, (turnId: string) => controller.historyGet(turnId));
-	register(ExtensionCommand.HistoryDelete, (turnId?: string) => controller.historyDelete(turnId));
+	register(ExtensionCommand.Init, async () => ({ ...(await active.initialState()), narration: narrator.currentStatus, profile }));
+	register(ExtensionCommand.SubmitTask, (text: string) => active.submitTask(text));
+	register(ExtensionCommand.Ask, (request: AskRequest) => active.ask(request));
+	register(ExtensionCommand.DecideApproval, (request: { approvalId: string; choiceId: string }) => active.decideApproval(request.approvalId, request.choiceId));
+	register(ExtensionCommand.HistoryGet, (turnId: string) => active.historyGet(turnId));
+	register(ExtensionCommand.HistoryDelete, (turnId?: string) => active.historyDelete(turnId));
+	register(ExtensionCommand.SetupInstall, () => setup.install());
+	register(ExtensionCommand.SetupChooseMethod, (method: SignInMethod) => setup.chooseMethod(method));
+	register(ExtensionCommand.SetupSignIn, () => setup.signInWithBrowser());
+	register(ExtensionCommand.SetupSaveApiKey, (key: string) => setup.saveApiKey(key));
+	register(ExtensionCommand.SetupCancel, () => setup.cancel());
+	register(ExtensionCommand.Reconnect, () => active.reconnect());
+	register(ExtensionCommand.Elaborate, (request: ElaborateRequest) => active.elaborate(request));
+	register(ExtensionCommand.SetupRestart, () => {
+		setup.restart();
+		active.refreshAgentState();
+	});
 
-	void controller.connect();
+	// Show sign-in before the first task rather than after it fails.
+	void active.connect().then(() => setup.checkSignedIn());
 	// Warm the narrator so the first walkthrough starts speaking promptly.
 	void narrator.start().catch(error => log(`narration unavailable: ${error instanceof Error ? error.message : error}`));
 }

@@ -67,12 +67,34 @@
 					"description": "DEV ONLY. `bridge` serves the coding and explanation sessions from external agents (e.g. Claude Code subagents) through a mailbox directory instead of Muse Code.",
 					"tags": [
 						"experimental"
-					]
+					],
+					"deprecationMessage": "Use active.agent.provider instead."
 				},
 				"active.dev.bridgeDir": {
 					"type": "string",
 					"default": "",
 					"description": "DEV ONLY. Mailbox directory for the `bridge` agent backend.",
+					"tags": [
+						"experimental"
+					]
+				},
+				"active.agent.provider": {
+					"type": "string",
+					"enum": [
+						"muse",
+						"bridge"
+					],
+					"enumDescriptions": [
+						"Muse Code (default)",
+						"DEV ONLY: Claude Code subagent bridge"
+					],
+					"default": "muse",
+					"description": "The coding agent Active works with. More providers can be added; `bridge` is a development-only test backend."
+				},
+				"active.dev.installCommand": {
+					"type": "string",
+					"default": "",
+					"description": "DEV ONLY. Replaces the agent's official installer in the setup flow (for testing).",
 					"tags": [
 						"experimental"
 					]

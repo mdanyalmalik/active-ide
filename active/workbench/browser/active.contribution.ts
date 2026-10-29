@@ -7,7 +7,9 @@ import './media/active.css';
 import * as dom from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -105,8 +107,8 @@ class ActiveSessionView extends ViewPane {
 		dom.clearNode(this.content);
 		const agent = this.activeService.agent;
 		dom.append(this.content, dom.$('.status')).textContent = agent.status === 'unavailable'
-			? localize('sessionUnavailable', "Muse Code is not connected.")
-			: localize('sessionStatus', "Muse Code · {0}", agent.status);
+			? localize('sessionUnavailable', "{0} is not connected.", agent.provider.name)
+			: localize('sessionStatus', "{0} · {1}", agent.provider.name, agent.status);
 		const button = (label: string, run: () => unknown, primary = false) => {
 			const element = dom.append(this.content, dom.$(`button.${primary ? 'primary' : 'secondary'}`));
 			element.textContent = label;
@@ -283,6 +285,44 @@ registerAction2(class extends Action2 {
 
 registerAction2(class extends Action2 {
 	constructor() {
+		super({ id: ActiveCommandIds.PickVoice, title: localize2('pickVoice', "Choose Narration Voice"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).pickVoice();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.OpenRecentWalkthrough, title: localize2('openRecentWalkthrough', "Open Latest Walkthrough"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).openRecentWalkthrough();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.WalkthroughHistory, title: localize2('walkthroughHistory', "Replay a Walkthrough from History"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).pickFromHistory();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.SignIn, title: localize2('signInToAgent', "Sign In to Coding Agent or Switch Account"), category, f1: true });
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const service = accessor.get(IActiveService);
+		await service.setupRestart();
+		await service.openChat(false);
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
 		super({
 			id: ActiveCommandIds.DeleteAllHistory,
 			title: localize2('deleteAllHistory', "Delete All Saved History"),
@@ -381,6 +421,7 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 		this._register(activeService.onDidChangePlayback(update));
 		this._register(activeService.onDidChangeOffer(update));
 		this._register(activeService.onDidChangeNarration(update));
+		this._register(activeService.onDidChangeProfile(update));
 		this._register(editorService.onDidActiveEditorChange(update));
 	}
 
@@ -407,13 +448,13 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 			text = `$(play-circle) ${localize('walkthroughReadyStatus', "Walkthrough ready")}`;
 			command = WalkthroughCommandIds.Resume;
 		} else if (agent.status === 'running') {
-			text = `$(loading~spin) ${localize('agentWorking', "Muse Code working")}${status?.stage === 'drafting' ? ` · ${localize('drafting', "drafting explanation")}` : ''}`;
+			text = `$(loading~spin) ${localize('agentWorking', "{0} working", agent.provider.name)}${status?.stage === 'drafting' ? ` · ${localize('drafting', "drafting explanation")}` : ''}`;
 		} else if (agent.backgroundTasks > 0) {
 			text = localize('turnCompleteBackground', "Turn complete · background checks running");
 		} else if (status && ['waitingForBackground', 'finalizing'].includes(status.stage)) {
 			text = status.detail;
 		} else if (agent.status === 'unavailable') {
-			text = `$(warning) ${localize('museUnavailable', "Muse Code unavailable")}`;
+			text = agent.setup ? `$(rocket) ${localize('agentSetup', "Set up {0}", agent.provider.name)}` : `$(warning) ${localize('agentUnavailable', "{0} unavailable", agent.provider.name)}`;
 			command = ActiveCommandIds.OpenChat;
 		} else {
 			text = localize('ready', "Ready for your task");
@@ -423,10 +464,75 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 
 	private narrationEntry() {
 		const narration = this.activeService.narration;
-		const text = narration.available ? `$(unmute) ${localize('narrationReady', "Phonon 31M · on-device")}` : `$(mute) ${localize('narrationOff', "Narration unavailable")}`;
-		return { name: localize('activeNarration', "Active Narration"), text, ariaLabel: text, tooltip: narration.detail, command: ActiveCommandIds.OpenProfile };
+		const voice = this.activeService.profile.voice;
+		const text = narration.available
+			? `$(unmute) ${voice && voice !== 'default' ? localize('narrationReadyVoice', "Phonon 31M · {0}", voice) : localize('narrationReady', "Phonon 31M · on-device")}`
+			: `$(mute) ${localize('narrationOff', "Narration unavailable")}`;
+		const tooltip = narration.available ? localize('narrationTooltip', "{0}. Click to preview and change the voice.", narration.detail) : narration.detail;
+		return { name: localize('activeNarration', "Active Narration"), text, ariaLabel: text, tooltip, command: ActiveCommandIds.PickVoice };
+	}
+}
+
+/**
+ * Floating shortcuts over the editor area: Chat whenever chat isn't showing, and
+ * Walkthrough (the latest explanation) whenever a walkthrough isn't showing.
+ */
+class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.activeFloatingButtons';
+
+	private readonly stack: HTMLElement;
+	private readonly chat: HTMLButtonElement;
+	private readonly walkthrough: HTMLButtonElement;
+
+	constructor(
+		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IActiveService private readonly activeService: IActiveService,
+		@IKeybindingService private readonly keybindingService: IKeybindingService,
+	) {
+		super();
+		const host = layoutService.getContainer(mainWindow, Parts.EDITOR_PART) ?? layoutService.mainContainer;
+		this.stack = dom.append(host, dom.$('.active-fab-stack'));
+		this._register(toDisposable(() => this.stack.remove()));
+		this.walkthrough = this.button(Codicon.playCircle, localize('fabWalkthrough', "Walkthrough"), () => this.activeService.openRecentWalkthrough());
+		this.chat = this.button(Codicon.commentDiscussion, localize('fabChat', "Chat"), () => this.activeService.openChat(this.editorService.activeEditor instanceof WalkthroughInput));
+		this.chat.classList.add('primary');
+		const update = () => this.update();
+		this._register(editorService.onDidActiveEditorChange(update));
+		this._register(activeService.onDidChangeRecentWalkthrough(update));
+		this._register(activeService.onDidChangePlayer(update));
+		this._register(activeService.onDidChangeHandoff(update));
+		this._register(keybindingService.onDidUpdateKeybindings(update));
+		this.update();
+	}
+
+	private button(icon: ThemeIcon, label: string, run: () => unknown): HTMLButtonElement {
+		const element = dom.append(this.stack, dom.$('button.active-fab')) as HTMLButtonElement;
+		dom.append(element, dom.$('span')).classList.add(...ThemeIcon.asClassNameArray(icon));
+		dom.append(element, dom.$('span.label')).textContent = label;
+		this._register(dom.addDisposableListener(element, dom.EventType.CLICK, () => run()));
+		return element;
+	}
+
+	private update(): void {
+		const active = this.editorService.activeEditor;
+		const onChat = !active || active instanceof ActiveChatInput;
+		const onWalkthrough = active instanceof WalkthroughInput;
+		this.chat.classList.toggle('hidden', onChat);
+		this.walkthrough.classList.toggle('hidden', onWalkthrough || !!this.activeService.pendingHandoff || !this.activeService.hasRecentWalkthrough);
+		// Over a walkthrough the stack sits above its playback controls.
+		this.stack.classList.toggle('over-walkthrough', onWalkthrough);
+		const chatKey = this.keybindingService.lookupKeybinding(onWalkthrough ? WalkthroughCommandIds.OpenChat : ActiveCommandIds.OpenChat)?.getLabel();
+		this.chat.title = onWalkthrough
+			? localize('fabChatFromWalkthrough', "Pause and open chat{0}", chatKey ? ` (${chatKey})` : '')
+			: localize('fabChatTitle', "Open chat{0}", chatKey ? ` (${chatKey})` : '');
+		const player = this.activeService.player;
+		this.walkthrough.title = player
+			? localize('fabWalkthroughResume', "Return to the walkthrough: {0}", player.walkthrough.title)
+			: localize('fabWalkthroughLatest', "Open the latest walkthrough");
 	}
 }
 
 registerWorkbenchContribution2(ActiveStartup.ID, ActiveStartup, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(ActiveFloatingButtons.ID, ActiveFloatingButtons, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(ActiveStatusBar.ID, ActiveStatusBar, WorkbenchPhase.AfterRestored);

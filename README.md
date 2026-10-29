@@ -14,14 +14,26 @@ scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron,
 
 ### Muse Code (coding and explanation)
 
-Active drives Muse Code through the official [`@muse-code/sdk`](https://github.com/meta-models/muse-code-sdk) (1.4.14), which runs `muse serve` and speaks the Muse Session Protocol. Authentication uses your own Muse Code sign-in. Active never reads or copies credentials.
+Active drives Muse Code through the official [`@muse-code/sdk`](https://github.com/meta-models/muse-code-sdk) (1.4.14), which runs `muse serve` and speaks the Muse Session Protocol. You don't need to set it up by hand. When Active can't find `muse`, chat shows a setup panel:
 
-```sh
-curl -fsSL https://dev.meta.ai/install.sh | sh   # installs `muse` to ~/.local/bin
-muse                                             # once, interactively: trust the folder and sign in (subscription)
-```
+1. **Install.** Active shows the exact command it will run (Meta's official installer, with a link to read the script). When you agree, it runs the installer in the background with a progress bar and an expandable log.
+2. **Choose how to sign in.** Pick your Muse subscription or a Meta API key.
+3. **Sign in.**
+   - Subscription: Active runs `muse login` in a hidden pseudo-terminal. Muse opens its device-code page in your browser, and Active shows the code to confirm and reconnects once you approve.
+   - API key: the key goes into a secure field, is stored in the system keychain, and is passed to Muse as `META_API_KEY`.
 
-If `muse` lives somewhere else, set `active.muse.binaryPath`.
+Active then connects. If Muse later reports `authRequired`, the sign-in step comes back. To change accounts, run **Active: Sign In to Coding Agent or Switch Account**. Active never reads or copies Muse's own credentials.
+
+If you'd rather do it yourself: `curl -fsSL https://dev.meta.ai/install.sh | sh` (on Windows: `irm https://dev.meta.ai/install.ps1 | iex`), run `muse` once to sign in, and set `active.muse.binaryPath` if `muse` lives somewhere unusual.
+
+### Other coding agents
+
+The agent integration is provider-based (`active/extension/src/agents/providers.ts`). A provider describes:
+- how to find and install its CLI
+- its sign-in methods: browser sign-in as an interactive-menu flow or a login command, and the environment variable for an API key
+- how to start its sessions and recognize auth failures
+
+Muse Code is the default (`active.agent.provider: "muse"`). Adding another agent such as Claude or ChatGPT means writing one provider plus a session adapter that implements `AgentHost`/`AgentSession`. The setup flow and every UI label take the provider's name.
 
 ### Phonon 31M (narration)
 
@@ -61,7 +73,12 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 ## Using Active
 
 - **Chat** opens across the whole work area on startup. Muse Code is never paused: walkthrough playback, opening files and opening chat only affect the explanation.
-- **Walkthrough** controls: Rewind, Pause/Resume, Next, and Open chat at the bottom right. **Open file ↗** inside the explanation zone pauses playback and opens the editable file at the focused lines.
+- **Walkthrough** controls: Rewind, Pause/Resume and Next at the bottom. At the top right, **History** replays an earlier walkthrough and **Open File** pauses playback and opens the editable file at the focused lines.
+- **More detail** on each explanation card pauses the walkthrough and asks the read-only explanation session to re-explain that part in greater depth. The answer streams into the card and is read aloud.
+- **Floating buttons**: **Chat** appears whenever chat isn't showing, and **Walkthrough** (the latest explanation) appears whenever a walkthrough isn't showing. Reopening chat always starts on a new coding task; **Ask About** switches to questions about the paused walkthrough.
+- **Pending checks** (background commands that outlasted the timeout) update live on the cards when they finish or fail, and the result is saved to history.
+- **Detail feedback**: now and then, at the end of a walkthrough, Active asks whether the detail was too much, about right, or too little. Each answer nudges the general detail preference a little (a full step changes the depth setting) and moves the profile's knowledge of the walkthrough's topics more.
+- **Voices**: click the Phonon item in the status bar (or **Active: Choose Narration Voice**) to preview and pick one of Phonon's catalog voices. Each voice downloads on first use.
 - **Default keybindings**, all rebindable in Keyboard Shortcuts:
   - With the walkthrough focused: `Space`/`K` pause or resume, `←`/`J` rewind, `→`/`L` advance, `C` open chat, `O` open file.
   - Anywhere: `⌘K C` open chat about the walkthrough, `⌘K W` return to the walkthrough, `⌘⌥I` open chat.
@@ -109,7 +126,7 @@ demo/                           sample project + scripted scenarios for the test
 ## Tests
 
 ```sh
-cd active/extension && npm test       # 19 tests
+cd active/extension && npm test       # 33 tests
 ```
 
 These include unit tests for diffing, worthiness (including no accumulation across turns), walkthrough validation, change capture (shell edits, user attribution, pre-existing changes, freezing), history save/replay/delete, and personalization of prompts. An end-to-end test drives the controller through the real `@muse-code/sdk` against the scripted host. It covers the simple, tiny, and multi-file turns, the background timeout, pending checks, immutable captures, and read-only Q&A.
@@ -121,6 +138,7 @@ To type-check the workbench contribution: `cd vscode && npx tsc -p src/tsconfig.
 - **Not verified against a live Muse Code host.** The adapter follows the SDK's documented protocol (commands, notifications, approvals, `task/list`, `item/readOutput`) and was exercised only through the SDK against the scripted test host. It still needs a run with an installed, signed-in `muse`.
 - **Read-only profile id.** The stable MSP surface doesn't list permission profile ids. Active tries `read-only` / `readOnly` / `read_only` and otherwise falls back to `denyUnmatched`. The snapshot workspace is the main protection either way.
 - **Questions while Muse is waiting.** Muse Code's own clarifying questions (`userInput/request`) are cancelled in auto mode.
+- **Hidden browser sign-in reads `muse login` output.** Active looks for the sign-in URL, the code, and the "Press Enter to open it in your browser" prompt, and treats exit code 0 as success. This was checked against Muse Code 1.4.14 up to the approval step. A later release that changes this output could break it; Active then shows a clear error and offers the API-key route. It isn't available on Windows yet, where it falls back to API keys.
 - **Restoring after a reload.** Chat history is not restored into the chat view after a window reload. Everything is in History, and walkthroughs can be replayed from there. Editors for walkthroughs are not restored across restarts.
-- **Narration speed.** Speed is applied at playback (`playbackRate` with preserved pitch). Phonon exposes a single built-in English voice (`default`) in this setup.
+- **Narration speed.** Speed is applied at playback (`playbackRate` with preserved pitch). Catalog voices need a network connection the first time each is used; the built-in voice works offline.
 - **Large repositories.** The workspace mirror tracks up to 8,000 text files of at most 1 MB each.

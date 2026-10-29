@@ -30,7 +30,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import type { CapturedFile, Scene, Walkthrough } from '../common/activeProtocol.js';
+import type { CapturedFile, DetailFeedback, PendingCheck, Scene, Walkthrough } from '../common/activeProtocol.js';
 import { WalkthroughInput } from './activeInputs.js';
 import { ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
@@ -102,6 +102,7 @@ export class WalkthroughEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.activeWalkthrough';
 
 	private root!: HTMLElement;
+	private header!: HTMLElement;
 	private fileStrip!: HTMLElement;
 	private breadcrumbs!: HTMLElement;
 	private versionLabel!: HTMLElement;
@@ -121,6 +122,18 @@ export class WalkthroughEditor extends EditorPane {
 	private player: WalkthroughPlayer | undefined;
 	private revealedRanges = new Set<string>();
 	private dimension: dom.Dimension | undefined;
+	private headerActions!: HTMLElement;
+	private pendingHost: HTMLElement | undefined;
+	private deeperHost: HTMLElement | undefined;
+	private moreDetailButton: HTMLButtonElement | undefined;
+	private readonly deeperStore = this._register(new DisposableStore());
+	/** Scenes whose deeper explanation is collapsed again after being shown. */
+	private readonly collapsedDeeper = new Set<string>();
+	/** Deeper explanations already read aloud once, by request id. */
+	private readonly spokenDeeper = new Set<string>();
+	private feedbackFor: string | undefined;
+	private feedback: HTMLElement | undefined;
+	private readonly feedbackStore = this._register(new DisposableStore());
 
 	constructor(
 		group: IEditorGroup,
@@ -147,8 +160,11 @@ export class WalkthroughEditor extends EditorPane {
 		this._register(focusTracker.onDidFocus(() => this.focusKey.set(true)));
 		this._register(focusTracker.onDidBlur(() => this.focusKey.set(false)));
 
-		const header = dom.append(this.root, $('.walkthrough-header'));
-		this.fileStrip = dom.append(header, $('.walkthrough-files'));
+		const header = this.header = dom.append(this.root, $('.walkthrough-header'));
+		const top = dom.append(header, $('.walkthrough-top'));
+		this.fileStrip = dom.append(top, $('.walkthrough-files'));
+		this.headerActions = dom.append(top, $('.walkthrough-actions'));
+		this.renderHeaderActions();
 		const crumbRow = dom.append(header, $('.walkthrough-crumbs'));
 		this.breadcrumbs = dom.append(crumbRow, $('.breadcrumbs'));
 		this.versionLabel = dom.append(crumbRow, $('.captured-version'));
@@ -217,6 +233,31 @@ export class WalkthroughEditor extends EditorPane {
 		this.inputStore.add(this.activeService.onDidChangePlayer(() => this.bindPlayer()));
 		this.inputStore.add(this.activeService.onDidChangeNarration(() => this.renderControls()));
 		this.inputStore.add(this.activeService.onDidChangeAgent(() => this.renderControls()));
+		this.inputStore.add(this.activeService.onDidChangeChecks(walkthroughId => walkthroughId === this.player?.walkthrough.id && this.renderPending()));
+		this.inputStore.add(this.activeService.onDidChangeElaboration(elaboration => elaboration.walkthroughId === this.player?.walkthrough.id && this.renderDeeper()));
+		this.inputStore.add(this.activeService.onDidChangeSpeaking(() => this.renderDeeper()));
+		this.inputStore.add(this.activeService.onDidChangeHistory(() => this.renderHeaderActions()));
+		this.hideFeedback();
+		this.feedbackFor = undefined;
+	}
+
+	/** Top-right of the walkthrough: history and the editable file, for the whole panel rather than each card. */
+	private readonly headerActionStore = this._register(new DisposableStore());
+
+	private renderHeaderActions(): void {
+		this.headerActionStore.clear();
+		dom.clearNode(this.headerActions);
+		const action = (icon: ThemeIcon, label: string, title: string, run: () => unknown) => {
+			const element = dom.append(this.headerActions, $('button.walkthrough-action')) as HTMLButtonElement;
+			dom.append(element, $('span')).classList.add(...ThemeIcon.asClassNameArray(icon));
+			dom.append(element, $('span.label')).textContent = label;
+			element.title = title;
+			this.headerActionStore.add(dom.addDisposableListener(element, dom.EventType.CLICK, () => run()));
+			return element;
+		};
+		const earlier = this.activeService.history.filter(turn => turn.walkthroughId).length;
+		action(Codicon.history, earlier > 1 ? localize('historyCount', "History ({0})", earlier) : localize('history', "History"), localize('historyTitle', "Replay an earlier walkthrough"), () => this.activeService.pickFromHistory());
+		action(Codicon.goToFile, localize('openFile', "Open File"), this.withKeybinding(localize('openFileTitle', "Pause and open the editable file at these lines"), WalkthroughCommandIds.OpenFile), () => this.activeService.openCurrentFile());
 	}
 
 	private readonly playerListener = this._register(new MutableDisposable());
@@ -240,6 +281,8 @@ export class WalkthroughEditor extends EditorPane {
 
 	override clearInput(): void {
 		this.player?.pause();
+		this.activeService.stopSpeaking();
+		this.hideFeedback();
 		this.inputStore.clear();
 		this.playerListener.clear();
 		this.player = undefined;
@@ -254,6 +297,7 @@ export class WalkthroughEditor extends EditorPane {
 		if (!visible) {
 			// Leaving the walkthrough pauses only the explanation, never the coding agent.
 			this.player?.pause();
+			this.activeService.stopSpeaking();
 		}
 	}
 
@@ -266,7 +310,7 @@ export class WalkthroughEditor extends EditorPane {
 		this.dimension = dimension;
 		this.root.style.width = `${dimension.width}px`;
 		this.root.style.height = `${dimension.height}px`;
-		const chrome = this.fileStrip.parentElement!.offsetHeight + this.footer.offsetHeight;
+		const chrome = this.header.offsetHeight + this.footer.offsetHeight;
 		this.codeEditor.layout({ width: dimension.width, height: Math.max(100, dimension.height - chrome) });
 		this.relayoutVisual?.();
 	}
@@ -484,10 +528,9 @@ export class WalkthroughEditor extends EditorPane {
 		const store = this.sceneStore.value!;
 		const head = dom.append(card, $('.card-head'));
 		dom.append(head, $('.eyebrow')).textContent = scene.label;
-		const openFile = dom.append(head, $('button.open-file'));
-		openFile.textContent = localize('openFile', "Open file ↗");
-		openFile.title = this.withKeybinding(localize('openFileTitle', "Pause and open the editable file here"), WalkthroughCommandIds.OpenFile);
-		store.add(dom.addDisposableListener(openFile, dom.EventType.CLICK, () => this.activeService.openCurrentFile()));
+		const moreDetail = dom.append(head, $('button.more-detail')) as HTMLButtonElement;
+		this.moreDetailButton = moreDetail;
+		store.add(dom.addDisposableListener(moreDetail, dom.EventType.CLICK, () => this.toggleDeeper(walkthrough, scene)));
 		dom.append(card, $('h2.title')).textContent = scene.title;
 		const kind = visualKindLabel(scene.visual);
 		if (kind) {
@@ -507,16 +550,177 @@ export class WalkthroughEditor extends EditorPane {
 		const narration = dom.append(card, $('p.narration'));
 		narration.setAttribute('aria-live', 'polite');
 		this.updateNarrationText(narration);
-		const pending = [...(scene.pending ?? []), ...walkthrough.pending.map(check => check.label)].filter((value, index, all) => all.indexOf(value) === index);
-		if (pending.length) {
-			const row = dom.append(card, $('.pending'));
-			for (const label of pending) {
-				const pill = dom.append(row, $('span.pending-pill'));
-				dom.append(pill, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.loading), 'codicon-modifier-spin');
-				dom.append(pill, $('span')).textContent = localize('pendingCheck', "Pending: {0}", label);
+		this.deeperHost = dom.append(card, $('.deeper'));
+		this.pendingHost = dom.append(card, $('.pending'));
+		this.renderDeeper();
+		this.renderPending();
+		this.layoutExplanationZone();
+	}
+
+	/** Checks that hadn't finished when the walkthrough was made; they update live as the tasks report back. */
+	private renderPending(): void {
+		const player = this.player;
+		const host = this.pendingHost;
+		if (!player || !host) {
+			return;
+		}
+		dom.clearNode(host);
+		const scene = player.walkthrough.scenes[player.position.scene];
+		const checks = this.activeService.pendingChecks(player.walkthrough);
+		const labels = [...(scene.pending ?? []), ...checks.map(check => check.label)].filter((value, index, all) => all.indexOf(value) === index);
+		for (const label of labels) {
+			const state: PendingCheck['state'] = checks.find(check => check.label === label)?.state ?? 'running';
+			const pill = dom.append(host, $('span.pending-pill'));
+			pill.classList.add(state);
+			const icon = dom.append(pill, $('span'));
+			if (state === 'finished') {
+				icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.passFilled));
+			} else if (state === 'failed') {
+				icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.error));
+			} else {
+				icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.loading), 'codicon-modifier-spin');
 			}
+			dom.append(pill, $('span')).textContent = state === 'finished'
+				? localize('checkFinished', "Finished: {0}", label)
+				: state === 'failed'
+					? localize('checkFailed', "Failed: {0}", label)
+					: localize('pendingCheck', "Still running: {0}", label);
+		}
+		host.classList.toggle('hidden', labels.length === 0);
+		this.layoutExplanationZone();
+	}
+
+	private toggleDeeper(walkthrough: Walkthrough, scene: Scene): void {
+		const key = `${walkthrough.id}/${scene.id}`;
+		const existing = this.activeService.elaboration(walkthrough.id, scene.id);
+		if (existing && existing.status !== 'error' && !this.collapsedDeeper.has(key)) {
+			this.collapsedDeeper.add(key);
+			this.activeService.stopSpeaking();
+		} else {
+			this.collapsedDeeper.delete(key);
+			this.player?.pause();
+			this.activeService.elaborate(walkthrough.id, scene.id);
+		}
+		this.renderDeeper();
+	}
+
+	/** The deeper re-explanation of the current scene, streamed in and then read aloud. */
+	private renderDeeper(): void {
+		const player = this.player;
+		const host = this.deeperHost;
+		if (!player || !host) {
+			return;
+		}
+		this.deeperStore.clear();
+		dom.clearNode(host);
+		const scene = player.walkthrough.scenes[player.position.scene];
+		const key = `${player.walkthrough.id}/${scene.id}`;
+		const elaboration = this.activeService.elaboration(player.walkthrough.id, scene.id);
+		const open = !!elaboration && !this.collapsedDeeper.has(key);
+		if (this.moreDetailButton) {
+			dom.clearNode(this.moreDetailButton);
+			dom.append(this.moreDetailButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(open ? Codicon.chevronUp : Codicon.listTree));
+			dom.append(this.moreDetailButton, $('span')).textContent = open ? localize('lessDetail', "Less detail") : localize('moreDetail', "More detail");
+			this.moreDetailButton.title = open ? localize('lessDetailTitle', "Hide the deeper explanation") : localize('moreDetailTitle', "Pause and re-explain this part in greater depth");
+		}
+		host.classList.toggle('hidden', !open);
+		if (!open || !elaboration) {
+			this.layoutExplanationZone();
+			return;
+		}
+		const head = dom.append(host, $('.deeper-head'));
+		const icon = dom.append(head, $('span'));
+		icon.classList.add(...ThemeIcon.asClassNameArray(elaboration.status === 'streaming' ? Codicon.loading : elaboration.status === 'error' ? Codicon.error : Codicon.lightbulb));
+		if (elaboration.status === 'streaming') {
+			icon.classList.add('codicon-modifier-spin');
+		}
+		dom.append(head, $('span')).textContent = elaboration.status === 'streaming' && !elaboration.text
+			? localize('deeperLoading', "Working out a deeper explanation…")
+			: localize('deeperTitle', "In more depth");
+		const body = dom.append(host, $('.deeper-body'));
+		for (const paragraph of elaboration.text.split(/\n\s*\n/).map(part => part.trim()).filter(Boolean)) {
+			dom.append(body, $('p')).textContent = paragraph;
+		}
+		const actions = dom.append(host, $('.deeper-actions'));
+		const button = (label: string, run: () => void, primary = false) => {
+			const element = dom.append(actions, $(primary ? 'button.primary' : 'button.secondary')) as HTMLButtonElement;
+			element.textContent = label;
+			this.deeperStore.add(dom.addDisposableListener(element, dom.EventType.CLICK, () => run()));
+		};
+		if (elaboration.status === 'error') {
+			button(localize('deeperRetry', "Try Again"), () => this.toggleDeeper(player.walkthrough, scene));
+		} else if (elaboration.status === 'done') {
+			if (this.activeService.narration.available) {
+				if (this.activeService.speaking) {
+					button(localize('deeperStop', "Stop Reading"), () => this.activeService.stopSpeaking());
+				} else {
+					button(localize('deeperListen', "Read Aloud"), () => void this.activeService.speak(elaboration.text));
+				}
+				if (!this.spokenDeeper.has(elaboration.requestId)) {
+					this.spokenDeeper.add(elaboration.requestId);
+					void this.activeService.speak(elaboration.text);
+				}
+			}
+			button(localize('deeperContinue', "Continue Walkthrough"), () => {
+				this.activeService.stopSpeaking();
+				this.collapsedDeeper.add(key);
+				player.play();
+				this.renderDeeper();
+			}, true);
 		}
 		this.layoutExplanationZone();
+	}
+
+	// ------------------------------------------------------------------ detail feedback
+
+	/** Occasionally asks, at the end of a walkthrough, whether the level of detail suited the learner. */
+	private maybeAskForFeedback(): void {
+		const player = this.player;
+		if (!player || player.state !== 'ended' || this.feedbackFor === player.walkthrough.id) {
+			return;
+		}
+		this.feedbackFor = player.walkthrough.id;
+		if (this.activeService.shouldAskForFeedback(player.walkthrough)) {
+			this.showFeedback(player.walkthrough);
+		}
+	}
+
+	private showFeedback(walkthrough: Walkthrough): void {
+		this.hideFeedback();
+		const panel = dom.append(this.root, $('.detail-feedback'));
+		this.feedback = panel;
+		dom.append(panel, $('.feedback-question')).textContent = localize('feedbackQuestion', "How was the level of detail in this walkthrough?");
+		const options = dom.append(panel, $('.feedback-options'));
+		const choices: Array<[DetailFeedback, string]> = [
+			['tooMuch', localize('feedbackTooMuch', "Too much")],
+			['right', localize('feedbackRight', "About right")],
+			['tooLittle', localize('feedbackTooLittle', "Too little")],
+		];
+		for (const [value, label] of choices) {
+			const choice = dom.append(options, $('button.secondary')) as HTMLButtonElement;
+			choice.textContent = label;
+			this.feedbackStore.add(dom.addDisposableListener(choice, dom.EventType.CLICK, async () => {
+				await this.activeService.recordDetailFeedback(walkthrough, value);
+				const topics = walkthrough.terms.map(term => term.name).slice(0, 2);
+				dom.clearNode(panel);
+				dom.append(panel, $('.feedback-thanks')).textContent = value === 'right'
+					? localize('feedbackThanksRight', "Thanks. Active will keep explaining at this level.")
+					: value === 'tooMuch'
+						? (topics.length ? localize('feedbackThanksLessTopic', "Thanks. Future walkthroughs will go a little lighter, especially on {0}.", topics.join(' and ')) : localize('feedbackThanksLess', "Thanks. Future walkthroughs will go a little lighter."))
+						: (topics.length ? localize('feedbackThanksMoreTopic', "Thanks. Future walkthroughs will go a little deeper, especially on {0}.", topics.join(' and ')) : localize('feedbackThanksMore', "Thanks. Future walkthroughs will go a little deeper."));
+				setTimeout(() => this.hideFeedback(), 3500);
+			}));
+		}
+		const dismiss = dom.append(panel, $('button.feedback-dismiss')) as HTMLButtonElement;
+		dismiss.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		dismiss.title = localize('feedbackDismiss', "Not now");
+		this.feedbackStore.add(dom.addDisposableListener(dismiss, dom.EventType.CLICK, () => this.hideFeedback()));
+	}
+
+	private hideFeedback(): void {
+		this.feedbackStore.clear();
+		this.feedback?.remove();
+		this.feedback = undefined;
 	}
 
 	private updateNarrationText(target?: HTMLElement): void {
@@ -611,15 +815,15 @@ export class WalkthroughEditor extends EditorPane {
 		} else if (player?.state === 'ended') {
 			status.textContent = localize('complete', "Walkthrough complete");
 		}
-		const chat = button(localize('openChat', "Open chat"), WalkthroughCommandIds.OpenChat, localize('openChatTitle', "Pause and ask about this explanation"), () => this.activeService.openChat(true), '.open-chat');
-		void chat;
+		// Chat is one click away through the floating Chat button (and its keybinding).
 		this.relayoutChrome();
+		this.maybeAskForFeedback();
 	}
 
 	/** Header and footer heights depend on their content; keep the code editor sized to what remains. */
 	private relayoutChrome(): void {
 		if (this.dimension) {
-			const chrome = this.fileStrip.parentElement!.offsetHeight + this.footer.offsetHeight;
+			const chrome = this.header.offsetHeight + this.footer.offsetHeight;
 			const height = Math.max(100, this.dimension.height - chrome);
 			if (this.codeEditor.getLayoutInfo().height !== height) {
 				this.codeEditor.layout({ width: this.dimension.width, height });

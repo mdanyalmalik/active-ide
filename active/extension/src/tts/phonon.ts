@@ -6,15 +6,18 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as readline from 'node:readline';
+import type { NarrationStatus, VoiceInfo } from '../shared/activeProtocol';
 
 interface Pending {
 	resolve(wav: string): void;
 	reject(error: Error): void;
 }
 
-export interface PhononStatus {
-	readonly available: boolean;
-	readonly detail: string;
+export type PhononStatus = NarrationStatus;
+
+/** Storytelling character voices (a demon, a wizard…) as opposed to everyday narrators. */
+function isCharacterVoice(name: string, description: string | undefined): boolean {
+	return / /.test(name) || /\b(demon|wizard|knight|gravedigger|ogre|elf|queen|pirate|godmother|creature|dragon|monster|witch|giant|ghost)\b/i.test(description ?? '');
 }
 
 /**
@@ -27,6 +30,7 @@ export class PhononNarrator {
 	private readonly pending = new Map<string, Pending>();
 	private nextId = 1;
 	private status: PhononStatus = { available: false, detail: 'Phonon not started' };
+	private voices: VoiceInfo[] = [];
 
 	constructor(private readonly python: string, private readonly script: string, private readonly onStatus: (status: PhononStatus) => void, private readonly log: (line: string) => void) { }
 
@@ -51,7 +55,7 @@ export class PhononNarrator {
 			const lines = readline.createInterface({ input: child.stdout });
 			let started = false;
 			lines.on('line', line => {
-				let message: { ready?: boolean; error?: string; id?: string; wav?: string; model?: string };
+				let message: { ready?: boolean; error?: string; id?: string; wav?: string; model?: string; voices?: Array<{ name: string; description?: string } | string> };
 				try {
 					message = JSON.parse(line);
 				} catch {
@@ -61,6 +65,7 @@ export class PhononNarrator {
 				if (!started && message.ready !== undefined) {
 					started = true;
 					if (message.ready) {
+						this.voices = (message.voices ?? []).map(voice => typeof voice === 'string' ? { name: voice } : { name: voice.name, description: voice.description || undefined, character: voice.name !== 'default' && isCharacterVoice(voice.name, voice.description) });
 						this.setStatus({ available: true, detail: 'Phonon 31M English · on-device' });
 						resolve();
 					} else {
@@ -114,6 +119,7 @@ export class PhononNarrator {
 	}
 
 	private setStatus(status: PhononStatus): void {
+		status = { ...status, voices: this.voices.length ? this.voices : undefined };
 		this.status = status;
 		this.onStatus(status);
 	}

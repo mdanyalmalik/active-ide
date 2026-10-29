@@ -4,12 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as dom from '../../../../base/browser/dom.js';
-import { DomScrollableElement } from '../../../../base/browser/ui/scrollbar/scrollableElement.js';
-import { mainWindow } from '../../../../base/browser/window.js';
-import { decodeBase64 } from '../../../../base/common/buffer.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
-import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -48,7 +44,7 @@ export class LearningProfileEditor extends EditorPane {
 
 	private root!: HTMLElement;
 	private form!: HTMLElement;
-	private scrollable!: DomScrollableElement;
+	private voiceSelect: HTMLSelectElement | undefined;
 	private draft!: Mutable<LearningProfile>;
 	private readonly formStore = this._register(new DisposableStore());
 
@@ -64,10 +60,10 @@ export class LearningProfileEditor extends EditorPane {
 	}
 
 	protected createEditor(parent: HTMLElement): void {
+		// The page scrolls natively: the form grows as rows are added, and the root is the scroll container.
 		this.root = dom.append(parent, $('.active-profile'));
-		this.form = $('.active-profile-form');
-		this.scrollable = this._register(new DomScrollableElement(this.form, { vertical: ScrollbarVisibility.Auto, horizontal: ScrollbarVisibility.Hidden }));
-		this.root.appendChild(this.scrollable.getDomNode());
+		this.form = dom.append(this.root, $('.active-profile-form'));
+		this._register(this.activeService.onDidChangeNarration(() => this.renderVoices()));
 	}
 
 	override async setInput(input: LearningProfileInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -79,8 +75,7 @@ export class LearningProfileEditor extends EditorPane {
 
 	override layout(dimension: dom.Dimension): void {
 		this.root.style.height = `${dimension.height}px`;
-		this.scrollable.getDomNode().style.height = `${dimension.height}px`;
-		this.scrollable.scanDomNode();
+		this.root.style.width = `${dimension.width}px`;
 	}
 
 	private section(title: string, help: string): HTMLElement {
@@ -130,7 +125,8 @@ export class LearningProfileEditor extends EditorPane {
 					option.textContent = label;
 					option.selected = id === item.familiarity;
 				}
-				this.formStore.add(dom.addDisposableListener(select, dom.EventType.CHANGE, () => { items[index] = { ...items[index], familiarity: select.value as Familiarity }; }));
+				// Choosing a familiarity by hand replaces any level learned from feedback.
+				this.formStore.add(dom.addDisposableListener(select, dom.EventType.CHANGE, () => { items[index] = { name: items[index].name, familiarity: select.value as Familiarity }; }));
 				const remove = dom.append(row, $('button.secondary')) as HTMLButtonElement;
 				remove.textContent = localize('remove', "Remove");
 				this.formStore.add(dom.addDisposableListener(remove, dom.EventType.CLICK, () => { items.splice(index, 1); render(); }));
@@ -177,7 +173,12 @@ export class LearningProfileEditor extends EditorPane {
 			['overview', localize('depthOverview', "Overview — the key idea and where it lives")],
 			['balanced', localize('depthBalanced', "Balanced — intuition, implementation and behavior")],
 			['deep', localize('depthDeep', "Deep — mechanisms, edge cases and tradeoffs")],
-		], draft.depth, value => { draft.depth = value; });
+		], draft.depth, value => { draft.depth = value; draft.detailBias = 0; });
+		if (Math.abs(draft.detailBias ?? 0) >= 0.1) {
+			dom.append(depth, $('p.help.learned')).textContent = draft.detailBias > 0
+				? localize('learnedMore', "From your feedback, walkthroughs lean toward a little more detail within this depth.")
+				: localize('learnedLess', "From your feedback, walkthroughs lean toward a little less detail within this depth.");
+		}
 
 		const math = this.section(localize('math', "Mathematical notation"), '');
 		this.choices<MathComfort>(math, 'math', [
@@ -220,8 +221,13 @@ export class LearningProfileEditor extends EditorPane {
 			draft.narrationRate = Number(range.value);
 			speedValue.textContent = `${draft.narrationRate.toFixed(2)}×`;
 		}));
-		const preview = dom.append(narration, $('button.secondary')) as HTMLButtonElement;
-		preview.textContent = localize('preview', "Preview Voice");
+		const voice = dom.append(narration, $('label.inline'));
+		dom.append(voice, $('span')).textContent = localize('voice', "Voice");
+		const voiceSelect = this.voiceSelect = dom.append(voice, $('select.voice-select')) as HTMLSelectElement;
+		this.formStore.add(dom.addDisposableListener(voiceSelect, dom.EventType.CHANGE, () => { draft.voice = voiceSelect.value; }));
+		this.renderVoices();
+		const preview = dom.append(voice, $('button.secondary')) as HTMLButtonElement;
+		preview.textContent = localize('preview', "Preview");
 		this.formStore.add(dom.addDisposableListener(preview, dom.EventType.CLICK, () => this.preview()));
 
 		const notes = this.section(localize('notes', "Anything else"), '');
@@ -240,21 +246,47 @@ export class LearningProfileEditor extends EditorPane {
 			await this.activeService.saveProfile(cleaned);
 			this.notificationService.info(localize('saved', "Learning profile saved. New walkthroughs will use it."));
 		}));
-		this.scrollable.scanDomNode();
+	}
+
+	/** Fills the voice list from what the narrator offers (it arrives once Phonon has loaded). */
+	private renderVoices(): void {
+		const select = this.voiceSelect;
+		if (!select || !this.draft) {
+			return;
+		}
+		dom.clearNode(select);
+		const voices = this.activeService.narration.voices?.length ? this.activeService.narration.voices : [{ name: 'default' }];
+		const groups: Array<[string, typeof voices]> = [
+			[localize('narratorsGroup', "Narrators"), voices.filter(voice => !voice.character)],
+			[localize('charactersGroup', "Character voices"), voices.filter(voice => voice.character)],
+		];
+		for (const [label, members] of groups) {
+			if (!members.length) {
+				continue;
+			}
+			const group = dom.append(select, $('optgroup')) as HTMLOptGroupElement;
+			group.label = label;
+			for (const voice of members) {
+				const option = dom.append(group, $('option')) as HTMLOptionElement;
+				option.value = voice.name;
+				option.textContent = voice.name === 'default' ? localize('defaultVoiceOption', "Default") : voice.name;
+				option.title = voice.description ?? '';
+			}
+		}
+		const current = this.draft.voice || 'default';
+		if (!voices.some(voice => voice.name === current)) {
+			const option = dom.append(select, $('option')) as HTMLOptionElement;
+			option.value = current;
+			option.textContent = current;
+		}
+		select.value = current;
 	}
 
 	private async preview(): Promise<void> {
-		const result = await this.activeService.synthesize(localize('previewText', "This is how walkthrough narration will sound at this speed."));
-		if (!result.wav) {
-			this.notificationService.warn(localize('previewFailed', "Narration is unavailable: {0}", result.error ?? ''));
+		if (!this.activeService.narration.available) {
+			this.notificationService.warn(localize('previewFailed', "Narration is unavailable: {0}", this.activeService.narration.detail));
 			return;
 		}
-		const url = URL.createObjectURL(new Blob([new Uint8Array(decodeBase64(result.wav).buffer)], { type: 'audio/wav' }));
-		const audio = mainWindow.document.createElement('audio');
-		audio.src = url;
-		audio.preservesPitch = true;
-		audio.playbackRate = this.draft.narrationRate;
-		audio.onended = () => URL.revokeObjectURL(url);
-		await audio.play().catch(() => URL.revokeObjectURL(url));
+		await this.activeService.speak(localize('previewText', "This is how walkthrough narration will sound in this voice."), this.draft.voice);
 	}
 }
