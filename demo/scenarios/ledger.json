@@ -229,6 +229,7 @@
   },
   {
    "match": "typo",
+   "note": "Fixed the README wording: the project is now described as \"small\" instead of \"tiny\". No code changed.",
    "steps": [
     {
      "type": "edit",

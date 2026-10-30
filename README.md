@@ -2,7 +2,7 @@
 
 Active is a Code OSS–based IDE that keeps you informed while an AI agent codes: every meaningful change comes with a narrated walkthrough, tuned to what you already know. It's for developers at any stage of their career who want to follow along with the agent's work rather than review it blind. It was built for the Meta Global Hackathon.
 
-You give Muse Code a task in a chat that fills the work area. When the coding turn finishes and the change is worth explaining, chat hands off to an inline walkthrough: the captured code sits in the native editor, and an explanation zone next to the relevant lines switches between code, diffs, equations, diagrams and charts, in step with on-device narration (Phonon 31M).
+You give Muse Code a task in a chat that fills the work area. The explanation model decides, from your knowledge profile, whether and how much to explain: nothing, a short note in chat, or an inline walkthrough. Long tasks are explained in chapters as each piece of work is finished. A walkthrough pops up from chat: the captured code sits in the native editor, and an explanation zone next to the relevant lines switches between code, diffs, equations, diagrams and charts, in step with on-device narration (Phonon 31M).
 
 ## Setup
 
@@ -102,8 +102,10 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `active.walkthrough.backgroundTimeoutSeconds` | 20 | How long to wait for background tasks after a turn before explaining. Unfinished checks are marked pending, and the tasks keep running. |
-| `active.explain.minMeaningfulLines` | 8 | Per-turn threshold for meaningful changes. Turns are assessed independently and never accumulate. |
-| `active.explain.draftQuietSeconds` | 6 | Quiet period before drafting while the agent is still working. |
+| `active.explain.checkpointMinutes` | 5 | Minimum minutes between asking whether finished work is ready for a chapter. |
+| `active.explain.chapterMinutes` | 10 | At most one chapter per this many minutes; shorter tasks get one explanation at the end. |
+| `active.explain.queueChapters` | true | A chapter that's ready while you watch the previous one waits until it ends. |
+| `active.explain.preferNotesForSmallChanges` | true | Small changes and short requests lean toward a note in chat. |
 | `active.muse.binaryPath` / `active.narration.pythonPath` | – | Tool locations. |
 
 ## Architecture
@@ -128,7 +130,7 @@ demo/                           sample project + scripted scenarios for the test
 - **Change capture.** Active captures changes from file watcher events and from mtime rescans after every tool call, so edits made by shell commands are caught too. Typing in an editor attributes the resulting save to the user. Uncommitted user changes that existed before the turn sit in the baseline, so they stay out of the agent's diff.
 - **Immutable playback.** A turn's capture is frozen when the coding turn ends. The walkthrough editor shows read-only `active-snapshot:` models, so later edits never alter it.
 - **Pre-generated narration.** As soon as a walkthrough's script is ready, its whole narration is synthesized in the background (in memory only), ordered from the current position and re-prioritized on rewind or skip. Pausing, resuming and jumping never wait on synthesis.
-- **Planning.** Worthiness is re-evaluated after every edit. A draft is prepared while the agent is still working and reconciled or revised at the end of the turn. The planner sends the model the task, diffs, numbered source, tool outcomes and exposed reasoning summaries (never hidden chain-of-thought), along with the profile and recent turns. Output is validated against the captured files: ranges are checked, quotes must match the captured code, observed charts must cite evidence, and scenes about reverted work are dropped. Invalid output goes back to the model for repair.
+- **Planning.** Code only checks that a change has something meaningful in it; the explanation model decides whether to explain and at what length. At the agent's checkpoints (progress updates, finished test runs) a cheap question asks whether finished work is ready for a chapter. The final explanation starts as soon as the agent gives its final answer and is reconciled or revised when the turn completes. The planner sends the model the task, diffs, numbered source, tool outcomes and exposed reasoning summaries (never hidden chain-of-thought), along with the profile and recent turns. Output is validated against the captured files: ranges are checked, quotes must match the captured code, observed charts must cite evidence, and scenes about reverted work are dropped. Invalid output goes back to the model for repair.
 - **Patches to Code OSS** (`scripts/apply_patches.py`, all idempotent):
   - load the contribution
   - allow `blob:` media for in-memory narration audio

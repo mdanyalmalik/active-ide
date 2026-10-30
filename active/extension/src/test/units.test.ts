@@ -10,8 +10,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
 import type { AgentSession } from '../agents/agentTypes';
-import { ExplanationAgent } from '../explain/planner';
-import { buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
+import { ExplanationAgent, WalkthroughPlanner } from '../explain/planner';
+import { buildCheckpointPrompt, buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
 import { assessWorthiness } from '../explain/worthiness';
 import { HistoryStore } from '../history/historyStore';
 import { applyDetailFeedback, applySkipSignal, CapturedFile, DEFAULT_PROFILE, extractJsonObject, KnowledgeProfile, validateWalkthrough, Walkthrough } from '../shared/activeProtocol';
@@ -39,47 +39,22 @@ describe('lineDiff', () => {
 	});
 });
 
-describe('worthiness', () => {
-	const options = { minMeaningfulLines: 8 };
-
-	test('a one-line wording change is not explained', () => {
-		const verdict = assessWorthiness([change('README.md', 'A tiny project\n', 'A small project\n')], options);
-		assert.equal(verdict.worthy, false);
-	});
-
-	test('whitespace-only and comment-only changes are not meaningful', () => {
+describe('meaningful-change filter', () => {
+	// Only screens out changes with nothing to explain; whether to explain is the explanation model's call.
+	test('whitespace-only, comment-only and lock-file changes are filtered out', () => {
 		const before = 'function f(a) {\n\treturn a + 1;\n}\n';
 		const after = '// adds one\nfunction f(a) {\n    return a + 1;\n}\n';
-		assert.equal(assessWorthiness([change('f.js', before, after)], options).meaningfulLines, 0);
+		assert.deepStrictEqual(
+			[assessWorthiness([change('f.js', before, after)]).worthy, assessWorthiness([change('package-lock.json', '{}\n', '{"a":1}\n')]).worthy],
+			[false, false],
+		);
 	});
 
-	test('new behavior with logic is explained', () => {
-		const before = 'export function parse(t) {\n\treturn Number(t);\n}\n';
-		const after = [
-			'const UNITS = { s: 1000, m: 60000 };',
-			'export function parse(t) {',
-			'\tconst match = /^(\\d+)(s|m)$/.exec(t);',
-			'\tif (!match) {',
-			'\t\tthrow new Error(`bad ${t}`);',
-			'\t}',
-			'\tconst value = Number(match[1]) * UNITS[match[2]];',
-			'\tif (value <= 0) {',
-			'\t\tthrow new Error(`zero ${t}`);',
-			'\t}',
-			'\treturn value;',
-			'}',
-			'',
-		].join('\n');
-		assert.equal(assessWorthiness([change('parse.js', before, after)], options).worthy, true);
-	});
-
-	test('small changes in separate turns never accumulate', () => {
-		const turns = [
-			[change('a.js', 'const x = 1;\n', 'const x = 2;\n')],
-			[change('b.js', 'let y = 1;\n', 'let y = 3;\n')],
-			[change('c.js', 'if (a) {}\n', 'if (a && b) {}\n')],
-		];
-		assert.deepStrictEqual(turns.map(turn => assessWorthiness(turn, options).worthy), [false, false, false]);
+	test('any real change, however small, goes to the explanation model', () => {
+		assert.deepStrictEqual(
+			[assessWorthiness([change('a.js', 'const x = 1;\n', 'const x = 8;\n')]).worthy, assessWorthiness([change('README.md', 'A tiny project\n', 'A small project\n')]).worthy],
+			[true, true],
+		);
 	});
 });
 
@@ -205,15 +180,63 @@ describe('history store', () => {
 	});
 });
 
+describe('chapters and explainer-chosen length', () => {
+	const files = { 'a.js': { path: 'a.js', baseline: 'x\n', final: 'y\n', added: 1, removed: 1 } };
+	const context = { task: 'Build the queue', turnIndex: 3, files, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: false, preferNotes: true, profile: DEFAULT_PROFILE };
+
+	test('a chapter prompt explains only what changed since the last chapter and lists earlier ones', () => {
+		const prompt = buildPlanningPrompt({ ...context, chapter: { index: 2, earlier: [{ title: 'Heap ordering', summary: 'Jobs pop by priority.' }] } });
+		assert.deepStrictEqual(
+			[prompt.includes('CHAPTER 2'), prompt.includes('1. Heap ordering: Jobs pop by priority.'), prompt.includes('diffs are relative to the end of the previous chapter')],
+			[true, true, true],
+		);
+		assert.equal(buildPlanningPrompt(context).includes('CHAPTER'), false);
+	});
+
+	test('the chapter check is small: progress and stats, no file contents', () => {
+		const prompt = buildCheckpointPrompt({
+			profile: DEFAULT_PROFILE, task: 'Build the queue', minutesSinceLastChapter: 12, progress: ['Tests pass; moving on to retries.'],
+			files: [{ path: 'src/queue.ts', added: 120, removed: 4 }], tools: [{ id: 't', tool: 'bash', label: 'npm test', status: 'completed', command: 'npm test', background: false }],
+			earlierChapters: [], preferNotes: true,
+		});
+		assert.deepStrictEqual(
+			[prompt.startsWith('CHAPTER CHECK'), prompt.includes('- Tests pass; moving on to retries.'), prompt.includes('- src/queue.ts (+120 -4)'), prompt.includes('`npm test` → completed'), prompt.includes('CAPTURED FILES')],
+			[true, true, true, true, false],
+		);
+	});
+
+	test('the explainer can answer with a note or a skip instead of a walkthrough', async () => {
+		const replies = ['```json\n{"format":"note","note":"The default is now 8.","reason":"one-line change"}\n```', '{"format":"skip","reason":"formatting only"}', '{"format":"note"}'];
+		const agent = { ask: async () => replies.shift()! } as unknown as ExplanationAgent;
+		const planner = new WalkthroughPlanner(agent, () => undefined);
+		assert.deepStrictEqual(
+			[(await planner.plan(context)).brief, (await planner.plan(context)).brief, (await planner.plan(context)).brief],
+			[{ format: 'note', note: 'The default is now 8.', reason: 'one-line change' }, { format: 'skip', note: undefined, reason: 'formatting only' }, { format: 'skip', note: undefined, reason: undefined }],
+		);
+	});
+
+	test('the chapter check reads "chapter" or "wait"; anything else waits', async () => {
+		const replies = ['{"decision":"chapter","reason":"tests pass"}', 'not json'];
+		const planner = new WalkthroughPlanner({ ask: async () => replies.shift()! } as unknown as ExplanationAgent, () => undefined);
+		const input = { profile: DEFAULT_PROFILE, task: 't', minutesSinceLastChapter: 10, progress: [], files: [], tools: [], earlierChapters: [], preferNotes: true };
+		assert.deepStrictEqual([await planner.checkpoint(input), await planner.checkpoint(input)], [{ decision: 'chapter', reason: 'tests pass' }, { decision: 'wait', reason: '' }]);
+	});
+});
+
 describe('personalization', () => {
 	test('the learner profile shapes the planning prompt', () => {
 		const files = { 'a.js': { path: 'a.js', baseline: 'x\n', final: 'y\n', added: 1, removed: 1 } };
-		const context = { task: 't', turnIndex: 1, files, agentMessages: [], reasoningSummaries: ['exposed summary'], tools: [], pending: [{ id: 'p', label: 'npm test', state: 'running' as const }], history: [], userNotes: [], final: true };
+		const context = { task: 't', turnIndex: 1, files, agentMessages: [], reasoningSummaries: ['exposed summary'], tools: [], pending: [{ id: 'p', label: 'npm test', state: 'running' as const }], history: [], userNotes: [], final: true, preferNotes: true };
 		const novice = buildPlanningPrompt({ ...context, profile: { ...DEFAULT_PROFILE, depth: 'overview', math: 'avoid', glossOver: 'CSS', followClosely: 'async timing' } });
-		const expert = buildPlanningPrompt({ ...context, profile: { ...DEFAULT_PROFILE, depth: 'deep', math: 'comfortable' } });
+		const expert = buildPlanningPrompt({ ...context, preferNotes: false, profile: { ...DEFAULT_PROFILE, depth: 'deep', math: 'comfortable' } });
 		assert.deepStrictEqual(
-			[novice.includes('Aim for 3-4 scenes'), novice.includes('Avoid equations.'), novice.includes('Skim past: CSS'), novice.includes('Follow closely: async timing'), expert.includes('Aim for 6-9 scenes'), expert.includes('Avoid equations.'), novice.includes('- npm test'), novice.includes('exposed summary')],
-			[true, true, true, true, true, false, true, true],
+			[novice.includes('Avoid equations.'), novice.includes('Skim past: CSS'), novice.includes('Follow closely: async timing'), expert.includes('Avoid equations.'), novice.includes('- npm test'), novice.includes('exposed summary')],
+			[true, true, true, false, true, true],
+		);
+		// The explainer chooses the format and length; no fixed scene count.
+		assert.deepStrictEqual(
+			[/Aim for \d/.test(novice), novice.includes('LENGTH (your decision)'), novice.includes('Lean toward "note"'), expert.includes('Lean toward "note"'), novice.includes('"format": "walkthrough"|"note"|"skip"')],
+			[false, true, true, false, true],
 		);
 	});
 
@@ -233,7 +256,7 @@ describe('personalization', () => {
 		}
 		assert.deepStrictEqual([deeper.depth, deeper.detailBias], ['deep', 0]);
 		assert.equal(applyDetailFeedback({ ...start, detailBias: 0.5 }, 'right', ['x']).detailBias, 0.4);
-		assert.ok(buildPlanningPrompt({ task: 't', turnIndex: 1, files: {}, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, profile: lighter }).includes('lean slightly toward less detail'));
+		assert.ok(buildPlanningPrompt({ task: 't', turnIndex: 1, files: {}, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, preferNotes: true, profile: lighter }).includes('lean slightly toward less detail'));
 	});
 
 	test('skipping a scene early nudges its topics very slightly', () => {

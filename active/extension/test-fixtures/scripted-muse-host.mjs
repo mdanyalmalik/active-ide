@@ -134,8 +134,15 @@ async function runExplanation(session, turnId, prompt) {
 		} else {
 			reply = template?.text ?? `About ${scene ? `"${scene}"` : 'this change'}: ${scenario.defaultAnswer ?? 'the captured code shows how the change works.'}`;
 		}
+	} else if (prompt.startsWith('CHAPTER CHECK')) {
+		// ACTIVE_SCRIPTED_CHAPTERS makes the explainer explain finished work mid-turn.
+		reply = JSON.stringify({ decision: process.env.ACTIVE_SCRIPTED_CHAPTERS ? 'chapter' : 'wait', reason: 'scripted' });
 	} else if (prompt.startsWith('The walkthrough JSON failed validation')) {
 		reply = '```json\n{}\n```';
+	} else if (!scenario.turns.find(turn => (/TASK \(turn \d+\)\n([^\n]+)/.exec(prompt)?.[1] ?? '').includes(turn.match))?.walkthrough) {
+		// Tasks without a scripted walkthrough get the explainer's brief answer (a note, or a skip).
+		const entry = scenario.turns.find(turn => (/TASK \(turn \d+\)\n([^\n]+)/.exec(prompt)?.[1] ?? '').includes(turn.match));
+		reply = JSON.stringify(entry?.note ? { format: 'note', note: entry.note, reason: 'scripted' } : { format: 'skip', reason: 'nothing here needs a walkthrough' });
 	} else {
 		const task = /TASK \(turn \d+\)\n([^\n]+)/.exec(prompt)?.[1] ?? '';
 		const entry = scenario.turns.find(turn => task.includes(turn.match));
@@ -170,6 +177,10 @@ async function runCoding(session, turnId, text) {
 		const root = session.workspaceRoot;
 		switch (step.type) {
 			case 'message':
+				// ACTIVE_SCRIPTED_PAUSE_BEFORE_FINAL_MS: the agent keeps working a while before its final answer.
+				if (step.phase === 'finalAnswer' && process.env.ACTIVE_SCRIPTED_PAUSE_BEFORE_FINAL_MS) {
+					await new Promise(resolve => setTimeout(resolve, Number(process.env.ACTIVE_SCRIPTED_PAUSE_BEFORE_FINAL_MS)));
+				}
 				await streamMessage(session, turnId, step.text, step.phase ?? 'commentary');
 				break;
 			case 'reasoning': {

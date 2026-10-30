@@ -314,6 +314,8 @@ export interface Walkthrough {
 	readonly scenes: ReadonlyArray<Scene>;
 	readonly pending: ReadonlyArray<PendingCheck>;
 	readonly files: Readonly<Record<string, CapturedFile>>;
+	/** Long turns are explained in chapters (1-based); each covers the changes since the previous one. */
+	readonly chapter?: number;
 }
 
 // ---------------------------------------------------------------------------

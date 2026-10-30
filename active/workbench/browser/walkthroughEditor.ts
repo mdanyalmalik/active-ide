@@ -35,13 +35,15 @@ import { WalkthroughInput } from './activeInputs.js';
 import { ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughPlayer } from './walkthroughPlayer.js';
-import { isRedundantDiff, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
+import { isRedundantVisual, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
 
 const $ = dom.$;
 const SMALL_FILE_LINES = 45;
 const CONTEXT_PADDING = 3;
 /** Focus ranges closer than this share one visible piece; farther apart, the lines between fold away. */
 const MERGE_GAP_LINES = 6;
+/** How long after a cue the view keeps re-fitting while the card settles into its final size. */
+const REVEAL_SETTLE_MS = 2500;
 const SYMBOL_PATTERN = /^\s*(?:export\s+)?(?:default\s+)?(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+)*(?:async\s+)?(?:function\*?\s+|class\s+|interface\s+|def\s+|fn\s+|func\s+|type\s+|enum\s+)?(?<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*(?:\(|=\s*(?:async\s*)?\(|extends\b|implements\b|\{|:)/;
 const DECLARATION_PATTERN = /^\s*(?:export\s+)?(?:default\s+)?(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+)*(?:async\s+)?(?:function\*?|class|interface|def|fn|func|type|enum)\s+(?<name>[A-Za-z_$][\w$]*)/;
 const CONTROL_WORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'else', 'do', 'try', 'case', 'await', 'new', 'throw', 'const', 'let', 'var']);
@@ -188,6 +190,8 @@ export class WalkthroughEditor extends EditorPane {
 			}
 		}));
 		this._register(this.codeEditor.onDidLayoutChange(() => this.layoutExplanationZone()));
+		// Scrolling by hand ends automatic repositioning until the narration moves on.
+		this._register(this.codeEditor.onMouseWheel(() => { this.reveal = undefined; }));
 
 		this.footer = dom.append(this.root, $('.walkthrough-controls'));
 	}
@@ -546,7 +550,9 @@ export class WalkthroughEditor extends EditorPane {
 		this.relayoutChrome();
 		this.versionLabel.textContent = scene.version === 'baseline'
 			? localize('baselineVersion', "Before the change · turn {0}", walkthrough.turnIndex)
-			: localize('capturedVersion', "Captured version · turn {0}", walkthrough.turnIndex);
+			: walkthrough.chapter
+				? localize('capturedChapter', "Chapter {0} · turn {1}", walkthrough.chapter, walkthrough.turnIndex)
+				: localize('capturedVersion', "Captured version · turn {0}", walkthrough.turnIndex);
 	}
 
 	/** Applies the current narration segment's cue: focus emphasis, diagram highlight, progressive reveal. */
@@ -614,7 +620,7 @@ export class WalkthroughEditor extends EditorPane {
 		const card = zone.card;
 		if (this.cardBuilt) {
 			// Same scene, next narration segment: move highlights and text in place.
-			if (scene.visual && !this.cardVisual?.update && !isRedundantDiff(scene.visual, walkthrough.files)) {
+			if (scene.visual && !this.cardVisual?.update && !isRedundantVisual(scene, walkthrough.files)) {
 				// eslint-disable-next-line no-restricted-syntax
 				const host = card.querySelector<HTMLElement>('.visual');
 				if (host) {
@@ -641,13 +647,17 @@ export class WalkthroughEditor extends EditorPane {
 		this.moreDetailButton = moreDetail;
 		store.add(dom.addDisposableListener(moreDetail, dom.EventType.CLICK, () => this.toggleDeeper(walkthrough, scene)));
 		dom.append(card, $('h2.title')).textContent = scene.title;
-		const kind = isRedundantDiff(scene.visual, walkthrough.files) ? '' : visualKindLabel(scene.visual);
+		const kind = isRedundantVisual(scene, walkthrough.files) ? '' : visualKindLabel(scene.visual);
 		if (kind) {
 			const term = walkthrough.terms.find(candidate => scene.title.toLowerCase().includes(candidate.name.toLowerCase()) || scene.narration.some(segment => segment.text.toLowerCase().includes(candidate.name.toLowerCase())));
 			dom.append(card, $('.subtitle')).textContent = term ? `${term.name} · ${kind}` : kind;
 		}
 		this.relayoutVisual = undefined;
-		if (scene.visual && !isRedundantDiff(scene.visual, walkthrough.files)) {
+		// The words being read come first, right under the code they're about; the visual follows.
+		const narration = dom.append(card, $('p.narration'));
+		narration.setAttribute('aria-live', 'polite');
+		this.updateNarrationText(narration);
+		if (scene.visual && !isRedundantVisual(scene, walkthrough.files)) {
 			const visualHost = dom.append(card, $('.visual'));
 			const rendered = renderVisual(visualHost, scene.visual, walkthrough.files, { nodes, reveal }, this.languageService);
 			this.cardVisual = rendered;
@@ -657,9 +667,6 @@ export class WalkthroughEditor extends EditorPane {
 				dom.append(card, $('.caption')).textContent = scene.visual.caption;
 			}
 		}
-		const narration = dom.append(card, $('p.narration'));
-		narration.setAttribute('aria-live', 'polite');
-		this.updateNarrationText(narration);
 		this.deeperHost = dom.append(card, $('.deeper'));
 		this.pendingHost = dom.append(card, $('.pending'));
 		this.renderDeeper();
@@ -917,19 +924,52 @@ export class WalkthroughEditor extends EditorPane {
 		if (height > 28 && Math.abs((zone.zone.heightInPx ?? 0) - height) > 1) {
 			zone.zone.heightInPx = height;
 			this.codeEditor.changeViewZones(accessor => accessor.layoutZone(zone.id));
-			dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => this.relayoutVisual?.());
+			dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => {
+				this.relayoutVisual?.();
+				// The card grew (highlighted code, a diagram): fit it on screen again.
+				this.applyReveal();
+			});
 		}
 	}
 
+	/** What the view should show for the narrated focus; re-applied while the card settles into its size. */
+	private reveal: { scene: Scene; focusIndex: number | undefined; until: number } | undefined;
+
 	private revealFocus(scene: Scene, focusIndex: number | undefined): void {
-		const range = scene.focus[focusIndex ?? 0];
-		const line = range ? range.startLine : Math.max(1, scene.anchorLine);
+		this.reveal = { scene, focusIndex, until: Date.now() + REVEAL_SETTLE_MS };
+		dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => this.applyReveal());
+	}
+
+	/**
+	 * Scrolls so the highlighted code and the whole card are on screen together. When they don't fit,
+	 * the card wins (it holds the words being read), with as much of the code above it as fits.
+	 */
+	private applyReveal(): void {
+		const reveal = this.reveal;
+		if (!reveal || Date.now() > reveal.until) {
+			return;
+		}
 		const editor: ICodeEditor = this.codeEditor;
 		const lineHeight = editor.getOption(EditorOption.lineHeight);
-		dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => {
-			const top = editor.getTopForLineNumber(line) - 2 * lineHeight;
-			editor.setScrollTop(Math.max(0, top), ScrollType.Smooth);
-		});
+		const viewport = editor.getLayoutInfo().height;
+		const range = reveal.scene.focus[reveal.focusIndex ?? 0];
+		const focusTop = editor.getTopForLineNumber(range ? range.startLine : Math.max(1, reveal.scene.anchorLine));
+		let top = focusTop - 2 * lineHeight;
+		const zone = this.explanationZone;
+		if (zone && zone.zone.afterLineNumber > 0) {
+			const cardTop = editor.getBottomForLineNumber(zone.zone.afterLineNumber);
+			const cardBottom = cardTop + (zone.zone.heightInPx ?? 0);
+			if (cardBottom > focusTop) {
+				if (cardBottom - focusTop + lineHeight <= viewport) {
+					top = focusTop - Math.min(2 * lineHeight, viewport - (cardBottom - focusTop));
+				} else if (cardBottom - cardTop <= viewport - 3 * lineHeight) {
+					top = cardBottom - viewport + lineHeight;
+				} else {
+					top = cardTop - 3 * lineHeight;
+				}
+			}
+		}
+		editor.setScrollTop(Math.max(0, top), ScrollType.Smooth);
 	}
 
 	// ------------------------------------------------------------------ controls

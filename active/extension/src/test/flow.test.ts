@@ -32,7 +32,7 @@ interface Harness {
 	waitFor<T extends ActiveEvent>(predicate: (event: ActiveEvent) => event is T, timeoutMs?: number): Promise<T>;
 }
 
-async function harness(backgroundTimeoutMs: number): Promise<Harness> {
+async function harness(backgroundTimeoutMs: number, timing = { checkpointMs: 5 * 60_000, chapterMs: 10 * 60_000 }, hostEnv: Record<string, string> = {}): Promise<Harness> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-flow-'));
 	await fs.cp(path.join(repo, 'demo', 'ledger-api'), root, { recursive: true });
 	execSync('git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: root });
@@ -63,16 +63,17 @@ async function harness(backgroundTimeoutMs: number): Promise<Harness> {
 		workspaceName: 'ledger-api',
 		workspaceRoot: root,
 		backgroundTimeoutMs: () => backgroundTimeoutMs,
-		minMeaningfulLines: () => 8,
-		draftQuietMs: () => 300,
+		checkpointMs: () => timing.checkpointMs,
+		chapterMs: () => timing.chapterMs,
+		preferNotes: () => true,
 		profile: () => ({ ...DEFAULT_PROFILE, configured: true }),
 		emit,
-		log: () => undefined,
-		startCodingHost: () => MuseHost.spawn(host, root, () => undefined),
+		log: line => process.env.FLOW_DEBUG && console.error(`[flow] ${line}`),
+		startCodingHost: () => MuseHost.spawn(host, root, () => undefined, hostEnv),
 		runSettings: () => ({}),
 		lastSessionId: () => remembered,
 		rememberSession: sessionId => { remembered = sessionId; },
-		startExplanationHost: () => MuseHost.spawn(host, root, () => undefined),
+		startExplanationHost: () => MuseHost.spawn(host, root, () => undefined, hostEnv),
 	}, tracker, history);
 	// Stand in for the extension's file watcher: poll the workspace.
 	const poll = setInterval(() => {
@@ -97,6 +98,38 @@ async function harness(backgroundTimeoutMs: number): Promise<Harness> {
 
 const isStage = (stage: WalkthroughStage) => (event: ActiveEvent): event is Extract<ActiveEvent, { type: 'walkthroughStatus' }> => event.type === 'walkthroughStatus' && event.status.stage === stage;
 const isReady = (event: ActiveEvent): event is Extract<ActiveEvent, { type: 'walkthroughReady' }> => event.type === 'walkthroughReady';
+
+describe('chapters (scripted MSP host)', () => {
+	let h: Harness;
+
+	before(async () => {
+		process.env.ACTIVE_SCRIPTED_SCENARIO = path.join(repo, 'demo', 'scenarios', 'ledger.json');
+		process.env.ACTIVE_SCRIPTED_SPEED = '4';
+		// No minimum spacing, and an explainer that says "chapter" at the first checkpoint.
+		h = await harness(1500, { checkpointMs: 0, chapterMs: 0 }, { ACTIVE_SCRIPTED_CHAPTERS: '1', ACTIVE_SCRIPTED_PAUSE_BEFORE_FINAL_MS: '1500' });
+	});
+
+	after(async () => {
+		await h.controller.dispose();
+	});
+
+	test('finished work is explained as a chapter while the agent is still working', async () => {
+		const chapter = h.waitFor(isReady);
+		const ended = h.waitFor((event): event is Extract<ActiveEvent, { type: 'walkthroughStatus' }> => event.type === 'walkthroughStatus' && /Explained in 1 chapter/.test(event.status.detail));
+		await h.controller.submitTask('Support minutes and hours in parseDuration');
+		const { walkthrough } = await chapter;
+		assert.equal(walkthrough.chapter, 1);
+		// The chapter was started at a checkpoint (the test run), while the agent was still working.
+		const chapterStarted = h.events.findIndex(event => event.type === 'walkthroughStatus' && /Writing chapter 1 while/.test(event.status.detail));
+		const finalMessage = h.events.findIndex(event => event.type === 'chat' && event.entry.role === 'agent' && /now accepts/.test(event.entry.text) && event.entry.status === 'done');
+		assert.ok(chapterStarted >= 0 && chapterStarted < finalMessage);
+		// Nothing changed after the chapter, so the end of the turn adds no second explanation.
+		await ended;
+		assert.equal(h.events.filter(event => event.type === 'walkthroughReady').length, 1);
+		const turns = await h.history.list();
+		assert.ok(turns.some(turn => turn.walkthroughId === walkthrough.id && turn.explanationNote.startsWith('Chapter 1')));
+	});
+});
 
 describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 	let h: Harness;
@@ -139,10 +172,12 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		assert.ok(chat.some(entry => entry.role === 'user' && /parseDuration/.test(entry.text)), 'the earlier task is back in chat');
 	});
 
-	test('a tiny change is kept in history but not explained', async () => {
+	test('a tiny change gets a short note in chat instead of a walkthrough', async () => {
 		const done = h.waitFor(isStage('notExplained'));
 		await h.controller.submitTask('Fix the typo in the README');
-		await done;
+		const { status } = await done;
+		assert.equal(status.detail, 'Explained in a short note.');
+		assert.ok(h.events.some(event => event.type === 'chat' && event.entry.role === 'explainer' && /README wording/.test(event.entry.text)));
 		await new Promise(resolve => setTimeout(resolve, 200));
 		const turns = await h.history.list();
 		assert.equal(turns[0].task, 'Fix the typo in the README');

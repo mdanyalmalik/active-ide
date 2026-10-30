@@ -5,19 +5,24 @@
 
 import { createHash } from 'node:crypto';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
-import { ExplanationAgent, WalkthroughPlanner } from './explain/planner';
-import { buildElaborationPrompt, buildQuestionPrompt } from './explain/prompts';
+import { ExplanationAgent, PlanResult, WalkthroughPlanner } from './explain/planner';
+import { buildElaborationPrompt, buildQuestionPrompt, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import { HistoryStore } from './history/historyStore';
 import { REASONING_EFFORTS } from './shared/activeProtocol';
 import type { ActiveEvent, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, KnowledgeProfile, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
+import { diffStats } from './tracking/lineDiff';
 
 export interface ControllerOptions {
 	readonly workspaceName: string;
 	readonly backgroundTimeoutMs: () => number;
-	readonly minMeaningfulLines: () => number;
-	readonly draftQuietMs: () => number;
+	/** Minimum time between "chapter now, or wait?" questions during a turn. */
+	readonly checkpointMs: () => number;
+	/** Minimum time between chapters; a turn shorter than this gets one explanation at the end. */
+	readonly chapterMs: () => number;
+	/** Lean toward a short note for small changes and short requests. */
+	readonly preferNotes: () => boolean;
 	readonly profile: () => KnowledgeProfile;
 	readonly emit: (event: ActiveEvent) => void;
 	readonly log: (line: string) => void;
@@ -52,14 +57,28 @@ interface LogicalTurn {
 	readonly agentMessages: Map<string, string>;
 	readonly tools: Map<string, ToolOutcome>;
 	readonly worthinessLog: string[];
+	/** Whether the not-yet-explained changes contain anything meaningful (the cheap filter). */
 	verdict?: WorthinessVerdict;
-	draft?: { signature: string; draft: WalkthroughDraft };
+	/** The plan made early (on the agent's final answer), reused at the end if nothing changed since. */
+	draft?: { signature: string; result: PlanResult };
 	drafting?: Promise<void>;
-	draftTimer?: NodeJS.Timeout;
-	/** Another draft was asked for while one was running (`final`: the agent has given its final answer). */
-	redraft?: 'draft' | 'final';
+	/** The final answer came while an early plan was running: plan once more after it. */
+	redraft?: boolean;
 	codingDone: boolean;
 	stage: WalkthroughStage;
+	/** Chapters already shown for this turn, oldest first. */
+	readonly chapters: Walkthrough[];
+	/** File contents at the end of the last chapter: the next one explains only what changed since. */
+	readonly explained: Map<string, string | null>;
+	lastChapterAt: number;
+	lastCheckAt: number;
+	messagesAtLastChapter: number;
+	toolsAtLastChapter: number;
+	/** A chapter question (and the chapter it may lead to) in progress. */
+	checking?: Promise<void>;
+	/** A checkpoint came while a question was running or too soon after the last: ask when allowed. */
+	checkPending: boolean;
+	checkTimer?: NodeJS.Timeout;
 }
 
 /**
@@ -73,6 +92,9 @@ interface LogicalTurn {
  * The agent's messages and reasoning are left out: its closing message always arrives after the
  * last edit, and would otherwise make every draft stale at the end of the turn.
  */
+/** Tools that run commands (shell, tests): finishing one is a checkpoint. */
+const COMMAND_TOOLS = /bash|shell|exec|terminal|command/i;
+
 /** Item kinds Muse emits for its own machinery; chat leaves them out. */
 const INTERNAL_ITEM_KINDS = new Set(['reminderChild', 'earlierHistory', 'damagedRange', 'compaction', 'hookRun', 'overdueNotice']);
 
@@ -455,6 +477,13 @@ export class ActiveController implements AgentSessionListener {
 			worthinessLog: [],
 			codingDone: false,
 			stage: 'collecting',
+			chapters: [],
+			explained: new Map(),
+			lastChapterAt: Date.now(),
+			lastCheckAt: 0,
+			messagesAtLastChapter: 0,
+			toolsAtLastChapter: 0,
+			checkPending: false,
 		};
 		this.turn = turn;
 		this.backgroundTasks = 0;
@@ -534,30 +563,177 @@ export class ActiveController implements AgentSessionListener {
 			return;
 		}
 		this.options.emit({ type: 'turnChanges', turnId: turn.id, files: this.tracker.currentStats() });
-		// Re-evaluate the whole turn so far after every concrete change.
-		const verdict = assessWorthiness(this.tracker.currentNetChanges(), { minMeaningfulLines: this.options.minMeaningfulLines() });
-		const changed = verdict.worthy !== turn.verdict?.worthy;
+		// Only the cheap filter runs on edits; the explanation model is asked at checkpoints and at the end.
+		const verdict = assessWorthiness(this.unexplainedChanges(turn));
 		turn.verdict = verdict;
-		turn.worthinessLog.push(`after edit #${edits[edits.length - 1].seq} (${edits.map(edit => edit.path).join(', ')}): ${verdict.worthy ? 'worth explaining' : 'not yet'} — ${verdict.reasons.join('; ')}`);
-		if (changed) {
-			this.setStage(turn, 'collecting', verdict.worthy ? 'Enough to explain; preparing a draft' : 'Watching changes');
+		turn.worthinessLog.push(`after edit #${edits[edits.length - 1].seq} (${edits.map(edit => edit.path).join(', ')}): ${verdict.reasons.join('; ')}`);
+	}
+
+	/** The turn's changes since the last chapter (all of them before the first). */
+	private unexplainedChanges(turn: LogicalTurn, changes: readonly NetFileChange[] = this.tracker.currentNetChanges()): NetFileChange[] {
+		return changes.flatMap(change => {
+			if (!turn.explained.has(change.path)) {
+				return [change];
+			}
+			const baseline = turn.explained.get(change.path) ?? null;
+			if (baseline === change.final) {
+				return [];
+			}
+			return [{ ...change, baseline, ...diffStats(baseline, change.final) }];
+		});
+	}
+
+	// ---------------------------------------------------------------- chapters
+
+	/**
+	 * The agent reached a checkpoint (a progress message, a finished command). Ask whether the work
+	 * since the last chapter is ready for one, at most once per `checkpointMs` and never before
+	 * `chapterMs` has passed since the last chapter (or the start of the turn).
+	 */
+	private checkpoint(turn: LogicalTurn): void {
+		if (turn.codingDone || this.turn !== turn) {
+			return;
 		}
-		if (verdict.worthy) {
-			this.scheduleDraft(turn);
+		if (turn.checking) {
+			turn.checkPending = true;
+			return;
+		}
+		const allowedAt = Math.max(turn.lastChapterAt + this.options.chapterMs(), turn.lastCheckAt + this.options.checkpointMs());
+		const wait = allowedAt - Date.now();
+		if (wait > 0) {
+			// Coalesce: one question when it's allowed, covering every checkpoint until then.
+			turn.checkPending = true;
+			if (!turn.checkTimer) {
+				turn.checkTimer = setTimeout(() => {
+					turn.checkTimer = undefined;
+					if (turn.checkPending) {
+						turn.checkPending = false;
+						this.checkpoint(turn);
+					}
+				}, wait);
+			}
+			return;
+		}
+		turn.checkPending = false;
+		turn.checking = this.askForChapter(turn).finally(() => {
+			turn.checking = undefined;
+			if (turn.checkPending) {
+				turn.checkPending = false;
+				this.checkpoint(turn);
+			}
+		});
+	}
+
+	private async askForChapter(turn: LogicalTurn): Promise<void> {
+		const changes = this.unexplainedChanges(turn);
+		if (!assessWorthiness(changes).worthy) {
+			return; // nothing to ask about; doesn't count against the question interval
+		}
+		turn.lastCheckAt = Date.now();
+		try {
+			const decision = await this.planner.checkpoint({
+				profile: this.options.profile(),
+				task: turn.task,
+				minutesSinceLastChapter: Math.round((Date.now() - turn.lastChapterAt) / 60000),
+				progress: [...turn.agentMessages.values()].slice(turn.messagesAtLastChapter),
+				files: changes.filter(change => !change.userOnly).map(change => ({ path: change.path, added: change.added, removed: change.removed })),
+				tools: [...turn.tools.values()].slice(turn.toolsAtLastChapter),
+				earlierChapters: turn.chapters.map(chapter => chapter.title),
+				preferNotes: this.options.preferNotes(),
+			});
+			turn.worthinessLog.push(`chapter check: ${decision.decision}${decision.reason ? ` (${decision.reason})` : ''}`);
+			this.options.log(`chapter check for turn ${turn.index}: ${decision.decision}${decision.reason ? ` (${decision.reason})` : ''}`);
+			if (decision.decision === 'chapter' && !turn.codingDone) {
+				await this.writeChapter(turn, changes);
+			}
+		} catch (error) {
+			this.options.log(`chapter check failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
-	private scheduleDraft(turn: LogicalTurn): void {
-		if (turn.draftTimer) {
-			clearTimeout(turn.draftTimer);
-		}
-		turn.draftTimer = setTimeout(() => {
-			turn.draftTimer = undefined;
-			if (turn.codingDone || turn.drafting || this.turn !== turn) {
-				return;
+	/** Explains the work since the last chapter while the agent keeps going. */
+	private async writeChapter(turn: LogicalTurn, changes: readonly NetFileChange[]): Promise<void> {
+		const index = turn.chapters.length + 1;
+		const files = this.capture(changes);
+		this.setStage(turn, 'drafting', `Writing chapter ${index} while ${this.options.provider.name} works`);
+		const result = await this.planner.plan(await this.planningContext(turn, changes, [], false, index));
+		const markExplained = () => {
+			for (const change of changes) {
+				turn.explained.set(change.path, change.final);
 			}
-			this.requestDraft(turn, false);
-		}, this.options.draftQuietMs());
+			turn.lastChapterAt = Date.now();
+			turn.messagesAtLastChapter = turn.agentMessages.size;
+			turn.toolsAtLastChapter = turn.tools.size;
+		};
+		if (result.brief?.format === 'note') {
+			markExplained();
+			this.explainerNote(turn, result.brief.note!);
+			turn.worthinessLog.push(`chapter ${index}: note`);
+		} else if (result.draft) {
+			markExplained();
+			const walkthrough = this.toWalkthrough(turn, result.draft, files, [], index);
+			turn.chapters.push(walkthrough);
+			turn.worthinessLog.push(`chapter ${index}: ${result.draft.scenes.length} scene${result.draft.scenes.length === 1 ? '' : 's'}`);
+			await this.saveChapter(turn, walkthrough, files);
+			this.walkthroughs.set(walkthrough.id, walkthrough);
+			this.pendingWalkthrough = walkthrough;
+			this.options.emit({ type: 'walkthroughReady', walkthrough });
+		} else {
+			turn.worthinessLog.push(`chapter ${index}: ${result.brief ? `skipped (${result.brief.reason ?? 'not worth it yet'})` : `planning failed: ${result.errors.join('; ')}`}`);
+		}
+		if (!turn.codingDone) {
+			this.setStage(turn, 'collecting', result.draft ? `Chapter ${index} ready; ${this.options.provider.name} is still working` : 'Watching changes');
+		}
+	}
+
+	/** A short explanation in chat instead of a walkthrough. */
+	private explainerNote(turn: LogicalTurn, text: string): void {
+		this.upsertChat({ id: entryId('note'), turnId: turn.id, role: 'explainer', text, at: Date.now() });
+	}
+
+	private toWalkthrough(turn: LogicalTurn, draft: WalkthroughDraft, files: Record<string, CapturedFile>, pending: readonly PendingCheck[], chapter: number | undefined): Walkthrough {
+		return {
+			id: `wt-${turn.id}${chapter ? `-c${chapter}` : ''}`,
+			sessionId: this.coding?.sessionId ?? 'unknown',
+			turnId: turn.id,
+			turnIndex: turn.index,
+			task: turn.task,
+			title: draft.title,
+			summary: draft.summary,
+			createdAt: Date.now(),
+			terms: draft.terms,
+			scenes: draft.scenes,
+			pending,
+			files,
+			chapter,
+		};
+	}
+
+	/** Each mid-turn chapter is kept in history on its own, so it can be replayed like any walkthrough. */
+	private async saveChapter(turn: LogicalTurn, walkthrough: Walkthrough, files: Record<string, CapturedFile>): Promise<void> {
+		await this.history.save({
+			summary: {
+				sessionId: this.coding?.sessionId ?? 'unknown',
+				turnId: `${turn.id}-c${walkthrough.chapter}`,
+				index: turn.index,
+				task: turn.task,
+				startedAt: turn.startedAt,
+				endedAt: Date.now(),
+				outcome: 'chapter',
+				walkthroughId: walkthrough.id,
+				walkthroughTitle: walkthrough.title,
+				explanationNote: `Chapter ${walkthrough.chapter}: ${walkthrough.title}`,
+				files: Object.values(files).map(file => ({ path: file.path, added: file.added, removed: file.removed })),
+			},
+			chat: [],
+			reasoningSummaries: [],
+			tools: [...turn.tools.values()],
+			edits: [],
+			files: Object.values(files),
+			walkthrough,
+			worthiness: [...turn.worthinessLog],
+		}).catch(error => this.options.log(`history save failed: ${error}`));
+		this.options.emit({ type: 'history', history: await this.history.list() });
 	}
 
 	/**
@@ -565,22 +741,19 @@ export class ActiveController implements AgentSessionListener {
 	 * answer: Muse then spends a while on its own end-of-turn checks before the turn completes, and the
 	 * walkthrough is planned meanwhile (it's reused at the end if nothing changed).
 	 */
-	private requestDraft(turn: LogicalTurn, final: boolean): void {
-		if (turn.draftTimer) {
-			clearTimeout(turn.draftTimer);
-			turn.draftTimer = undefined;
-		}
+	private requestDraft(turn: LogicalTurn): void {
 		if (turn.drafting) {
-			turn.redraft = final ? 'final' : turn.redraft ?? 'draft';
+			turn.redraft = true;
 			return;
 		}
 		turn.drafting = (async () => {
 			try {
-				await this.draft(turn, final);
+				// A chapter being written covers part of the change; plan the rest after it.
+				await turn.checking;
+				await this.draft(turn);
 				while (turn.redraft && this.turn === turn) {
-					const next = turn.redraft;
-					turn.redraft = undefined;
-					await this.draft(turn, next === 'final');
+					turn.redraft = false;
+					await this.draft(turn);
 				}
 			} finally {
 				turn.drafting = undefined;
@@ -588,24 +761,28 @@ export class ActiveController implements AgentSessionListener {
 		})();
 	}
 
-	private async draft(turn: LogicalTurn, final = false): Promise<void> {
-		const changes = this.tracker.currentNetChanges();
+	private async draft(turn: LogicalTurn): Promise<void> {
+		const changes = this.unexplainedChanges(turn);
+		if (!assessWorthiness(changes).worthy) {
+			return;
+		}
 		const signature = signatureOf(changes, turn);
 		if (turn.draft?.signature === signature) {
 			return;
 		}
-		this.setStage(turn, 'drafting', final ? `Writing the walkthrough while ${this.options.provider.name} wraps up` : `Drafting while ${this.options.provider.name} works`);
+		this.setStage(turn, 'drafting', `Writing the explanation while ${this.options.provider.name} wraps up`);
 		try {
-			const result = await this.planner.plan(await this.planningContext(turn, changes, [], final), turn.draft?.draft);
-			if (result.draft) {
-				turn.draft = { signature, draft: result.draft };
-				turn.worthinessLog.push(`draft prepared with ${result.draft.scenes.length} scenes`);
+			const chapter = turn.chapters.length ? turn.chapters.length + 1 : undefined;
+			const result = await this.planner.plan(await this.planningContext(turn, changes, [], true, chapter), turn.draft?.result.draft);
+			if (result.draft || result.brief) {
+				turn.draft = { signature, result };
+				turn.worthinessLog.push(result.draft ? `planned early: ${result.draft.scenes.length} scenes` : `planned early: ${result.brief!.format}`);
 			}
 			if (!turn.codingDone) {
-				this.setStage(turn, 'collecting', result.draft ? (final ? `Walkthrough ready; ${this.options.provider.name} is finishing up` : 'Draft ready; will reconcile when the turn finishes') : 'Draft failed validation; will retry at the end of the turn');
+				this.setStage(turn, 'collecting', `Explanation ready; ${this.options.provider.name} is finishing up`);
 			}
 		} catch (error) {
-			this.options.log(`draft failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.options.log(`early plan failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -620,7 +797,7 @@ export class ActiveController implements AgentSessionListener {
 		return files;
 	}
 
-	private async planningContext(turn: LogicalTurn, changes: readonly NetFileChange[], pending: readonly PendingCheck[], final: boolean) {
+	private async planningContext(turn: LogicalTurn, changes: readonly NetFileChange[], pending: readonly PendingCheck[], final: boolean, chapter?: number): Promise<PlanningContext> {
 		const files = this.capture(changes);
 		const userNotes = changes.filter(change => change.userOnly || change.userTouched || change.preexistingUserChanges).map(change => change.userOnly
 			? `- ${change.path}: edited only by the user during this turn`
@@ -637,6 +814,8 @@ export class ActiveController implements AgentSessionListener {
 			history: await this.history.recentContext(5),
 			userNotes,
 			final,
+			preferNotes: this.options.preferNotes(),
+			chapter: chapter ? { index: chapter, earlier: turn.chapters.map(entry => ({ title: entry.title, summary: entry.summary })) } : undefined,
 		};
 	}
 
@@ -661,9 +840,11 @@ export class ActiveController implements AgentSessionListener {
 			case 'agentMessage': {
 				if (completed && item.text && turn) {
 					turn.agentMessages.set(item.id, item.text);
-					// Progress notes are `commentary`; the final answer carries no such phase.
-					if (item.phase !== 'commentary' && !turn.codingDone && turn.verdict?.worthy) {
-						this.requestDraft(turn, true);
+					// Progress notes (`commentary`) are checkpoints; the final answer carries no such phase.
+					if (item.phase === 'commentary') {
+						this.checkpoint(turn);
+					} else if (!turn.codingDone && turn.verdict?.worthy) {
+						this.requestDraft(turn);
 					}
 				}
 				this.upsertAgentEntry(item.id, { role: 'agent', text: item.text ?? '', phase: item.phase, status: completed ? 'done' : 'streaming', turnId });
@@ -690,7 +871,13 @@ export class ActiveController implements AgentSessionListener {
 					this.resolveCheck([item.id], command, item.status);
 				}
 				if (completed || item.background) {
-					void this.tracker.rescan().then(edits => this.afterEdits(edits));
+					void this.tracker.rescan().then(edits => {
+						this.afterEdits(edits);
+						// A finished command or test run is a checkpoint (after its edits are recorded); file edits aren't.
+						if (completed && command && turn && COMMAND_TOOLS.test(item.tool ?? '')) {
+							this.checkpoint(turn);
+						}
+					});
 					if (completed && turn && item.outputRef && !item.output) {
 						void this.coding?.readOutput(item.id, item.outputRef, 16 * 1024).then(output => {
 							const existing = turn.tools.get(item.id);
@@ -788,9 +975,11 @@ export class ActiveController implements AgentSessionListener {
 
 	private async finishCoding(turn: LogicalTurn, terminal: string): Promise<void> {
 		turn.codingDone = true;
-		if (turn.draftTimer) {
-			clearTimeout(turn.draftTimer);
+		if (turn.checkTimer) {
+			clearTimeout(turn.checkTimer);
+			turn.checkTimer = undefined;
 		}
+		turn.checkPending = false;
 		this.tracker.setActiveTool(undefined);
 		// Freeze the turn's changes now: later edits belong to later turns and never alter this capture.
 		const captured = await this.tracker.endTurn();
@@ -801,9 +990,13 @@ export class ActiveController implements AgentSessionListener {
 
 		const next = this.queuedTasks.shift();
 		const files = this.capture(changes);
-		const verdict = assessWorthiness(changes, { minMeaningfulLines: this.options.minMeaningfulLines() });
+		// A chapter still being written covers part of the change: the rest is what's left to explain.
+		await turn.checking;
+		const remaining = this.unexplainedChanges(turn, changes);
+		const verdict = assessWorthiness(remaining);
 		turn.verdict = verdict;
-		turn.worthinessLog.push(`final: ${verdict.worthy ? 'worth explaining' : 'not explained'} — ${verdict.reasons.join('; ')}`);
+		turn.worthinessLog.push(`final: ${verdict.reasons.join('; ')}`);
+		const chapters = turn.chapters.length;
 
 		let walkthrough: Walkthrough | undefined;
 		let note: string;
@@ -811,9 +1004,8 @@ export class ActiveController implements AgentSessionListener {
 			note = `Turn ${terminal}; no changes to explain.`;
 			this.setStage(turn, 'notExplained', note);
 		} else if (!verdict.worthy) {
-			// The detailed reasons stay in the worthiness log; the user gets the short version.
-			note = verdict.reasons.some(reason => reason.startsWith('no meaningful')) ? 'No code changes to explain.' : 'Small change. Saved to history, not explained.';
-			this.setStage(turn, 'notExplained', note);
+			note = chapters ? `Explained in ${chapters} chapter${chapters === 1 ? '' : 's'}.` : 'No code changes to explain.';
+			this.setStage(turn, chapters ? 'ready' : 'notExplained', note);
 		} else {
 			// Start the queued task right away: the coding agent never waits for explanations.
 			if (next) {
@@ -823,14 +1015,28 @@ export class ActiveController implements AgentSessionListener {
 			for (const check of pending) {
 				this.openChecks.set(check.id, { turnId: turn.id, check });
 			}
-			this.setStage(turn, 'finalizing', 'Finishing the walkthrough');
+			this.setStage(turn, 'finalizing', 'Finishing the explanation');
+			let stage: WalkthroughStage = 'failed';
 			try {
-				walkthrough = await this.finalizeWalkthrough(turn, files, changes, pending);
-				note = walkthrough ? `Walkthrough: ${walkthrough.title}` : 'The explanation did not survive reconciliation with the final changes.';
+				const outcome = await this.finalizeWalkthrough(turn, this.capture(remaining), remaining, pending);
+				walkthrough = outcome.walkthrough;
+				if (walkthrough) {
+					note = `${walkthrough.chapter ? `Chapter ${walkthrough.chapter}` : 'Walkthrough'}: ${walkthrough.title}`;
+					stage = 'ready';
+				} else if (outcome.brief?.format === 'note') {
+					this.explainerNote(turn, outcome.brief.note!);
+					note = 'Explained in a short note.';
+					stage = 'notExplained';
+				} else if (outcome.brief) {
+					note = `Not explained: ${outcome.brief.reason ?? 'not worth a walkthrough for you'}.`;
+					stage = 'notExplained';
+				} else {
+					note = 'The explanation did not survive reconciliation with the final changes.';
+				}
 			} catch (error) {
 				note = `Explanation failed: ${error instanceof Error ? error.message : String(error)}`;
 			}
-			this.setStage(turn, walkthrough ? 'ready' : 'failed', note);
+			this.setStage(turn, stage, note);
 		}
 
 		const summary: TurnSummary = {
@@ -945,38 +1151,34 @@ export class ActiveController implements AgentSessionListener {
 		});
 	}
 
-	private async finalizeWalkthrough(turn: LogicalTurn, files: Record<string, CapturedFile>, changes: readonly NetFileChange[], pending: readonly PendingCheck[]): Promise<Walkthrough | undefined> {
+	/** Plans what's left to explain at the end of the turn, reusing the early plan when nothing changed since. */
+	private async finalizeWalkthrough(turn: LogicalTurn, files: Record<string, CapturedFile>, changes: readonly NetFileChange[], pending: readonly PendingCheck[]): Promise<{ walkthrough?: Walkthrough; brief?: PlanResult['brief'] }> {
 		await turn.drafting?.catch(() => undefined);
 		const signature = signatureOf(changes, turn);
 		const evidence = new Set(turn.tools.keys());
-		let result;
-		if (turn.draft && turn.draft.signature === signature && pending.length === 0) {
-			result = this.planner.reconcile(turn.draft.draft, files, evidence);
+		const chapter = turn.chapters.length ? turn.chapters.length + 1 : undefined;
+		let result: PlanResult | undefined;
+		const early = turn.draft?.signature === signature && pending.length === 0 ? turn.draft.result : undefined;
+		if (early?.brief) {
+			result = early;
+		} else if (early?.draft) {
+			result = this.planner.reconcile(early.draft, files, evidence);
 		}
-		if (!result?.draft) {
-			result = await this.planner.plan(await this.planningContext(turn, changes, pending, true), turn.draft?.draft);
+		if (!result?.draft && !result?.brief) {
+			result = await this.planner.plan(await this.planningContext(turn, changes, pending, true, chapter), turn.draft?.result.draft);
+		}
+		if (result.brief) {
+			turn.worthinessLog.push(`explainer chose ${result.brief.format}${result.brief.reason ? `: ${result.brief.reason}` : ''}`);
+			return { brief: result.brief };
 		}
 		if (result.dropped.length) {
 			turn.worthinessLog.push(`dropped scenes about reverted work: ${result.dropped.join(', ')}`);
 		}
 		if (!result.draft) {
 			this.options.log(`walkthrough planning failed: ${result.errors.join('; ')}`);
-			return undefined;
+			return {};
 		}
-		return {
-			id: `wt-${turn.id}`,
-			sessionId: this.coding?.sessionId ?? 'unknown',
-			turnId: turn.id,
-			turnIndex: turn.index,
-			task: turn.task,
-			title: result.draft.title,
-			summary: result.draft.summary,
-			createdAt: Date.now(),
-			terms: result.draft.terms,
-			scenes: result.draft.scenes,
-			pending,
-			files,
-		};
+		return { walkthrough: this.toWalkthrough(turn, result.draft, files, pending, chapter) };
 	}
 
 	// ---------------------------------------------------------------- history

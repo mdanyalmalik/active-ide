@@ -423,6 +423,13 @@ export class ActiveService extends Disposable implements IActiveService {
 	 */
 	private async onWalkthroughReady(walkthrough: Walkthrough): Promise<void> {
 		const active = this.editorService.activeEditor;
+		// A chapter that arrives while the previous one is being watched waits its turn.
+		const player = this.player;
+		if (active instanceof WalkthroughInput && player && player.state !== 'ended' && player.walkthrough.id !== walkthrough.id && this.configurationService.getValue<boolean>('active.explain.queueChapters') !== false) {
+			this.queuedWalkthroughs.push(walkthrough);
+			this.offer(walkthrough);
+			return;
+		}
 		const historyOpen = this.viewsService.isViewVisible(ACTIVE_HISTORY_VIEW_ID);
 		const onChat = !active || active instanceof ActiveChatInput;
 		const watchingOtherWalkthrough = active instanceof WalkthroughInput && this.player?.playing;
@@ -437,10 +444,30 @@ export class ActiveService extends Disposable implements IActiveService {
 			return;
 		}
 		this.offer(walkthrough);
-		this.notificationService.prompt(Severity.Info, localize('walkthroughReady', "The walkthrough for \"{0}\" is ready.", walkthrough.title), [{
+		this.notificationService.prompt(Severity.Info, walkthrough.chapter
+			? localize('chapterReady', "Chapter {0} is ready: \"{1}\".", walkthrough.chapter, walkthrough.title)
+			: localize('walkthroughReady', "The walkthrough for \"{0}\" is ready.", walkthrough.title), [{
 			label: localize('play', "Play Walkthrough"),
 			run: () => this.openWalkthrough(walkthrough),
 		}]);
+	}
+
+	/** Chapters queued while the previous one played: the next pops up once it ends. */
+	private readonly queuedWalkthroughs: Walkthrough[] = [];
+	private queuedTimer: ReturnType<typeof setTimeout> | undefined;
+
+	private playNextQueued(): void {
+		if (!this.queuedWalkthroughs.length || this.queuedTimer) {
+			return;
+		}
+		// A moment to let the last line land before the next chapter starts.
+		this.queuedTimer = setTimeout(() => {
+			this.queuedTimer = undefined;
+			const next = this.queuedWalkthroughs.shift();
+			if (next) {
+				void this.openWalkthrough(next, undefined, 650);
+			}
+		}, 1800);
 	}
 
 	async startHandoff(): Promise<void> {
@@ -598,6 +625,9 @@ export class ActiveService extends Disposable implements IActiveService {
 					// Walkthrough narration and a deeper explanation never talk over each other.
 					this.clipPlayer.stop();
 				}
+				if (player.state === 'ended') {
+					this.playNextQueued();
+				}
 				this._onDidChangePlayback.fire();
 			});
 		} else if (start) {
@@ -606,6 +636,10 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs = 0): Promise<void> {
+		const queued = this.queuedWalkthroughs.findIndex(candidate => candidate.id === walkthrough.id);
+		if (queued >= 0) {
+			this.queuedWalkthroughs.splice(queued, 1);
+		}
 		if (this._pendingHandoff?.id === walkthrough.id) {
 			this._pendingHandoff = undefined;
 			this._onDidChangeHandoff.fire();

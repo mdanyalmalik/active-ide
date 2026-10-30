@@ -12,7 +12,7 @@ import { ILanguageService } from '../../../../editor/common/languages/language.j
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { MarkedKatexSupport } from '../../markdown/browser/markedKatexSupport.js';
-import type { CapturedFile, ChartVisual, CodeVisual, DiagramVisual, DiffVisual, EquationVisual, LineRange, SceneVisual } from '../common/activeProtocol.js';
+import type { CapturedFile, ChartVisual, CodeVisual, DiagramVisual, DiffVisual, EquationVisual, LineRange, Scene, SceneVisual } from '../common/activeProtocol.js';
 
 const $ = dom.$;
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -119,6 +119,34 @@ export function isRedundantDiff(visual: SceneVisual | undefined, files: Readonly
 	}
 	const file = files[visual.file];
 	return !!file && !diffExcerpt(file, visual.range).some(line => line.kind === 'remove');
+}
+
+/**
+ * Whether a scene's visual only repeats what the editor already shows: a diff that only adds lines,
+ * or a code excerpt that's mostly the highlighted lines themselves. Such visuals are left out.
+ */
+export function isRedundantVisual(scene: Scene, files: Readonly<Record<string, CapturedFile>>): boolean {
+	const visual = scene.visual;
+	if (visual?.type === 'code' && visual.file === scene.file && visual.version === scene.version) {
+		const length = visual.range.endLine - visual.range.startLine + 1;
+		let shown = 0;
+		for (let line = visual.range.startLine; line <= visual.range.endLine; line++) {
+			shown += scene.focus.some(range => line >= range.startLine - 3 && line <= range.endLine + 3) ? 1 : 0;
+		}
+		return length > 0 && shown / length >= 0.6;
+	}
+	if (visual?.type === 'diff' && visual.file === scene.file && scene.version === 'final') {
+		// A diff at the highlighted lines that's mostly additions shows what the editor and its change
+		// marks already show; it earns its space only when removed code is a real part of it.
+		const file = files[visual.file];
+		const lines = file ? diffExcerpt(file, visual.range).filter(line => line.kind !== 'gap') : [];
+		const removed = lines.filter(line => line.kind === 'remove').length;
+		const atFocus = scene.focus.some(range => visual.range.startLine <= range.endLine + 3 && visual.range.endLine >= range.startLine - 3);
+		if (atFocus && lines.length && removed / lines.length < 0.25) {
+			return true;
+		}
+	}
+	return isRedundantDiff(visual, files);
 }
 
 /** The changed lines around `range` (final-version coordinates), with one line of context. */

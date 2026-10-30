@@ -208,7 +208,7 @@ export class ActiveChatEditor extends EditorPane {
 		const icon = dom.append(this.handoffCard, $('span.handoff-icon'));
 		icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.playCircle));
 		const text = dom.append(this.handoffCard, $('.handoff-text'));
-		dom.append(text, $('.handoff-title')).textContent = localize('handoffTitle', "Walkthrough ready: {0}", walkthrough.title);
+		dom.append(text, $('.handoff-title')).textContent = (walkthrough.chapter ? localize('handoffChapterTitle', "Chapter {0} ready: {1}", walkthrough.chapter, walkthrough.title) : localize('handoffTitle', "Walkthrough ready: {0}", walkthrough.title));
 		dom.append(text, $('.handoff-detail'));
 		const progress = dom.append(this.handoffCard, $('.handoff-progress'));
 		dom.append(progress, $('.handoff-progress-bar'));
@@ -487,7 +487,8 @@ export class ActiveChatEditor extends EditorPane {
 				break;
 			case 'agent':
 			case 'explainer': {
-				eyebrow(entry.role === 'agent' ? this.activeService.agent.provider.shortName : localize('explainer', "Active · explanation"));
+				// Notes are the explainer's short take on a small change, in place of a walkthrough.
+				eyebrow(entry.role === 'agent' ? this.activeService.agent.provider.shortName : entry.id.startsWith('note') ? localize('explainerNote', "Active · note") : localize('explainer', "Active · explanation"));
 				const body = dom.append(node, $('.text.markdown'));
 				if (entry.text) {
 					const rendered = slot.store.add(this.markdownRenderer.render(new MarkdownString(entry.text)));

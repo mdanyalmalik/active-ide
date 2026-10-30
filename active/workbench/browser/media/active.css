@@ -1058,16 +1058,21 @@
 	animation: active-part-in 380ms 110ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
 }
 
-.monaco-editor .active-explain-card > .visual {
+.monaco-editor .active-explain-card > p.narration {
 	animation: active-part-in 420ms 160ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
 }
 
-.monaco-editor .active-explain-card > .caption {
-	animation: active-part-in 380ms 220ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+.monaco-editor .active-explain-card > .visual {
+	animation: active-part-in 420ms 240ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
 }
 
-.monaco-editor .active-explain-card > p.narration {
-	animation: active-part-in 420ms 260ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+.monaco-editor .active-explain-card > .caption {
+	animation: active-part-in 380ms 300ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+/* Narration sits above the visual now. */
+.monaco-editor .active-explain-card > p.narration + .visual {
+	margin-top: 16px;
 }
 
 /* Diagram: columns arrive left to right, then the connections draw themselves. */
@@ -1212,6 +1217,13 @@
 
 .monaco-editor .active-visual-code {
 	border-left-color: var(--active-border);
+}
+
+/* Long excerpts scroll inside the card, so a card never outgrows the editor. */
+.monaco-editor .active-visual-diff,
+.monaco-editor .active-visual-code {
+	max-height: min(300px, 38vh);
+	overflow-y: auto;
 }
 
 .monaco-editor .active-visual-diff .diff-line.add {

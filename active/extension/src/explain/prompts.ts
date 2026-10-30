@@ -18,6 +18,10 @@ export interface PlanningContext {
 	readonly history: readonly string[];
 	readonly userNotes: readonly string[];
 	readonly final: boolean;
+	/** Lean toward a note for small changes and short requests (`active.explain.preferNotesForSmallChanges`). */
+	readonly preferNotes: boolean;
+	/** Set when the turn is explained in chapters: this one's number and the chapters already shown. */
+	readonly chapter?: { readonly index: number; readonly earlier: ReadonlyArray<{ readonly title: string; readonly summary: string }> };
 }
 
 const MAX_FILE_CHARS = 24000;
@@ -87,6 +91,9 @@ export function describeProfile(profile: KnowledgeProfile): string {
 }
 
 const SCHEMA = `{
+  "format": "walkthrough"|"note"|"skip", // see LENGTH; "note" and "skip" need only "note"/"reason"
+  "reason"?: string,               // one line: why this format and length suit this developer
+  "note"?: string,                 // format "note": one or two plain sentences shown in chat
   "title": string,                 // short headline for the whole walkthrough
   "summary": string,               // 1-2 sentences
   "terms": [{ "name": string, "meaning": string, "codeSymbol"?: string }],
@@ -146,7 +153,8 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 		`You are the explanation planner inside Active, an IDE that narrates what a coding agent just did. You only read; you never modify files (your session runs under a read-only permission profile). The working directory is the live project, so you may read other files for context, but it can keep changing while you work: the CAPTURED FILES below are the authoritative versions for this turn.`,
 		`Produce a walkthrough of this turn's code change for the developer below as a single JSON object matching this schema (reply with only the JSON in one \`\`\`json block):\n${SCHEMA}`,
 		EXPLAINING,
-		`DEVELOPER PROFILE\n${describeProfile(context.profile)}\nAdapt what you cover, detail, vocabulary and pacing to this profile: skim what they want skimmed, spend scenes on what they follow closely, and don't explain what they already know well. ${context.profile.math === 'avoid' ? 'Avoid equations.' : ''} Aim for ${context.profile.depth === 'overview' ? '3-4' : context.profile.depth === 'deep' ? '6-9' : '4-6'} scenes.`,
+		`DEVELOPER PROFILE\n${describeProfile(context.profile)}\nAdapt what you cover, detail, vocabulary and pacing to this profile: skim what they want skimmed, spend scenes on what they follow closely, and don't explain what they already know well. ${context.profile.math === 'avoid' ? 'Avoid equations.' : ''}`,
+		lengthGuidance(context),
 		`TASK (turn ${context.turnIndex})\n${context.task}`,
 		`AGENT MESSAGES\n${context.agentMessages.join('\n---\n') || '(none)'}`,
 		`EXPOSED REASONING SUMMARIES\n${context.reasoningSummaries.join('\n---\n') || '(none)'}`,
@@ -154,7 +162,8 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 		`PENDING CHECKS (still running; describe as pending, never as passed)\n${context.pending.map(check => `- ${check.label}`).join('\n') || '(none)'}`,
 		context.userNotes.length ? `USER CHANGES (not made by the agent; do not explain them as the agent's work)\n${context.userNotes.join('\n')}` : '',
 		`EARLIER TURNS (context only; explain only this turn)\n${context.history.join('\n') || '(none)'}`,
-		`CAPTURED FILES\n${fileSections}`,
+		context.chapter ? chapterSection(context.chapter) : '',
+		`CAPTURED FILES${context.chapter && context.chapter.index > 1 ? ' (diffs are relative to the end of the previous chapter)' : ''}\n${fileSections}`,
 	];
 	if (previous) {
 		sections.push(`YOUR EARLIER DRAFT (written while the agent was still working). Revise it so it matches the final captured changes above: drop scenes about work that was reverted or superseded, fix line numbers, add what is new.\n\`\`\`json\n${JSON.stringify(previous)}\n\`\`\``);
@@ -163,6 +172,47 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 		sections.push('The agent is still working; this is a draft that will be reconciled with the final changes.');
 	}
 	return sections.filter(Boolean).join('\n\n');
+}
+
+/** LENGTH: the explainer decides whether and how much to explain, from the profile and the change. */
+function lengthGuidance(context: PlanningContext): string {
+	return `LENGTH (your decision)
+Decide how much this change deserves for this developer, from their profile, the size and kind of change, and how they asked:
+- "skip": nothing here is worth their attention (mechanical, or entirely in areas they skim or know well). Give a one-line "reason".
+- "note": one or two sentences in chat are enough (a small, self-explanatory change). Put them in "note".
+- "walkthrough": as many scenes as the change needs for them, no more: one scene is fine for a focused change; a large or subtle change in an area they follow closely can take many. Never pad to reach a count, and don't give tests or routine follow-ups their own scenes unless they matter to this developer.
+${context.preferNotes ? 'Lean toward "note" for small changes and short, specific requests: when the request names one specific change (for example "change the default to 8") and the diff does exactly that, plus tests or docs that confirm it, choose "note" unless something in it is surprising or touches what they follow closely. Tests that just confirm the change are worth a clause in the note, not a scene.' : ''}`.trim();
+}
+
+function chapterSection(chapter: NonNullable<PlanningContext['chapter']>): string {
+	const earlier = chapter.earlier.map((entry, index) => `${index + 1}. ${entry.title}: ${entry.summary}`).join('\n');
+	return `CHAPTER ${chapter.index}
+This turn is long, so it is explained in chapters as the work progresses. Explain only the changes in the CAPTURED FILES below (since the previous chapter); don't repeat earlier chapters. If later work changed something an earlier chapter explained, say so briefly.${earlier ? `\nEarlier chapters:\n${earlier}` : ''}`;
+}
+
+export interface CheckpointContext {
+	readonly profile: KnowledgeProfile;
+	readonly task: string;
+	readonly minutesSinceLastChapter: number;
+	/** The agent's progress messages since the last chapter. */
+	readonly progress: readonly string[];
+	/** Per-file stats of what changed since the last chapter. */
+	readonly files: ReadonlyArray<{ readonly path: string; readonly added: number; readonly removed: number }>;
+	readonly tools: readonly ToolOutcome[];
+	readonly earlierChapters: readonly string[];
+	readonly preferNotes: boolean;
+}
+
+/** The cheap mid-turn question: is a finished piece of work ready for a chapter now, or wait? */
+export function buildCheckpointPrompt(context: CheckpointContext): string {
+	return [
+		`CHAPTER CHECK. A coding agent is partway through a long task. You decide whether to explain the work done since the last chapter now, as its own chapter, or wait. Explain now only when a coherent piece of work is finished (for example its tests pass or a step is done) and it's worth this developer's attention; wait while the code is still taking shape, or if what changed is in areas they skim. The rest is explained when the task ends.`,
+		`Reply with only JSON: {"decision": "chapter"|"wait", "reason": string}`,
+		`DEVELOPER PROFILE\n${describeProfile(context.profile)}${context.preferNotes ? '\nThey prefer brief notes for small changes.' : ''}`,
+		`TASK\n${context.task}`,
+		`EARLIER CHAPTERS\n${context.earlierChapters.join('\n') || '(none)'}`,
+		`SINCE THE LAST CHAPTER (${context.minutesSinceLastChapter} min)\nAgent progress:\n${context.progress.map(message => `- ${message.replace(/\s+/g, ' ').slice(0, 300)}`).join('\n') || '(none)'}\nFiles changed:\n${context.files.map(file => `- ${file.path} (+${file.added} -${file.removed})`).join('\n') || '(none)'}\nCommands and tests:\n${context.tools.filter(tool => tool.command).map(tool => `- \`${tool.command}\` → ${tool.status}`).join('\n') || '(none)'}`,
+	].join('\n\n');
 }
 
 export function buildRepairPrompt(errors: readonly string[]): string {

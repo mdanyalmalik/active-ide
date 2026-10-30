@@ -6,11 +6,6 @@
 import { diffLines } from '../tracking/lineDiff';
 import type { NetFileChange } from '../tracking/changeTracker';
 
-export interface WorthinessOptions {
-	/** Meaningful changed lines that make a turn worth explaining on their own. */
-	readonly minMeaningfulLines: number;
-}
-
 export interface WorthinessVerdict {
 	readonly worthy: boolean;
 	readonly score: number;
@@ -35,11 +30,11 @@ function meaningfulLine(line: string): boolean {
 }
 
 /**
- * Decides whether a single turn's net change contains enough coherent,
- * meaningful work to explain. Only the turn's own changes are considered:
- * small changes never accumulate across turns.
+ * The cheap filter before the explanation model is involved: does the change contain anything
+ * meaningful at all (not only whitespace, comments, moves, lock or generated files, or the user's own
+ * edits)? Whether it's worth explaining, and at what length, is the explanation model's call.
  */
-export function assessWorthiness(changes: readonly NetFileChange[], options: WorthinessOptions): WorthinessVerdict {
+export function assessWorthiness(changes: readonly NetFileChange[]): WorthinessVerdict {
 	const reasons: string[] = [];
 	let meaningful = 0;
 	let logic = 0;
@@ -93,20 +88,9 @@ export function assessWorthiness(changes: readonly NetFileChange[], options: Wor
 		}
 	}
 	const score = meaningful + logic * 1.5 + declarations * 2 + Math.max(0, files - 1) * 3;
-	let worthy = false;
-	if (meaningful === 0) {
-		reasons.push('no meaningful code changes in this turn');
-	} else if (meaningful >= options.minMeaningfulLines && logic > 0) {
-		worthy = true;
-		reasons.push(`${meaningful} meaningful lines with ${logic} logic changes`);
-	} else if (files >= 2 && meaningful >= Math.ceil(options.minMeaningfulLines / 2) && logic > 0) {
-		worthy = true;
-		reasons.push(`coordinated change across ${files} files`);
-	} else if (declarations > 0 && logic >= 3) {
-		worthy = true;
-		reasons.push('introduces new behavior');
-	} else {
-		reasons.push(`small change (${meaningful} meaningful lines, ${logic} logic changes) — kept in history, not explained`);
-	}
+	const worthy = meaningful > 0;
+	reasons.push(worthy
+		? `${meaningful} meaningful line${meaningful === 1 ? '' : 's'} (${logic} with logic) across ${files} file${files === 1 ? '' : 's'}`
+		: 'no meaningful code changes');
 	return { worthy, score, meaningfulLines: meaningful, logicSignals: logic, files, reasons };
 }

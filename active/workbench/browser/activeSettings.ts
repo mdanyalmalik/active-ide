@@ -149,17 +149,27 @@ const general: IConfigurationNode = {
 			minimum: 0,
 			description: localize('backgroundTimeout', "How long to wait for background tasks (tests, builds) after a coding turn before explaining. Unfinished checks are marked pending and keep running."),
 		},
-		'active.explain.minMeaningfulLines': {
+		'active.explain.checkpointMinutes': {
 			type: 'number',
-			default: 8,
+			default: 5,
 			minimum: 1,
-			description: localize('minLines', "Meaningful changed lines (not whitespace, comments or moves) that make a turn worth a walkthrough."),
+			description: localize('checkpointMinutes', "Minimum minutes between asking the explanation model whether the coding agent's work so far is ready for a chapter. It's asked only when the agent reaches a checkpoint (a progress update, a finished test run or a completed step)."),
 		},
-		'active.explain.draftQuietSeconds': {
+		'active.explain.chapterMinutes': {
 			type: 'number',
-			default: 6,
+			default: 10,
 			minimum: 1,
-			description: localize('draftQuiet', "Quiet period after the last change before drafting a walkthrough while the agent is still working."),
+			description: localize('chapterMinutes', "Long tasks are explained in chapters. At most one chapter per this many minutes; a task shorter than this gets a single explanation at the end."),
+		},
+		'active.explain.queueChapters': {
+			type: 'boolean',
+			default: true,
+			description: localize('queueChapters', "When a new chapter is ready while you're still watching the previous one, keep it queued until that one ends instead of switching right away."),
+		},
+		'active.explain.preferNotesForSmallChanges': {
+			type: 'boolean',
+			default: true,
+			description: localize('preferNotes', "For small changes (and short requests), lean toward a brief note in chat instead of a full walkthrough."),
 		},
 		'active.startWithChat': {
 			type: 'boolean',

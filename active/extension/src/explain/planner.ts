@@ -5,7 +5,7 @@
 
 import type { AgentItem, AgentSession } from '../agents/agentTypes';
 import { CapturedFile, extractJsonObject, validateWalkthrough, WalkthroughDraft } from '../shared/activeProtocol';
-import { buildPlanningPrompt, buildRepairPrompt, PlanningContext } from './prompts';
+import { buildCheckpointPrompt, buildPlanningPrompt, buildRepairPrompt, CheckpointContext, PlanningContext } from './prompts';
 
 interface PendingTurn {
 	readonly messages: string[];
@@ -141,9 +141,13 @@ export class ExplanationAgent {
 
 export interface PlanResult {
 	readonly draft?: WalkthroughDraft;
+	/** The explainer chose not to make a walkthrough: nothing (`skip`) or a short chat note. */
+	readonly brief?: { readonly format: 'skip' | 'note'; readonly note?: string; readonly reason?: string };
 	readonly errors: readonly string[];
 	readonly dropped: readonly string[];
 }
+
+export type CheckpointDecision = { readonly decision: 'chapter' | 'wait'; readonly reason: string };
 
 /**
  * Asks the explanation model for a structured walkthrough and validates it
@@ -158,6 +162,10 @@ export class WalkthroughPlanner {
 		let errors: readonly string[] = [];
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const parsed = extractJsonObject(reply);
+			const brief = briefOf(parsed);
+			if (brief) {
+				return { brief, errors: [], dropped: [] };
+			}
 			const result = validateWalkthrough(parsed, context.files, evidence);
 			if (result.draft) {
 				return result;
@@ -174,8 +182,25 @@ export class WalkthroughPlanner {
 		return { errors, dropped: [] };
 	}
 
+	/** The cheap mid-turn question. Anything unparseable counts as "wait". */
+	async checkpoint(context: CheckpointContext): Promise<CheckpointDecision> {
+		const parsed = extractJsonObject(await this.agent.ask(buildCheckpointPrompt(context))) as { decision?: unknown; reason?: unknown } | undefined;
+		return { decision: parsed?.decision === 'chapter' ? 'chapter' : 'wait', reason: typeof parsed?.reason === 'string' ? parsed.reason : '' };
+	}
+
 	/** Re-validates a draft against final captures (used when the net diff did not change since the draft). */
 	reconcile(draft: WalkthroughDraft, files: Readonly<Record<string, CapturedFile>>, evidence: ReadonlySet<string>): PlanResult {
 		return validateWalkthrough(draft, files, evidence);
 	}
+}
+
+function briefOf(parsed: unknown): PlanResult['brief'] {
+	const value = parsed as { format?: unknown; note?: unknown; reason?: unknown } | undefined;
+	if (value?.format !== 'skip' && value?.format !== 'note') {
+		return undefined;
+	}
+	const text = (field: unknown) => typeof field === 'string' && field.trim() ? field.trim() : undefined;
+	const note = text(value.note);
+	// A note without text is no more than a skip.
+	return { format: value.format === 'note' && note ? 'note' : 'skip', note, reason: text(value.reason) };
 }
