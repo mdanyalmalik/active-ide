@@ -149,7 +149,7 @@ scripts/sync.sh && (cd vscode && npm run build-fast -- --client-only && \
   VSCODE_SKIP_PRELAUNCH=1 ./scripts/test.sh --run src/vs/workbench/contrib/active/test/browser/walkthroughPlayer.test.ts \
   --run src/vs/workbench/contrib/active/test/browser/decorationsFilter.test.ts \
   --run src/vs/workbench/contrib/active/test/browser/explorerGuide.test.ts)
-                                      # 29 tests (walkthrough player and read-aloud clips with fake audio; the decorations filter; Explorer folder animations)
+                                      # 30 tests (walkthrough player, with and without audio, and read-aloud clips with fake audio; the decorations filter; Explorer folder animations)
 ```
 
 These include unit tests for diffing, worthiness (including no accumulation across turns), walkthrough validation, change capture (shell edits, user attribution, pre-existing changes, freezing), history save/replay/delete, and personalization of prompts. An end-to-end test drives the controller through the real `@muse-code/sdk` against the scripted host. It covers the simple, tiny, and multi-file turns, the background timeout, pending checks, immutable captures, and read-only Q&A.

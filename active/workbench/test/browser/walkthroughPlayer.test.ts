@@ -240,6 +240,69 @@ suite('Active WalkthroughPlayer: "More detail" and questions stop after the sent
 	});
 });
 
+suite('Active WalkthroughPlayer with audio off: read a whole scene at a time', () => {
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	let audios: number;
+	let silent: boolean;
+
+	setup(() => {
+		audios = 0;
+		silent = true;
+	});
+
+	/** Scene A focuses two ranges in turn (the voice would move between them), with a diagram cue. */
+	const cued: Walkthrough = {
+		...walkthrough,
+		scenes: [
+			{ ...scene('A', 2), focus: [{ startLine: 1, endLine: 2 }, { startLine: 4, endLine: 5 }], narration: [{ text: 'first', cue: { focus: 0, nodes: ['x'] } }, { text: 'second', cue: { focus: 1, nodes: ['y'], reveal: 2 } }] },
+			scene('B', 2),
+		],
+	};
+
+	function player(): WalkthroughPlayer {
+		return store.add(new WalkthroughPlayer(cued, { scene: 0, segment: 0 }, new FakeNarration(), () => 1, {
+			sceneGapMs: 0,
+			silent: () => silent,
+			createAudio: () => {
+				audios++;
+				return new FakeAudio() as unknown as HTMLAudioElement;
+			},
+		}));
+	}
+
+	test('nothing plays, and the whole scene shows at once: every focus range evenly, every cue applied', async () => {
+		const p = player();
+		p.play();
+		await settle();
+		const visual = p.visual;
+		assert.deepStrictEqual({ state: p.state, audios, focus: visual.focus, nodes: visual.nodes, reveal: visual.reveal }, { state: 'paused', audios: 0, focus: undefined, nodes: ['y'], reveal: 2 });
+	});
+
+	test('Next and Previous move a whole scene, and stop at either end', () => {
+		const p = player();
+		const at = () => `${p.position.scene}/${p.position.segment} ${p.state}`;
+		const steps = [at()];
+		p.advance();
+		steps.push(at());
+		p.advance();
+		steps.push(at());
+		p.rewind();
+		steps.push(at());
+		p.rewind();
+		steps.push(at());
+		assert.deepStrictEqual(steps, ['0/0 paused', '1/0 paused', '1/0 paused', '0/0 paused', '0/0 paused']);
+	});
+
+	test('turning audio back on: narration plays and the voice leads the highlighting again', async () => {
+		const p = player();
+		silent = false;
+		assert.strictEqual(p.visual.focus, 0);
+		p.play();
+		await settle();
+		assert.deepStrictEqual({ state: p.state, audios }, { state: 'speaking', audios: 1 });
+	});
+});
+
 suite('Active ClipPlayer: how a read-aloud clip ends', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 	let audios: FakeAudio[];

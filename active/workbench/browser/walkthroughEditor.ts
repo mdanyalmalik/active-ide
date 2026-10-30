@@ -254,7 +254,11 @@ export class WalkthroughEditor extends EditorPane {
 		this.activeService.selectWalkthrough(input.walkthrough);
 		this.bindPlayer();
 		this.inputStore.add(this.activeService.onDidChangePlayer(() => this.bindPlayer()));
-		this.inputStore.add(this.activeService.onDidChangeNarration(() => this.renderControls()));
+		this.inputStore.add(this.activeService.onDidChangeNarration(() => {
+			this.renderControls();
+			// Audio turned off or on: the highlighting switches between following the voice and the whole scene.
+			this.applyCue();
+		}));
 		this.inputStore.add(this.activeService.onDidChangeAgent(() => this.renderControls()));
 		this.inputStore.add(this.activeService.onDidChangeChecks(walkthroughId => walkthroughId === this.player?.walkthrough.id && this.renderPending()));
 		this.inputStore.add(this.activeService.onDidChangeElaboration(elaboration => {
@@ -816,7 +820,7 @@ export class WalkthroughEditor extends EditorPane {
 	/** Reads a finished deeper explanation or answer aloud, once narration has stopped. */
 	private maybeSpeakDeeper(): void {
 		const player = this.player;
-		if (!player || player.playing) {
+		if (!player || player.playing || !this.activeService.canSpeak) {
 			return;
 		}
 		const scene = player.walkthrough.scenes[player.position.scene];
@@ -915,7 +919,7 @@ export class WalkthroughEditor extends EditorPane {
 		} else if (elaboration.status === 'done') {
 			if (this.activeService.speaking) {
 				button(localize('deeperStop', "Stop Reading"), () => this.activeService.stopSpeaking());
-			} else {
+			} else if (this.activeService.canSpeak) {
 				button(localize('deeperListen', "Read Aloud"), () => {
 					this.speechErrors.delete(elaboration.requestId);
 					void this.activeService.speak(elaboration.text).then(outcome => {
@@ -1058,11 +1062,13 @@ export class WalkthroughEditor extends EditorPane {
 				dom.append(narration, $('span.segment')).textContent = `${segment.text} `;
 			}
 		}
-		// Only classes change from segment to segment, so the text eases between states.
+		// Only classes change from segment to segment, so the text eases between states. With audio off there's
+		// no voice to follow: the whole text reads evenly.
+		const silent = player.silent;
 		[...narration.children].forEach((span, index) => {
-			span.classList.toggle('spoken', index < player.position.segment);
-			span.classList.toggle('current', index === player.position.segment);
-			span.classList.toggle('upcoming', index > player.position.segment);
+			span.classList.toggle('spoken', !silent && index < player.position.segment);
+			span.classList.toggle('current', silent || index === player.position.segment);
+			span.classList.toggle('upcoming', !silent && index > player.position.segment);
 		});
 	}
 
@@ -1166,17 +1172,27 @@ export class WalkthroughEditor extends EditorPane {
 		};
 		const left = dom.append(this.footer, $('.spacer'));
 		void left;
-		const rewind = button(localize('rewind', "← Rewind"), WalkthroughCommandIds.Rewind, localize('rewindTitle', "Back to the previous narration step"), () => player?.rewind());
-		rewind.disabled = !player || (player.position.scene === 0 && player.position.segment === 0);
-		const playLabel = !player ? localize('play', "▶ Play") : player.state === 'ended' ? localize('replay', "↺ Replay") : player.playing ? localize('pause', "⏸ Pause") : localize('resume', "▶ Resume");
-		const primary = button(playLabel, WalkthroughCommandIds.TogglePlayback, localize('toggleTitle', "Pause or resume (the coding agent keeps working)"), () => player?.toggle(), '.primary');
-		primary.disabled = !player;
-		const next = button(localize('next', "Next →"), WalkthroughCommandIds.Advance, localize('nextTitle', "Skip to the next idea"), () => player?.advance());
-		next.disabled = !player || player.state === 'ended';
+		if (player?.silent) {
+			// Audio off: the walkthrough is read, a whole scene at a time.
+			const previous = button(localize('previousScene', "← Previous"), WalkthroughCommandIds.Rewind, localize('previousSceneTitle', "Back to the previous idea"), () => player.rewind());
+			previous.disabled = player.position.scene === 0;
+			const next = button(localize('nextScene', "Next →"), WalkthroughCommandIds.Advance, localize('nextSceneTitle', "On to the next idea"), () => player.advance(), '.primary');
+			next.disabled = player.position.scene >= player.walkthrough.scenes.length - 1;
+		} else {
+			const rewind = button(localize('rewind', "← Rewind"), WalkthroughCommandIds.Rewind, localize('rewindTitle', "Back to the previous narration step"), () => player?.rewind());
+			rewind.disabled = !player || (player.position.scene === 0 && player.position.segment === 0);
+			const playLabel = !player ? localize('play', "▶ Play") : player.state === 'ended' ? localize('replay', "↺ Replay") : player.playing ? localize('pause', "⏸ Pause") : localize('resume', "▶ Resume");
+			const primary = button(playLabel, WalkthroughCommandIds.TogglePlayback, localize('toggleTitle', "Pause or resume (the coding agent keeps working)"), () => player?.toggle(), '.primary');
+			primary.disabled = !player;
+			const next = button(localize('next', "Next →"), WalkthroughCommandIds.Advance, localize('nextTitle', "Skip to the next idea"), () => player?.advance());
+			next.disabled = !player || player.state === 'ended';
+		}
 		const progress = dom.append(this.footer, $('.progress'));
 		progress.textContent = walkthrough ? `${player!.position.scene + 1} / ${walkthrough.scenes.length}` : '';
 		const status = dom.append(this.footer, $('.playback-status'));
-		if (player?.narrationIssue) {
+		if (player?.silent) {
+			// Nothing to report: no narration is wanted.
+		} else if (player?.narrationIssue) {
 			status.textContent = localize('captionsOnly', "Captions only — {0}", player.narrationIssue);
 			status.classList.add('warning');
 		} else if (player?.state === 'loading') {

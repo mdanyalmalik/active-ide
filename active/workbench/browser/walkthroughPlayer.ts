@@ -23,8 +23,16 @@ export interface VisualState {
 	readonly reveal: number | undefined;
 }
 
-export function visualStateAt(walkthrough: Walkthrough, position: PlaybackPosition): VisualState {
+/**
+ * The visual state for a position. `wholeScene` (audio off): every cue of the scene has fired, and all of its
+ * focus ranges are emphasized evenly instead of following the voice.
+ */
+export function visualStateAt(walkthrough: Walkthrough, position: PlaybackPosition, wholeScene = false): VisualState {
 	const scene = walkthrough.scenes[position.scene];
+	if (wholeScene) {
+		const whole = visualStateAt(walkthrough, { scene: position.scene, segment: scene.narration.length - 1 });
+		return { ...whole, focus: undefined };
+	}
 	let focus: number | undefined;
 	let nodes: readonly string[] = [];
 	let reveal: number | undefined;
@@ -49,6 +57,8 @@ const SCENE_GAP_MS = 650;
 export interface PlayerOptions {
 	readonly createAudio?: (src: string) => HTMLAudioElement;
 	readonly sceneGapMs?: number;
+	/** Audio is off: nothing plays; Previous and Next step through whole scenes. */
+	readonly silent?: () => boolean;
 }
 /** Pressing Next this soon after a scene appears (and before half of it is narrated) counts as an early skip. */
 const QUICK_SKIP_MS = 6000;
@@ -112,11 +122,16 @@ export class WalkthroughPlayer extends Disposable {
 	}
 
 	get visual(): VisualState {
-		return visualStateAt(this.walkthrough, this._position);
+		return visualStateAt(this.walkthrough, this._position, this.silent);
+	}
+
+	/** Audio is off: the walkthrough is read, not played. */
+	get silent(): boolean {
+		return !!this.options.silent?.();
 	}
 
 	play(): void {
-		if (this.playing) {
+		if (this.playing || this.silent) {
 			return;
 		}
 		if (this._state === 'ended') {
@@ -181,7 +196,9 @@ export class WalkthroughPlayer extends Disposable {
 	/** Back one narration segment, or to the start of the previous scene from a scene's first segment. */
 	rewind(): void {
 		const { scene, segment } = this._position;
-		if (segment > 0) {
+		if (this.silent) {
+			this.seek({ scene: Math.max(0, scene - 1), segment: 0 });
+		} else if (segment > 0) {
 			this.seek({ scene, segment: segment - 1 });
 		} else if (scene > 0) {
 			this.seek({ scene: scene - 1, segment: 0 });
@@ -200,7 +217,7 @@ export class WalkthroughPlayer extends Disposable {
 		}
 		if (scene + 1 < this.walkthrough.scenes.length) {
 			this.seek({ scene: scene + 1, segment: 0 });
-		} else {
+		} else if (!this.silent) {
 			this.pause();
 			this.setState('ended');
 		}
@@ -220,8 +237,10 @@ export class WalkthroughPlayer extends Disposable {
 		}
 		this._position = { scene, segment };
 		// Re-prioritize background synthesis around where the viewer jumped.
-		this.narration.prefetchFrom(this.walkthrough, this._position);
-		if (wasPlaying) {
+		if (!this.silent) {
+			this.narration.prefetchFrom(this.walkthrough, this._position);
+		}
+		if (wasPlaying && !this.silent) {
 			void this.speak(this.run);
 		} else {
 			this.setState('paused');

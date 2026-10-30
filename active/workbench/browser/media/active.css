@@ -1946,7 +1946,10 @@
 
 /* ------------------------------------------------------------------ history & session views */
 
+/* The list is the scrolled element: it takes the view's height so its content can scroll inside it. */
 .monaco-workbench .active-history-list {
+	height: 100%;
+	box-sizing: border-box;
 	padding: 4px 12px 12px 20px;
 }
 
@@ -2660,6 +2663,32 @@
 	display: flex;
 	align-items: center;
 	gap: 12px;
+}
+
+/* "Narrate walkthroughs?": Yes / No side by side, then the voice list under the step's text. */
+.monaco-workbench .active-welcome .welcome-choice {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .active-welcome .welcome-voice {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 10px 0 0 40px;
+}
+
+.monaco-workbench .active-welcome .welcome-voice-select {
+	flex: 1;
+	min-width: 0;
+	height: 26px;
+	padding: 0 6px;
+	color: var(--vscode-dropdown-foreground);
+	background: var(--vscode-dropdown-background);
+	border: 1px solid var(--vscode-dropdown-border, transparent);
+	border-radius: 4px;
+	font: inherit;
 }
 
 .monaco-workbench .active-welcome .welcome-step-icon {

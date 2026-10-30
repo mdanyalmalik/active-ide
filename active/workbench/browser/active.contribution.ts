@@ -541,10 +541,13 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 	private narrationEntry() {
 		const narration = this.activeService.narration;
 		const voice = this.activeService.narrationVoice;
-		const text = narration.available
-			? `$(unmute) ${voice && voice !== 'default' ? localize('narrationReadyVoice', "Phonon 31M · {0}", voice) : localize('narrationReady', "Phonon 31M · on-device")}`
-			: `$(mute) ${localize('narrationOff', "Narration unavailable")}`;
-		const tooltip = narration.available ? localize('narrationTooltip', "{0}. Click to change the voice.", narration.detail) : narration.detail;
+		const off = this.activeService.voiceOff;
+		const text = off
+			? `$(mute) ${localize('narrationTurnedOff', "Narration off")}`
+			: narration.available
+				? `$(unmute) ${voice && voice !== 'default' ? localize('narrationReadyVoice', "Phonon 31M · {0}", voice) : localize('narrationReady', "Phonon 31M · on-device")}`
+				: `$(mute) ${localize('narrationOff', "Narration unavailable")}`;
+		const tooltip = off ? localize('narrationOffTooltip', "Walkthroughs aren't narrated. Click to choose a voice.") : narration.available ? localize('narrationTooltip', "{0}. Click to change the voice.", narration.detail) : narration.detail;
 		return { name: localize('activeNarration', "Active Narration"), text, ariaLabel: text, tooltip, command: ActiveCommandIds.PickVoice };
 	}
 }

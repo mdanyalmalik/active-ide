@@ -391,7 +391,7 @@ export class ActiveChatEditor extends EditorPane {
 			all.textContent = state.items.length === 1 ? localize('briefingPlayOne', "Play Walkthrough") : localize('briefingPlayAll', "Play All ({0})", state.items.length);
 			this.noticeStore.add(dom.addDisposableListener(all, dom.EventType.CLICK, () => this.activeService.playBriefing()));
 		}
-		if (briefing && this.activeService.narration.available) {
+		if (briefing && this.activeService.canSpeak) {
 			const listen = dom.append(actions, $('button.secondary')) as HTMLButtonElement;
 			const spoken = [briefing.headline, ...briefing.attention, ...briefing.done, ...briefing.problems, briefing.next].filter(Boolean).join('. ');
 			// The button shows that it's reading, and stops it.
@@ -687,7 +687,7 @@ export class ActiveChatEditor extends EditorPane {
 			const recordId = entry.recordId;
 			store.add(dom.addDisposableListener(show, dom.EventType.CLICK, () => void this.activeService.openNote(recordId)));
 		}
-		if (this.activeService.narration.available) {
+		if (this.activeService.canSpeak) {
 			const listen = dom.append(actions, $('button.link')) as HTMLButtonElement;
 			const label = () => listen.textContent = this.activeService.speakingText === entry.text ? localize('noteStopReading', "Stop Reading") : localize('noteReadAloud', "Read Aloud");
 			label();

@@ -54,6 +54,8 @@ export type ExplorerCountsMode = 'agent' | 'git';
 const EXPLORER_COUNTS_SETTING = 'active.explorer.changeCounts';
 /** Git counts also refresh this often, to catch commits and checkouts (which don't touch watched files). */
 const GIT_POLL_MS = 15_000;
+/** The voice setting's value for "no narration". */
+export const VOICE_OFF = 'off';
 
 /** Where the user was in a walkthrough when they asked a question from it. */
 export interface ChatContext {
@@ -184,6 +186,10 @@ export interface IActiveService {
 	pickCodingEffort(): Promise<void>;
 	/** Voice and speed come from settings. */
 	readonly narrationVoice: string;
+	/** The voice is set to Off: walkthroughs are read, not narrated, and nothing is read aloud. */
+	readonly voiceOff: boolean;
+	/** Narration works and isn't turned off. */
+	readonly canSpeak: boolean;
 	readonly narrationSpeed: number;
 	openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs?: number): Promise<void>;
 	resumeWalkthrough(): Promise<void>;
@@ -323,7 +329,13 @@ export class ActiveService extends Disposable implements IActiveService {
 			}
 			if (event.affectsConfiguration(ActiveSetting.NarrationVoice)) {
 				this.narrationCache.clear();
+				if (this.voiceOff) {
+					// Silent from now on: stop whatever is being read, and show whole scenes.
+					this.player?.pause();
+					this.clipPlayer.stop();
+				}
 				this._onDidChangeNarration.fire();
+				this._onDidChangePlayback.fire();
 			}
 			if (event.affectsConfiguration(ActiveSetting.NarrationSpeed)) {
 				this.player?.updateRate();
@@ -456,7 +468,9 @@ export class ActiveService extends Disposable implements IActiveService {
 		this._onDidChangeNarration.fire();
 		this._onDidChangeRecentWalkthrough.fire();
 		if (state.pendingWalkthrough) {
-			this.narrationCache.prefetchFrom(state.pendingWalkthrough, { scene: 0, segment: 0 });
+			if (!this.voiceOff) {
+				this.narrationCache.prefetchFrom(state.pendingWalkthrough, { scene: 0, segment: 0 });
+			}
 			this.offer(state.pendingWalkthrough);
 		}
 	}
@@ -501,7 +515,9 @@ export class ActiveService extends Disposable implements IActiveService {
 				break;
 			case 'walkthroughReady':
 				// Start synthesizing the whole narration now, before (or instead of) handoff.
-				this.narrationCache.prefetchFrom(event.walkthrough, { scene: 0, segment: 0 });
+				if (!this.voiceOff) {
+					this.narrationCache.prefetchFrom(event.walkthrough, { scene: 0, segment: 0 });
+				}
 				void this.onWalkthroughReady(event.walkthrough);
 				break;
 			case 'history':
@@ -863,8 +879,10 @@ export class ActiveService extends Disposable implements IActiveService {
 				this.positions.set(this.player.walkthrough.id, this.player.position);
 			}
 			const position = start ?? this.positions.get(walkthrough.id) ?? { scene: 0, segment: 0 };
-			this.narrationCache.prefetchFrom(walkthrough, position);
-			const player = new WalkthroughPlayer(walkthrough, position, this.narrationCache, () => this.narrationSpeed);
+			if (!this.voiceOff) {
+				this.narrationCache.prefetchFrom(walkthrough, position);
+			}
+			const player = new WalkthroughPlayer(walkthrough, position, this.narrationCache, () => this.narrationSpeed, { silent: () => this.voiceOff });
 			this.playerRef.value = player;
 			this.skipListener.value = player.onDidSkipEarly(sceneIndex => void this.recordEarlySkip(walkthrough, sceneIndex));
 			this.playbackListener.value = player.onDidChange(() => {
@@ -997,6 +1015,9 @@ export class ActiveService extends Disposable implements IActiveService {
 	get speakingText(): string | undefined { return this.clipPlayer.speaking ? this._speakingText : undefined; }
 
 	async speak(text: string, voice?: string): Promise<ClipOutcome> {
+		if (this.voiceOff && !voice) {
+			return { kind: 'stopped' };
+		}
 		this.player?.pause();
 		this._speakingText = text;
 		return this.clipPlayer.play(() => this.synthesize(text, voice));
@@ -1007,7 +1028,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	 * the editor. A walkthrough (or anything else) already being read isn't interrupted.
 	 */
 	private readNoteAloud(entry: ChatEntry): void {
-		if (entry.role !== 'explainer' || !entry.id.startsWith('note') || !entry.text || this.mode !== 'auto' || !this.narration.available) {
+		if (entry.role !== 'explainer' || !entry.id.startsWith('note') || !entry.text || this.mode !== 'auto' || !this.canSpeak) {
 			return;
 		}
 		if (this.player?.playing || this.clipPlayer.speaking) {
@@ -1077,6 +1098,14 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	get narrationVoice(): string {
 		return this.configurationService.getValue<string>(ActiveSetting.NarrationVoice) || 'default';
+	}
+
+	get voiceOff(): boolean {
+		return this.narrationVoice === VOICE_OFF;
+	}
+
+	get canSpeak(): boolean {
+		return this._narration.available && !this.voiceOff;
 	}
 
 	get narrationSpeed(): number {
@@ -1173,7 +1202,14 @@ export class ActiveService extends Disposable implements IActiveService {
 		});
 		const narrators = voices.filter(voice => !voice.character);
 		const characters = voices.filter(voice => voice.character);
+		const off: VoiceItem = {
+			voice: VOICE_OFF,
+			label: localize('voiceOffLabel', "Off"),
+			description: current === VOICE_OFF ? localize('currentVoice', "current") : undefined,
+			detail: localize('voiceOffPickDetail', "No narration: read walkthroughs yourself with Previous and Next, and nothing is read aloud"),
+		};
 		const items: Array<VoiceItem | IQuickPickSeparator> = [
+			off,
 			{ type: 'separator', label: localize('narrators', "Narrators") },
 			...narrators.map(item),
 			...(characters.length ? [{ type: 'separator', label: localize('characters', "Character voices") } as IQuickPickSeparator, ...characters.map(item)] : []),

@@ -113,7 +113,7 @@ const general: IConfigurationNode = {
 		[ActiveSetting.NarrationVoice]: {
 			type: 'string',
 			default: '',
-			markdownDescription: localize('narrationVoice', "Phonon voice for walkthrough narration. Empty uses Phonon's default. Pick and preview voices with **Active: Choose Narration Voice** or the status bar."),
+			markdownDescription: localize('narrationVoice', "Phonon voice for walkthrough narration. Empty uses Phonon's default; `off` turns narration off (walkthroughs are read with Previous and Next). Pick and preview voices with **Active: Choose Narration Voice** or the status bar."),
 			scope: ConfigurationScope.APPLICATION,
 		},
 		[ActiveSetting.NarrationSpeed]: {
