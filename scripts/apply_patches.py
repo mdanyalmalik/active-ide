@@ -39,6 +39,20 @@ patch(
     "Active: narrated walkthroughs start on handoff",
 )
 
+# 5. Active's settings come first in the Settings editor, and its model choices are commonly used.
+patch(
+    "src/vs/workbench/contrib/preferences/browser/settingsLayout.ts",
+    "\tchildren: [\n\t\t{\n\t\t\tid: 'editor',\n",
+    "\tchildren: [\n\t\t{\n\t\t\tid: 'active',\n\t\t\tlabel: localize('activeSettings', \"Active\"),\n\t\t\tsettings: ['active.*'],\n\t\t\tchildren: [\n\t\t\t\t{ id: 'active/coding', label: localize('activeCoding', \"Coding Agent\"), settings: ['active.coding.*', 'active.agent.*', 'active.muse.*'] },\n\t\t\t\t{ id: 'active/explanation', label: localize('activeExplanation', \"Explanations\"), settings: ['active.explanation.*', 'active.explain.*', 'active.walkthrough.*'] },\n\t\t\t\t{ id: 'active/narration', label: localize('activeNarration', \"Voice\"), settings: ['active.narration.*'] },\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\tid: 'editor',\n",
+    "id: 'active/coding'",
+)
+patch(
+    "src/vs/workbench/contrib/preferences/browser/settingsLayout.ts",
+    "const COMMONLY_USED_SETTINGS: readonly string[] = [\n",
+    "const COMMONLY_USED_SETTINGS: readonly string[] = [\n\t'active.coding.model',\n\t'active.coding.reasoningEffort',\n\t'active.explanation.model',\n\t'active.explanation.reasoningEffort',\n\t'active.narration.voice',\n",
+    "'active.coding.reasoningEffort',",
+)
+
 # 4. Branding.
 product_path = root / "product.json"
 product = json.loads(product_path.read_text())

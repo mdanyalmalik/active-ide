@@ -4,13 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { SpawnedMspConnection } from '@muse-code/sdk' with { 'resolution-mode': 'import' };
+import type { AgentModelInfo } from '../shared/activeProtocol';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener, AgentSessionOptions, AgentTask } from './agentTypes';
 
 type Params = Record<string, unknown>;
 
 const CLIENT_INFO = { name: 'active_ide', title: 'Active', version: '0.1.0' };
-/** Profile ids tried, in order, for the explanation session. The stable MSP surface does not list profiles. */
-const READ_ONLY_PROFILE_IDS = ['read-only', 'readOnly', 'read_only'];
+/** Muse Code's built-in read-only permission profile ("Reads files only"), as listed by `permissionProfile/list`. */
+const READ_ONLY_PROFILE = ':read-only';
 
 export class MuseUnavailableError extends Error { }
 
@@ -83,12 +84,12 @@ export class MuseHost implements AgentHost {
 		});
 	}
 
-	static async spawn(museBin: string, cwd: string, log: (line: string) => void, extraEnv: Readonly<Record<string, string>> = {}): Promise<MuseHost> {
+	static async spawn(museBin: string, cwd: string, log: (line: string) => void, extraEnv: Readonly<Record<string, string>> = {}, extraArgs: readonly string[] = []): Promise<MuseHost> {
 		const sdk = await import('@muse-code/sdk');
 		const stderr: string[] = [];
 		const handshake = sdk.spawnMspConnection({
 			command: museBin,
-			args: ['serve'],
+			args: ['serve', ...extraArgs],
 			cwd,
 			env: { ...process.env, ...extraEnv },
 			onStderr: chunk => {
@@ -167,17 +168,15 @@ export class MuseHost implements AgentHost {
 
 	async startSession(options: AgentSessionOptions): Promise<AgentSession> {
 		const connection = this.msp.connection;
-		let result: Params | undefined;
+		let result: Params;
 		if (options.readOnly) {
-			for (const profile of READ_ONLY_PROFILE_IDS) {
-				try {
-					result = await connection.command('session/start', { workspaceRoot: options.workspaceRoot, permissionProfile: profile, approvalMode: 'denyUnmatched' });
-					break;
-				} catch {
-					// Unknown profile id: try the next spelling.
-				}
+			// Muse enforces read-only in its sandbox, so the session can run in the real project.
+			// Without the profile the session would be able to write, so refuse rather than fall back.
+			try {
+				result = await connection.command('session/start', { workspaceRoot: options.workspaceRoot, permissionProfile: READ_ONLY_PROFILE, approvalMode: 'denyUnmatched' });
+			} catch (error) {
+				throw new MuseUnavailableError(`Muse Code didn't accept its read-only permission profile (${READ_ONLY_PROFILE}), so Active won't start the explanation session: ${error instanceof Error ? error.message : String(error)}`);
 			}
-			result ??= await connection.command('session/start', { workspaceRoot: options.workspaceRoot, approvalMode: 'denyUnmatched' });
 		} else {
 			result = await connection.command('session/start', { workspaceRoot: options.workspaceRoot });
 		}
@@ -185,6 +184,33 @@ export class MuseHost implements AgentHost {
 		const sessionId = String(sessionInfo.sessionId);
 		const session = new MuseSession(sessionId, this.msp, options.listener, options.readOnly);
 		this.sessions.set(sessionId, session);
+		return session;
+	}
+
+	async listModels(): Promise<AgentModelInfo[]> {
+		const result = await this.msp.connection.request('model/list', {});
+		const models = Array.isArray(result.models) ? result.models as Params[] : [];
+		return models.map(model => {
+			const cost = (model.cost ?? {}) as Params;
+			return {
+				id: String(model.modelId),
+				label: asString(model.displayLabel) ?? String(model.modelId),
+				description: asString(model.description),
+				inputCost: asString(cost.input),
+				outputCost: asString(cost.output),
+				isDefault: model.isDefault === true,
+				efforts: Array.isArray(model.variants) ? model.variants.filter((tier): tier is string => typeof tier === 'string') : [],
+				defaultEffort: asString(model.defaultReasoningEffort),
+			};
+		});
+	}
+
+	async resumeSession(sessionId: string, options: AgentSessionOptions): Promise<AgentSession> {
+		// Active keeps its own transcript, so only the live session is needed, not Muse's history.
+		const result = await this.msp.connection.command('session/resume', { sessionId, excludeItems: true });
+		const resumed = String(((result.session ?? {}) as Params).sessionId ?? sessionId);
+		const session = new MuseSession(resumed, this.msp, options.listener, options.readOnly);
+		this.sessions.set(resumed, session);
 		return session;
 	}
 
@@ -279,13 +305,22 @@ class MuseSession implements AgentSession {
 		await this.decide(approvalId, choiceId, requirementId);
 	}
 
-	async startTurn(text: string, displayText?: string): Promise<string> {
+	async startTurn(text: string, displayText?: string, reasoningEffort?: string): Promise<string> {
 		const ack = await this.msp.connection.command('turn/start', {
 			sessionId: this.sessionId,
 			input: [{ type: 'text', text }],
 			...(displayText ? { displayText } : {}),
+			...(reasoningEffort ? { reasoningEffort } : {}),
 		});
 		return String(ack.turnId);
+	}
+
+	async setModel(modelId: string): Promise<void> {
+		await this.msp.connection.command('session/setModel', { sessionId: this.sessionId, model: { modelId } });
+	}
+
+	async interruptTurn(turnId: string): Promise<void> {
+		await this.msp.connection.command('turn/interrupt', { sessionId: this.sessionId, turnId });
 	}
 
 	async listTasks(): Promise<AgentTask[]> {

@@ -95,16 +95,16 @@ export class WalkthroughInput extends EditorInput {
 	}
 }
 
-export class LearningProfileInput extends EditorInput {
-	static readonly ID = 'workbench.input.activeLearningProfile';
+export class KnowledgeProfileInput extends EditorInput {
+	static readonly ID = 'workbench.input.activeKnowledgeProfile';
 	static readonly RESOURCE = URI.from({ scheme: 'active', path: '/profile' });
 
 	override get typeId(): string {
-		return LearningProfileInput.ID;
+		return KnowledgeProfileInput.ID;
 	}
 
 	override get resource(): URI {
-		return LearningProfileInput.RESOURCE;
+		return KnowledgeProfileInput.RESOURCE;
 	}
 
 	override get capabilities(): EditorInputCapabilities {
@@ -112,7 +112,7 @@ export class LearningProfileInput extends EditorInput {
 	}
 
 	override getName(): string {
-		return localize('learningProfile', "Learning Profile");
+		return localize('knowledgeProfile', "Knowledge Profile");
 	}
 
 	override getIcon(): ThemeIcon {
@@ -120,6 +120,6 @@ export class LearningProfileInput extends EditorInput {
 	}
 
 	override matches(other: EditorInput | IUntypedEditorInput): boolean {
-		return other instanceof LearningProfileInput;
+		return other instanceof KnowledgeProfileInput;
 	}
 }

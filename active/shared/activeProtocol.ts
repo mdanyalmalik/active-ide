@@ -10,7 +10,7 @@
  */
 
 // ---------------------------------------------------------------------------
-// Learning profile
+// Knowledge profile
 // ---------------------------------------------------------------------------
 
 export type Familiarity = 'new' | 'some' | 'comfortable' | 'expert';
@@ -18,24 +18,25 @@ export type ExplanationDepth = 'overview' | 'balanced' | 'deep';
 export type MathComfort = 'avoid' | 'light' | 'comfortable';
 export type VisualKind = 'code' | 'diff' | 'equation' | 'diagram' | 'chart';
 
-export interface LearningProfile {
+export interface KnowledgeProfile {
 	readonly version: 1;
 	readonly configured: boolean;
 	readonly background: string;
 	readonly yearsProgramming: number;
 	readonly languages: ReadonlyArray<{ readonly name: string; readonly familiarity: Familiarity }>;
 	readonly concepts: ReadonlyArray<ConceptKnowledge>;
-	readonly wantToLearn: string;
+	readonly followClosely: string;
 	readonly glossOver: string;
 	readonly depth: ExplanationDepth;
-	/** Fine-tuning within `depth` learned from feedback: -1 (less detail) to 1 (more detail). */
+	/** Fine-tuning within `depth` adjusted from feedback: -1 (less detail) to 1 (more detail). */
 	readonly detailBias: number;
 	readonly math: MathComfort;
 	readonly preferredVisuals: ReadonlyArray<VisualKind>;
-	/** Narration playback rate, 0.75–1.75. */
-	readonly narrationRate: number;
-	readonly voice: string;
 	readonly notes: string;
+	/** @deprecated Moved to the `active.narration.speed` setting; read only to migrate older profiles. */
+	readonly narrationRate?: number;
+	/** @deprecated Moved to the `active.narration.voice` setting; read only to migrate older profiles. */
+	readonly voice?: string;
 }
 
 export interface ConceptKnowledge {
@@ -45,21 +46,19 @@ export interface ConceptKnowledge {
 	readonly level?: number;
 }
 
-export const DEFAULT_PROFILE: LearningProfile = {
+export const DEFAULT_PROFILE: KnowledgeProfile = {
 	version: 1,
 	configured: false,
 	background: '',
 	yearsProgramming: 3,
 	languages: [],
 	concepts: [],
-	wantToLearn: '',
+	followClosely: '',
 	glossOver: '',
 	depth: 'balanced',
 	detailBias: 0,
 	math: 'light',
 	preferredVisuals: ['code', 'diff', 'diagram', 'equation', 'chart'],
-	narrationRate: 1,
-	voice: 'default',
 	notes: '',
 };
 
@@ -75,10 +74,10 @@ export const TOPIC_FEEDBACK_STEP = 0.5;
 /**
  * Applies "was that too much / about right / too little detail?" to the profile:
  * the general detail preference moves slightly, and knowledge of the topics the
- * explanation covered moves more (too much detail suggests the learner already
+ * explanation covered moves more (too much detail suggests the developer already
  * knows them better than assumed). Crossing a full step changes `depth`.
  */
-export function applyDetailFeedback(profile: LearningProfile, feedback: DetailFeedback, topics: readonly string[]): LearningProfile {
+export function applyDetailFeedback(profile: KnowledgeProfile, feedback: DetailFeedback, topics: readonly string[]): KnowledgeProfile {
 	if (feedback === 'right') {
 		// Confirms the current setting: settle the fine-tuning a little toward neutral.
 		return { ...profile, detailBias: Math.round(profile.detailBias * 0.8 * 100) / 100 };
@@ -109,6 +108,44 @@ export function applyDetailFeedback(profile: LearningProfile, feedback: DetailFe
 		}
 	}
 	return { ...profile, depth, detailBias: bias, concepts };
+}
+
+/** How far skipping a scene early moves knowledge of its topics: a very slight signal. */
+export const SKIP_SIGNAL_STEP = 0.1;
+
+/**
+ * Skipping a scene before much of it was narrated hints, very slightly, that the
+ * developer already knew its topics. Only familiarity moves; the detail
+ * preference is left alone.
+ */
+export function applySkipSignal(profile: KnowledgeProfile, topics: readonly string[]): KnowledgeProfile {
+	if (!topics.length) {
+		return profile;
+	}
+	const concepts = [...profile.concepts];
+	for (const topic of topics.map(name => name.trim()).filter(Boolean)) {
+		const index = concepts.findIndex(concept => concept.name.toLowerCase() === topic.toLowerCase());
+		const existing = index >= 0 ? concepts[index] : undefined;
+		const current = existing ? existing.level ?? FAMILIARITY_ORDER.indexOf(existing.familiarity) : 1;
+		const level = Math.min(3, Math.round((current + SKIP_SIGNAL_STEP) * 100) / 100);
+		const updated: ConceptKnowledge = { name: existing?.name ?? topic, familiarity: FAMILIARITY_ORDER[Math.round(level)], level };
+		if (index >= 0) {
+			concepts[index] = updated;
+		} else {
+			concepts.push(updated);
+		}
+	}
+	return { ...profile, concepts };
+}
+
+/** The walkthrough's declared terms that a scene talks about. */
+export function sceneTopics(walkthrough: Walkthrough, sceneIndex: number): string[] {
+	const scene = walkthrough.scenes[sceneIndex];
+	if (!scene) {
+		return [];
+	}
+	const text = `${scene.title} ${scene.narration.map(segment => segment.text).join(' ')}`.toLowerCase();
+	return walkthrough.terms.map(term => term.name).filter(name => text.includes(name.toLowerCase())).slice(0, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -389,11 +426,44 @@ export interface TurnSummary {
 export interface InitialState {
 	readonly agent: AgentState;
 	readonly chat: ReadonlyArray<ChatEntry>;
-	readonly profile: LearningProfile;
+	readonly profile: KnowledgeProfile;
 	readonly history: ReadonlyArray<TurnSummary>;
 	readonly turnChanges: ReadonlyArray<FileChangeStat>;
 	readonly narration: NarrationStatus;
 	readonly pendingWalkthrough?: Walkthrough;
+}
+
+/** Setting ids shared by the workbench (which registers them) and the extension (which applies them). */
+export const enum ActiveSetting {
+	CodingModel = 'active.coding.model',
+	CodingEffort = 'active.coding.reasoningEffort',
+	ExplanationModel = 'active.explanation.model',
+	ExplanationEffort = 'active.explanation.reasoningEffort',
+	NarrationVoice = 'active.narration.voice',
+	NarrationSpeed = 'active.narration.speed',
+}
+
+/** Reasoning effort tiers, lowest first. `default` in a setting means the agent's own default for the model. */
+export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ReasoningEffort = typeof REASONING_EFFORTS[number];
+
+/** A model the coding agent offers (Muse's `model/list`). */
+export interface AgentModelInfo {
+	readonly id: string;
+	readonly label: string;
+	readonly description?: string;
+	/** USD per million tokens, as the agent reports them. */
+	readonly inputCost?: string;
+	readonly outputCost?: string;
+	readonly isDefault?: boolean;
+	readonly efforts: readonly string[];
+	readonly defaultEffort?: string;
+}
+
+/** Which model and effort a session should use; absent fields leave the agent's defaults. */
+export interface AgentRunSettings {
+	readonly model?: string;
+	readonly reasoningEffort?: ReasoningEffort;
 }
 
 export interface VoiceInfo {
@@ -426,7 +496,10 @@ export type ActiveEvent =
 	| ({ readonly type: 'narration' } & NarrationStatus)
 	| { readonly type: 'checkUpdate'; readonly walkthroughId: string; readonly check: PendingCheck }
 	| { readonly type: 'elaboration'; readonly requestId: string; readonly text: string; readonly status: 'streaming' | 'done' | 'error' }
-	| { readonly type: 'profile'; readonly profile: LearningProfile };
+	| { readonly type: 'profile'; readonly profile: KnowledgeProfile }
+	| { readonly type: 'models'; readonly models: ReadonlyArray<AgentModelInfo> }
+	/** The whole transcript changed (a session was resumed or a new one started). */
+	| { readonly type: 'chatReset'; readonly chat: ReadonlyArray<ChatEntry> };
 
 /** Command ids the extension registers. */
 export const enum ExtensionCommand {
@@ -446,6 +519,8 @@ export const enum ExtensionCommand {
 	SetupRestart = 'active.ext.setupRestart',
 	Reconnect = 'active.ext.reconnect',
 	Elaborate = 'active.ext.elaborate',
+	NewSession = 'active.ext.newSession',
+	ResumeSession = 'active.ext.resumeSession',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
@@ -521,7 +596,7 @@ export interface ValidationResult {
 	readonly dropped: ReadonlyArray<string>;
 }
 
-/** Finds tool-outcome ids or similar internal names in learner-facing text. */
+/** Finds tool-outcome ids or similar internal names in user-facing text. */
 function internalReference(text: string, evidenceIds: ReadonlySet<string>): string | undefined {
 	const phrase = /\btool outcomes?\b/i.exec(text);
 	if (phrase) {
@@ -686,7 +761,7 @@ export function validateWalkthrough(raw: unknown, files: Readonly<Record<string,
 		}
 		const leaked = internalReference([value.title, ...narration.map(segment => segment.text)].filter((text): text is string => typeof text === 'string').join(' '), evidenceIds);
 		if (leaked) {
-			sceneErrors.push(`${path}: the title or narration mentions "${leaked}", an internal reference the learner never sees; describe the evidence in plain words`);
+			sceneErrors.push(`${path}: the title or narration mentions "${leaked}", an internal reference the user never sees; describe the evidence in plain words`);
 		}
 		const pending = Array.isArray(value.pending) ? value.pending.filter((item): item is string => isString(item, 300)) : undefined;
 		if (sceneErrors.length) {

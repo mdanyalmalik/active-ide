@@ -1,6 +1,6 @@
 # Active
 
-Active is a Code OSS–based IDE for coding with an AI agent while you follow narrated, personalized walkthroughs of what changed. It was built for the Meta Global Hackathon.
+Active is a Code OSS–based IDE that keeps you informed while an AI agent codes: every meaningful change comes with a narrated walkthrough, tuned to what you already know. It's for developers at any stage of their career who want to follow along with the agent's work rather than review it blind. It was built for the Meta Global Hackathon.
 
 You give Muse Code a task in a chat that fills the work area. When the coding turn finishes and the change is worth explaining, chat hands off to an inline walkthrough: the captured code sits in the native editor, and an explanation zone next to the relevant lines switches between code, diffs, equations, diagrams and charts, in step with on-device narration (Phonon 31M).
 
@@ -45,7 +45,15 @@ Muse Code is the default (`active.agent.provider: "muse"`). Adding another agent
 scripts/run.sh /path/to/project      # real Muse Code
 ```
 
-Active respects Workspace Trust. Muse Code edits files and runs commands, so in Restricted Mode the chat explains why it is disconnected and links to **Manage Workspace Trust**.
+On startup, a welcome popup walks through whatever isn't ready yet: trusting the folder (Muse Code edits files and runs commands, so it only runs in trusted folders), connecting Muse Code, and setting up the knowledge profile. It stops appearing once everything is done, or when you tick **Don't show again**.
+
+### Fresh install
+
+```sh
+scripts/run-fresh.sh [--no-muse] [folder]
+```
+
+Starts Active as a brand-new install: no settings, history, knowledge profile or saved API key, and Muse Code signed out. Everything lives in `.active-dev/fresh`, which is wiped on every run, so your real Active data and Muse sign-in aren't touched. `--no-muse` also hides the installed Muse, so setup starts with Install (and installs into the throwaway home). Without a folder it opens a fresh copy of `demo/ledger-api`.
 
 ### Demo without a Muse Code subscription
 
@@ -82,7 +90,11 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 - **Default keybindings**, all rebindable in Keyboard Shortcuts:
   - With the walkthrough focused: `Space`/`K` pause or resume, `←`/`J` rewind, `→`/`L` advance, `C` open chat, `O` open file.
   - Anywhere: `⌘K C` open chat about the walkthrough, `⌘K W` return to the walkthrough, `⌘⌥I` open chat.
-- **Learning Profile** (from chat, the Active view, or the command palette) sets your background, language and concept familiarity, what to learn or gloss over, depth, comfort with math, preferred visuals, and narration speed. It is saved locally.
+- **Settings** (the gear next to the chat input or in a walkthrough's header, **Active: Open Settings**, or the **Active** section at the top of Settings): the model and reasoning effort for the coding agent and for explanations (explanations default to `Low`, which keeps walkthroughs to about 20 seconds), narration voice and speed, and Active's other options. The coding agent's effort is also one click away next to the chat input.
+- **Chats**: each chat is one Muse Code session. Active reopens the last chat used in a folder, with its transcript, when it starts. **New Chat** and **Chats** (resume an earlier chat from this folder) are in the chat header and the command palette.
+- **Tabs**: chat and each walkthrough are ordinary editor tabs. Switching to a walkthrough's tab resumes that walkthrough where you left it.
+- **Knowledge Profile** (from the welcome popup, chat, the Active view, or the command palette) sets your background, language and concept familiarity, what to follow closely or skim past, depth, comfort with math, and preferred visuals. It is saved locally.
+- **Quick skips**: pressing Next before half of a scene has been narrated (within 6 seconds of it appearing) is taken as a very slight hint that you already knew its topics; their familiarity moves up a tenth of a step.
 - **History** (the clock icon) lists every turn, including those without walkthroughs. It offers Replay (narration is re-synthesized from the saved script), Details (chat, exposed reasoning summaries, tool outcomes, captured edits, script), Delete, and Delete All. Deleting history never touches project files.
 
 ### Settings
@@ -104,7 +116,7 @@ active/
     tracking/                   workspace mirror, per-turn baseline / ordered edits / net diff, Myers diff
     explain/                    per-turn worthiness, planning prompts, read-only explanation session, validate+repair
     tts/ + resources/           Phonon sidecar (audio in memory only)
-    history/                    local history store (content-addressed blobs), learning profile
+    history/                    local history store (content-addressed blobs), knowledge profile
     controller.ts               orchestration
   workbench/browser/            Code OSS contribution: chat / walkthrough / profile editor panes,
                                 player, visuals, History view, Explorer counts, status bar, actions
@@ -112,7 +124,7 @@ scripts/                        setup, sync into vscode/, patches, run
 demo/                           sample project + scripted scenarios for the test double
 ```
 
-- **Two sessions.** The coding session runs in the project. The explanation session runs in a separate `muse serve` process whose workspace is a snapshot copy, so it cannot modify the project. It requests a read-only permission profile with `denyUnmatched` approvals and auto-denies any approval request.
+- **Two sessions.** Both run in the project, in separate `muse serve` processes. The explanation session starts under Muse Code's built-in read-only permission profile (`:read-only`, "Reads files only", enforced by Muse's sandbox) with `denyUnmatched` approvals, and Active auto-denies any approval request. If Muse doesn't accept the profile, Active refuses to start the explanation session rather than run one that could write. Prompts treat the captured versions as authoritative, since the live project can change while the explainer reads it.
 - **Change capture.** Active captures changes from file watcher events and from mtime rescans after every tool call, so edits made by shell commands are caught too. Typing in an editor attributes the resulting save to the user. Uncommitted user changes that existed before the turn sit in the baseline, so they stay out of the agent's diff.
 - **Immutable playback.** A turn's capture is frozen when the coding turn ends. The walkthrough editor shows read-only `active-snapshot:` models, so later edits never alter it.
 - **Pre-generated narration.** As soon as a walkthrough's script is ready, its whole narration is synthesized in the background (in memory only), ordered from the current position and re-prioritized on rewind or skip. Pausing, resuming and jumping never wait on synthesis.
@@ -126,17 +138,18 @@ demo/                           sample project + scripted scenarios for the test
 ## Tests
 
 ```sh
-cd active/extension && npm test       # 33 tests
+cd active/extension && npm test       # 34 tests
 ```
 
 These include unit tests for diffing, worthiness (including no accumulation across turns), walkthrough validation, change capture (shell edits, user attribution, pre-existing changes, freezing), history save/replay/delete, and personalization of prompts. An end-to-end test drives the controller through the real `@muse-code/sdk` against the scripted host. It covers the simple, tiny, and multi-file turns, the background timeout, pending checks, immutable captures, and read-only Q&A.
+
+To check real Muse Code without launching Active (sign-in, one coding turn, one read-only turn, plan usage before and after): `node scripts/muse-check.mjs`. Add `--dry-run` to use Muse's offline echo provider, which needs no sign-in or credits.
 
 To type-check the workbench contribution: `cd vscode && npx tsc -p src/tsconfig.json --noEmit --skipLibCheck`.
 
 ## Limitations
 
-- **Not verified against a live Muse Code host.** The adapter follows the SDK's documented protocol (commands, notifications, approvals, `task/list`, `item/readOutput`) and was exercised only through the SDK against the scripted test host. It still needs a run with an installed, signed-in `muse`.
-- **Read-only profile id.** The stable MSP surface doesn't list permission profile ids. Active tries `read-only` / `readOnly` / `read_only` and otherwise falls back to `denyUnmatched`. The snapshot workspace is the main protection either way.
+- **Only partly verified against live Muse Code.** `scripts/muse-check.mjs` drives Active's Muse adapter against a signed-in Muse Code 1.4.14 (connection, a coding turn with approvals, and a read-only turn whose write attempts were refused). A full walkthrough through the Active UI with live Muse hasn't been run yet.
 - **Questions while Muse is waiting.** Muse Code's own clarifying questions (`userInput/request`) are cancelled in auto mode.
 - **Hidden browser sign-in reads `muse login` output.** Active looks for the sign-in URL, the code, and the "Press Enter to open it in your browser" prompt, and treats exit code 0 as success. This was checked against Muse Code 1.4.14 up to the approval step. A later release that changes this output could break it; Active then shows a clear error and offers the API-key route. It isn't available on Windows yet, where it falls back to API keys.
 - **Restoring after a reload.** Chat history is not restored into the chat view after a window reload. Everything is in History, and walkthroughs can be replayed from there. Editors for walkthroughs are not restored across restarts.

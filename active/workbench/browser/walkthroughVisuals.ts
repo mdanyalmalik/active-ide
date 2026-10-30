@@ -73,6 +73,54 @@ function diffOps(a: readonly string[], b: readonly string[]): Array<{ kind: 'add
 	return ops;
 }
 
+/** How each line of the final version came about: new, changed (replacing removed lines), or with lines removed just after it. */
+export interface LineChanges {
+	readonly added: ReadonlySet<number>;
+	readonly modified: ReadonlySet<number>;
+	/** Lines followed by a removal (0: removed at the top of the file). */
+	readonly removedAfter: ReadonlySet<number>;
+}
+
+export function lineChanges(file: CapturedFile): LineChanges {
+	const added = new Set<number>();
+	const modified = new Set<number>();
+	const removedAfter = new Set<number>();
+	if (file.final === null) {
+		return { added, modified, removedAfter };
+	}
+	const ops = diffOps(splitLines(file.baseline), splitLines(file.final));
+	for (let index = 0; index < ops.length;) {
+		if (ops[index].kind === 'context') {
+			index++;
+			continue;
+		}
+		// A run of removals and additions between unchanged lines: additions that replace removals are changes.
+		const run: typeof ops = [];
+		while (index < ops.length && ops[index].kind !== 'context') {
+			run.push(ops[index++]);
+		}
+		const additions = run.filter(op => op.kind === 'add');
+		const removals = run.length - additions.length;
+		additions.forEach((op, position) => (position < removals ? modified : added).add(op.newLine));
+		if (removals > additions.length) {
+			removedAfter.add(additions.length ? additions[additions.length - 1].newLine : run[0].newLine - 1);
+		}
+	}
+	return { added, modified, removedAfter };
+}
+
+/**
+ * A diff that only adds lines repeats what the editor already shows with its change marks; it's worth
+ * a visual only when something was removed or replaced.
+ */
+export function isRedundantDiff(visual: SceneVisual | undefined, files: Readonly<Record<string, CapturedFile>>): boolean {
+	if (visual?.type !== 'diff') {
+		return false;
+	}
+	const file = files[visual.file];
+	return !!file && !diffExcerpt(file, visual.range).some(line => line.kind === 'remove');
+}
+
 /** The changed lines around `range` (final-version coordinates), with one line of context. */
 export function diffExcerpt(file: CapturedFile, range: LineRange, maxLines = 28): DiffLine[] {
 	const ops = diffOps(splitLines(file.baseline), splitLines(file.final));
@@ -101,26 +149,35 @@ export function diffExcerpt(file: CapturedFile, range: LineRange, maxLines = 28)
 	return lines;
 }
 
-function renderDiff(container: HTMLElement, visual: DiffVisual, files: Readonly<Record<string, CapturedFile>>, cue: VisualCue): void {
+function renderDiff(container: HTMLElement, visual: DiffVisual, files: Readonly<Record<string, CapturedFile>>, cue: VisualCue): (cue: VisualCue) => void {
 	const file = files[visual.file];
 	const block = dom.append(container, $('.active-visual-diff'));
+	const rows: Array<{ row: HTMLElement; hunk: number }> = [];
+	const update = (next: VisualCue) => {
+		for (const { row, hunk } of rows) {
+			row.classList.toggle('dim', next.reveal !== undefined && hunk > next.reveal);
+		}
+	};
 	if (!file) {
-		return;
+		return update;
 	}
 	const lines = diffExcerpt(file, visual.range);
 	let hunk = 0;
-	lines.forEach(line => {
+	lines.forEach((line, index) => {
 		if (line.kind === 'gap') {
 			hunk++;
 		}
 		const row = dom.append(block, $(`.diff-line.${line.kind}`));
 		row.textContent = line.kind === 'add' ? `+ ${line.text}` : line.kind === 'remove' ? `− ${line.text}` : line.kind === 'gap' ? '  ⋯' : `  ${line.text}`;
+		row.style.setProperty('--active-index', String(Math.min(index, 24)));
+		rows.push({ row, hunk });
 		if (cue.reveal !== undefined && hunk > cue.reveal) {
 			row.classList.add('dim');
 		}
 	});
 	const caption = dom.append(container, $('.active-visual-source'));
 	caption.textContent = localize('diffSource', "{0} · captured diff", visual.file);
+	return update;
 }
 
 async function renderCode(container: HTMLElement, visual: CodeVisual, files: Readonly<Record<string, CapturedFile>>, languageService: ILanguageService): Promise<void> {
@@ -134,6 +191,7 @@ async function renderCode(container: HTMLElement, visual: CodeVisual, files: Rea
 	const languageId = languageService.guessLanguageIdByFilepathOrFirstLine(URI.file(visual.file)) ?? null;
 	const html = await tokenizeToString(languageService, lines.join('\n'), languageId);
 	safeSetInnerHtml(block, html, { allowedAttributes: { augment: ['class', 'style'] } });
+	block.classList.add('ready');
 	const caption = dom.append(container, $('.active-visual-source'));
 	caption.textContent = localize('codeSource', "{0} · lines {1}–{2} · {3} version", visual.file, visual.range.startLine, visual.range.endLine, visual.version);
 }
@@ -151,6 +209,7 @@ async function renderEquation(container: HTMLElement, visual: EquationVisual): P
 	} catch {
 		block.textContent = visual.latex;
 	}
+	block.classList.add('ready');
 	if (visual.legend?.length) {
 		const legend = dom.append(container, $('.active-visual-legend'));
 		for (const item of visual.legend) {
@@ -197,22 +256,20 @@ export function layoutColumns(visual: DiagramVisual): Map<string, number> {
 	return columns;
 }
 
-function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: VisualCue): () => void {
+function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: VisualCue): { layout: () => void; update: (cue: VisualCue) => void } {
 	const diagram = dom.append(container, $('.active-visual-diagram'));
 	const columns = layoutColumns(visual);
 	const order = [...new Set([...columns.values()])].sort((a, b) => a - b);
 	const row = dom.append(diagram, $('.diagram-columns'));
 	const boxes = new Map<string, HTMLElement>();
-	const highlighted = new Set(cue.nodes);
+	const columnElements: HTMLElement[] = [];
+	let highlighted = new Set(cue.nodes);
 	order.forEach((column, columnIndex) => {
 		const columnElement = dom.append(row, $('.diagram-column'));
-		if (cue.reveal !== undefined && columnIndex > cue.reveal) {
-			columnElement.classList.add('dim');
-		}
+		columnElement.style.setProperty('--active-index', String(columnIndex));
+		columnElements.push(columnElement);
 		for (const node of visual.nodes.filter(candidate => columns.get(candidate.id) === column)) {
 			const box = dom.append(columnElement, $('.diagram-node'));
-			box.classList.toggle('highlight', highlighted.has(node.id));
-			box.classList.toggle('muted', highlighted.size > 0 && !highlighted.has(node.id));
 			dom.append(box, $('.label')).textContent = node.label;
 			if (node.detail) {
 				dom.append(box, $('.detail')).textContent = node.detail;
@@ -228,6 +285,23 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 		dom.append(container, $('.active-visual-badge')).textContent = localize('illustrative', "Illustrative model");
 	}
 	const markerId = `active-arrow-${Math.random().toString(36).slice(2)}`;
+	const edgeElements: Array<{ from: string; to: string; path: SVGPathElement; label?: HTMLElement }> = [];
+	const update = (next: VisualCue) => {
+		highlighted = new Set(next.nodes);
+		columnElements.forEach((element, index) => element.classList.toggle('dim', next.reveal !== undefined && index > next.reveal));
+		for (const [id, box] of boxes) {
+			box.classList.toggle('highlight', highlighted.has(id));
+			box.classList.toggle('muted', highlighted.size > 0 && !highlighted.has(id));
+		}
+		for (const edge of edgeElements) {
+			const active = highlighted.has(edge.from) && highlighted.has(edge.to);
+			edge.path.classList.toggle('highlight', active);
+			edge.label?.classList.toggle('highlight', active);
+		}
+	};
+	update(cue);
+	// Edges draw themselves in once, the first time the diagram has a size.
+	let drawn = false;
 	const draw = () => {
 		const origin = diagram.getBoundingClientRect();
 		if (origin.width === 0) {
@@ -235,6 +309,12 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 		}
 		svg.setAttribute('width', String(origin.width));
 		svg.setAttribute('height', String(origin.height));
+		if (!drawn) {
+			drawn = true;
+			diagram.classList.add('draw-in');
+			setTimeout(() => diagram.classList.remove('draw-in'), 2000);
+		}
+		edgeElements.length = 0;
 		dom.clearNode(labels);
 		while (svg.firstChild) {
 			svg.removeChild(svg.firstChild);
@@ -254,11 +334,11 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 		marker.appendChild(tip);
 		defs.appendChild(marker);
 		svg.appendChild(defs);
-		for (const edge of visual.edges) {
+		visual.edges.forEach((edge, edgeIndex) => {
 			const from = boxes.get(edge.from)?.getBoundingClientRect();
 			const to = boxes.get(edge.to)?.getBoundingClientRect();
 			if (!from || !to) {
-				continue;
+				return;
 			}
 			let x1: number;
 			let y1: number;
@@ -289,20 +369,25 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 			const mid = (x1 + x2) / 2;
 			path.setAttribute('d', Math.abs(x1 - x2) > 4 ? `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}` : `M ${x1} ${y1} L ${x2} ${y2}`);
 			path.setAttribute('marker-end', `url(#${markerId})`);
+			path.setAttribute('pathLength', '1');
+			path.style.setProperty('--active-index', String(edgeIndex));
 			const active = highlighted.has(edge.from) && highlighted.has(edge.to);
 			path.setAttribute('class', active ? 'edge highlight' : 'edge');
 			svg.appendChild(path);
+			let label: HTMLElement | undefined;
 			if (edge.label) {
-				const label = dom.append(labels, $('.edge-label'));
+				label = dom.append(labels, $('.edge-label'));
 				label.textContent = edge.label;
 				label.classList.toggle('highlight', active);
 				label.classList.toggle('below', returning);
 				label.style.left = `${mid}px`;
 				label.style.top = `${(y1 + y2) / 2}px`;
+				label.style.setProperty('--active-index', String(edgeIndex));
 			}
-		}
+			edgeElements.push({ from: edge.from, to: edge.to, path, label });
+		});
 	};
-	return draw;
+	return { layout: draw, update };
 }
 
 function niceMax(value: number): number {
@@ -397,17 +482,27 @@ function renderChart(container: HTMLElement, visual: ChartVisual, cue: VisualCue
  * attached or resized, and a promise for asynchronous rendering (syntax
  * highlighting, KaTeX).
  */
-export function renderVisual(container: HTMLElement, visual: SceneVisual, files: Readonly<Record<string, CapturedFile>>, cue: VisualCue, languageService: ILanguageService): { layout: () => void; ready: Promise<void> } {
+export interface RenderedVisual {
+	/** Re-lays out geometry-dependent parts (diagram edges, chart width) after the container is attached or resized. */
+	readonly layout: () => void;
+	/** Settles when asynchronous rendering (syntax highlighting, KaTeX) is done. */
+	readonly ready: Promise<void>;
+	/** Applies a new narration cue in place, so highlights animate instead of the visual being rebuilt. Absent when the visual must be re-rendered. */
+	readonly update?: (cue: VisualCue) => void;
+}
+
+/** Renders a scene visual into `container`. */
+export function renderVisual(container: HTMLElement, visual: SceneVisual, files: Readonly<Record<string, CapturedFile>>, cue: VisualCue, languageService: ILanguageService): RenderedVisual {
+	const still = () => { };
 	switch (visual.type) {
 		case 'diff':
-			renderDiff(container, visual, files, cue);
-			return { layout: () => { }, ready: Promise.resolve() };
+			return { layout: still, ready: Promise.resolve(), update: renderDiff(container, visual, files, cue) };
 		case 'code':
-			return { layout: () => { }, ready: renderCode(container, visual, files, languageService) };
+			return { layout: still, ready: renderCode(container, visual, files, languageService), update: still };
 		case 'equation':
-			return { layout: () => { }, ready: renderEquation(container, visual) };
+			return { layout: still, ready: renderEquation(container, visual), update: still };
 		case 'diagram':
-			return { layout: renderDiagram(container, visual, cue), ready: Promise.resolve() };
+			return { ...renderDiagram(container, visual, cue), ready: Promise.resolve() };
 		case 'chart':
 			return { layout: renderChart(container, visual, cue), ready: Promise.resolve() };
 	}

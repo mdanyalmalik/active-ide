@@ -10,6 +10,7 @@
 	--active-muted: var(--vscode-descriptionForeground);
 	--active-added: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
 	--active-removed: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39);
+	--active-modified: var(--vscode-editorGutter-modifiedBackground, var(--vscode-gitDecoration-modifiedResourceForeground, #1b81a8));
 	--active-border: var(--vscode-widget-border, var(--vscode-editorGroup-border));
 	--active-eyebrow-size: 11px;
 }
@@ -274,6 +275,25 @@
 
 .monaco-workbench .active-chat-header .agent-host.test-double {
 	color: var(--vscode-editorWarning-foreground);
+}
+
+.monaco-workbench .active-chat-header button.header-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: 1px solid transparent;
+	color: var(--active-muted);
+	font-family: inherit;
+	font-size: 12px;
+	padding: 3px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.monaco-workbench .active-chat-header button.header-action:hover {
+	color: var(--vscode-foreground);
+	border-color: var(--active-border);
 }
 
 .monaco-workbench .active-chat-header .agent-status {
@@ -547,6 +567,44 @@
 	padding: 8px 10px 8px 20px;
 	color: var(--active-muted);
 	font-size: 13px;
+}
+
+.monaco-workbench .active-chat-composer .composer-tools {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.monaco-workbench .active-chat-composer button.composer-effort,
+.monaco-workbench .active-chat-composer button.composer-icon {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: 1px solid transparent;
+	color: var(--active-muted);
+	font-family: inherit;
+	font-size: 12px;
+	padding: 4px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	transition: color 150ms ease, border-color 150ms ease;
+}
+
+.monaco-workbench .active-chat-composer button.composer-icon {
+	font-family: codicon;
+	font-size: 16px;
+	padding: 4px;
+}
+
+.monaco-workbench .active-chat-composer button.composer-effort:hover,
+.monaco-workbench .active-chat-composer button.composer-icon:hover {
+	color: var(--vscode-foreground);
+	border-color: var(--active-border);
+}
+
+.monaco-workbench .active-chat-composer button.composer-effort.hidden {
+	display: none;
 }
 
 .monaco-workbench .active-chat-composer button.send {
@@ -857,7 +915,7 @@
 }
 
 .monaco-editor .active-explain-card p.narration .segment {
-	transition: color 200ms ease, opacity 200ms ease;
+	transition: color 420ms ease, opacity 420ms ease;
 }
 
 .monaco-editor .active-explain-card p.narration .segment.spoken {
@@ -960,6 +1018,182 @@
 
 .monaco-editor .active-explain-card .deeper-actions button.primary:hover {
 	background: var(--vscode-button-hoverBackground);
+}
+
+/* ------------------------------------------------------------------ card and visual motion
+ * A new scene's card rises in, then its parts follow in reading order (title, visual, words).
+ * Within a scene nothing is rebuilt: highlights and narration ease between states instead. */
+
+@keyframes active-card-in {
+	from { opacity: 0; transform: translateY(10px); }
+	to { opacity: 1; transform: none; }
+}
+
+@keyframes active-part-in {
+	from { opacity: 0; transform: translateY(6px); }
+	to { opacity: 1; transform: none; }
+}
+
+@keyframes active-node-in {
+	from { opacity: 0; transform: translateY(6px) scale(0.97); }
+	to { opacity: 1; transform: none; }
+}
+
+@keyframes active-edge-draw {
+	from { stroke-dashoffset: 1; opacity: 0; }
+	15% { opacity: 1; }
+	to { stroke-dashoffset: 0; opacity: 1; }
+}
+
+.monaco-editor .active-explain-card {
+	animation: active-card-in 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.monaco-editor .active-explain-card > .card-head,
+.monaco-editor .active-explain-card > h2.title {
+	animation: active-part-in 380ms 60ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+.monaco-editor .active-explain-card > .subtitle {
+	animation: active-part-in 380ms 110ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+.monaco-editor .active-explain-card > .visual {
+	animation: active-part-in 420ms 160ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+.monaco-editor .active-explain-card > .caption {
+	animation: active-part-in 380ms 220ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+.monaco-editor .active-explain-card > p.narration {
+	animation: active-part-in 420ms 260ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+/* Diagram: columns arrive left to right, then the connections draw themselves. */
+.monaco-editor .active-visual-diagram .diagram-node {
+	animation: active-node-in 380ms calc(200ms + var(--active-index, 0) * 120ms) cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+.monaco-editor .active-visual-diagram.draw-in svg .edge {
+	stroke-dasharray: 1;
+	animation: active-edge-draw 560ms calc(560ms + var(--active-index, 0) * 110ms) ease-out backwards;
+}
+
+.monaco-editor .active-visual-diagram.draw-in .edge-label {
+	animation: active-part-in 320ms calc(820ms + var(--active-index, 0) * 110ms) ease-out backwards;
+}
+
+.monaco-editor .active-visual-diagram svg .edge {
+	transition: stroke 300ms ease, stroke-width 300ms ease;
+}
+
+.monaco-editor .active-visual-diagram .edge-label {
+	transition: color 300ms ease;
+}
+
+/* Code and equations fade in once highlighted, instead of flashing as plain text. */
+.monaco-editor .active-visual-code,
+.monaco-editor .active-visual-equation {
+	opacity: 0;
+	transition: opacity 280ms ease;
+}
+
+.monaco-editor .active-visual-code.ready,
+.monaco-editor .active-visual-equation.ready {
+	opacity: 1;
+}
+
+/* Diff lines cascade in, top to bottom. */
+.monaco-editor .active-visual-diff .diff-line {
+	animation: active-part-in 260ms calc(180ms + var(--active-index, 0) * 16ms) ease-out backwards;
+	transition: opacity 300ms ease;
+}
+
+.monaco-workbench.monaco-reduce-motion .active-explain-card *,
+.monaco-workbench.monaco-reduce-motion .active-visual-diagram svg .edge {
+	animation: none !important;
+	transition: none !important;
+}
+
+.monaco-workbench.monaco-reduce-motion .active-visual-code,
+.monaco-workbench.monaco-reduce-motion .active-visual-equation {
+	opacity: 1;
+}
+
+/* Change marks: the source-control gutter idiom, so new and changed lines read at a glance without the old code. */
+.monaco-editor .active-line-added,
+.monaco-editor .active-line-modified {
+	margin-left: 4px;
+	width: 3px !important;
+	border-radius: 1px;
+}
+
+.monaco-editor .active-line-added {
+	background: var(--active-added);
+}
+
+.monaco-editor .active-line-modified {
+	background: var(--active-modified);
+}
+
+.monaco-editor .active-line-removed-below,
+.monaco-editor .active-line-removed-above {
+	margin-left: 2px;
+	width: 0 !important;
+	height: 0 !important;
+	border-left: 5px solid var(--active-removed);
+	border-top: 4px solid transparent;
+	border-bottom: 4px solid transparent;
+}
+
+.monaco-editor .active-line-removed-below {
+	top: auto !important;
+	bottom: -4px;
+}
+
+.monaco-editor .active-line-removed-above {
+	top: -4px;
+}
+
+.monaco-editor .active-explain-card .eyebrow {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.monaco-editor .active-explain-card .change-summary {
+	display: inline-flex;
+	gap: 10px;
+	text-transform: none;
+	letter-spacing: 0;
+}
+
+.monaco-editor .active-explain-card .change-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.monaco-editor .active-explain-card .change-chip::before {
+	content: '';
+	width: 3px;
+	height: 11px;
+	border-radius: 1px;
+}
+
+.monaco-editor .active-explain-card .change-chip.added::before {
+	background: var(--active-added);
+}
+
+.monaco-editor .active-explain-card .change-chip.modified::before {
+	background: var(--active-modified);
+}
+
+.monaco-editor .active-explain-card .change-summary.unchanged {
+	text-transform: none;
+	letter-spacing: 0;
+	opacity: 0.8;
 }
 
 /* visuals */
@@ -1701,6 +1935,9 @@
 	border: 1px solid var(--active-border);
 	border-radius: 8px;
 	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+	font-family: inherit;
+	cursor: pointer;
 	transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
 }
 
@@ -1845,8 +2082,13 @@
 	transition: bottom 200ms ease;
 }
 
-.monaco-workbench .active-fab-stack.over-walkthrough {
-	bottom: 68px;
+/* Narrow editors: icon-only buttons. */
+.monaco-workbench .active-fab-stack.compact .active-fab .label {
+	display: none;
+}
+
+.monaco-workbench .active-fab-stack.compact .active-fab {
+	padding: 9px;
 }
 
 .monaco-workbench .active-fab {
@@ -1897,18 +2139,214 @@
 	animation: none;
 }
 
-/* ------------------------------------------------------------------ learning profile */
+/* ------------------------------------------------------------------ knowledge profile */
 
 .monaco-workbench .active-profile {
 	overflow-y: auto;
 	overflow-x: hidden;
 }
 
-.monaco-workbench .active-profile-form .help.learned {
+.monaco-workbench .active-profile-form .help.adjusted {
 	margin-top: 8px;
 	font-style: italic;
 }
 
 .monaco-workbench .active-profile-form select.voice-select {
 	min-width: 180px;
+}
+
+/* ------------------------------------------------------------------ welcome dialog */
+
+.monaco-workbench .active-welcome-backdrop {
+	position: absolute;
+	inset: 0;
+	z-index: 2600;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	background: rgba(0, 0, 0, 0.45);
+	animation: active-welcome-fade 160ms ease-out;
+}
+
+@keyframes active-welcome-fade {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+
+.monaco-workbench .active-welcome {
+	width: min(560px, 100%);
+	max-height: calc(100% - 48px);
+	overflow-y: auto;
+	padding: 24px;
+	border-radius: 10px;
+	border: 1px solid var(--vscode-widget-border, var(--active-border));
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+	box-shadow: 0 12px 48px var(--vscode-widget-shadow);
+	outline: none;
+	animation: active-welcome-in 200ms ease-out;
+}
+
+@keyframes active-welcome-in {
+	from { opacity: 0; transform: translateY(8px) scale(0.98); }
+	to { opacity: 1; transform: none; }
+}
+
+.monaco-workbench .active-welcome .welcome-head {
+	display: flex;
+	gap: 14px;
+	align-items: center;
+	margin-bottom: 20px;
+}
+
+.monaco-workbench .active-welcome .welcome-mark {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 40px;
+	height: 40px;
+	border-radius: 10px;
+	font-size: 20px;
+	color: var(--active-accent);
+	background: color-mix(in srgb, var(--active-accent) 15%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .active-welcome h2 {
+	margin: 0;
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.monaco-workbench .active-welcome .welcome-titles p {
+	margin: 4px 0 0;
+	color: var(--active-muted);
+	font-size: 13px;
+}
+
+.monaco-workbench .active-welcome .welcome-step {
+	padding: 14px 16px;
+	margin-bottom: 10px;
+	border-radius: 8px;
+	border: 1px solid var(--active-border);
+	background: var(--vscode-editor-background);
+}
+
+.monaco-workbench .active-welcome .welcome-step-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.monaco-workbench .active-welcome .welcome-step-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	color: var(--active-muted);
+	border: 1px solid var(--active-border);
+}
+
+.monaco-workbench .active-welcome .welcome-step-icon.done {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+	border-color: transparent;
+}
+
+.monaco-workbench .active-welcome .welcome-step-text {
+	flex: 1;
+	min-width: 0;
+}
+
+.monaco-workbench .active-welcome .welcome-step-title {
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.monaco-workbench .active-welcome .welcome-step-detail {
+	font-size: 12px;
+	color: var(--active-muted);
+	margin-top: 2px;
+}
+
+.monaco-workbench .active-welcome button.primary,
+.monaco-workbench .active-welcome button.secondary {
+	font-family: inherit;
+	font-size: 13px;
+	padding: 5px 14px;
+	border-radius: 4px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.monaco-workbench .active-welcome button.primary {
+	border: 1px solid transparent;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.monaco-workbench .active-welcome button.primary:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.monaco-workbench .active-welcome button.secondary {
+	border: 1px solid var(--active-border);
+	background: transparent;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-welcome .welcome-setup {
+	margin-top: 12px;
+}
+
+/* The step already names what's being set up. */
+.monaco-workbench .active-welcome .welcome-setup .active-setup {
+	margin: 0;
+	padding: 0;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+}
+
+.monaco-workbench .active-welcome .welcome-setup .setup-head {
+	display: none;
+}
+
+.monaco-workbench .active-welcome .welcome-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-top: 18px;
+}
+
+.monaco-workbench .active-welcome .welcome-hide {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--active-muted);
+	cursor: pointer;
+}
+
+.monaco-reduce-motion .active-welcome,
+.monaco-reduce-motion .active-welcome-backdrop {
+	animation: none;
+}
+
+.monaco-workbench .active-welcome .welcome-step.disabled {
+	opacity: 0.55;
+}
+
+.monaco-workbench .active-welcome button.link {
+	font-family: inherit;
+	font-size: 12px;
+	padding: 2px 0;
+	border: none;
+	background: transparent;
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
 }

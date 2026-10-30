@@ -44,6 +44,8 @@ export function visualStateAt(walkthrough: Walkthrough, position: PlaybackPositi
 }
 
 const SCENE_GAP_MS = 650;
+/** Pressing Next this soon after a scene appears (and before half of it is narrated) counts as an early skip. */
+const QUICK_SKIP_MS = 6000;
 
 /**
  * Plays a walkthrough: narration is synthesized (never persisted) from the
@@ -54,6 +56,11 @@ const SCENE_GAP_MS = 650;
 export class WalkthroughPlayer extends Disposable {
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
+	/** The user skipped ahead before much of a scene was narrated (fires once per scene). */
+	private readonly _onDidSkipEarly = this._register(new Emitter<number>());
+	readonly onDidSkipEarly = this._onDidSkipEarly.event;
+	private sceneShownAt = Date.now();
+	private readonly skippedScenes = new Set<number>();
 
 	private _position: PlaybackPosition;
 	private _state: PlaybackState = 'paused';
@@ -142,7 +149,12 @@ export class WalkthroughPlayer extends Disposable {
 
 	/** Forward to the next scene (the next coherent idea). */
 	advance(): void {
-		const { scene } = this._position;
+		const { scene, segment } = this._position;
+		const segments = this.walkthrough.scenes[scene].narration.length;
+		if (this.playing && segment < Math.ceil(segments / 2) && Date.now() - this.sceneShownAt < QUICK_SKIP_MS && !this.skippedScenes.has(scene)) {
+			this.skippedScenes.add(scene);
+			this._onDidSkipEarly.fire(scene);
+		}
 		if (scene + 1 < this.walkthrough.scenes.length) {
 			this.seek({ scene: scene + 1, segment: 0 });
 		} else {
@@ -158,6 +170,9 @@ export class WalkthroughPlayer extends Disposable {
 		this.dropAudio();
 		const scene = Math.max(0, Math.min(position.scene, this.walkthrough.scenes.length - 1));
 		const segment = Math.max(0, Math.min(position.segment, this.walkthrough.scenes[scene].narration.length - 1));
+		if (scene !== this._position.scene) {
+			this.sceneShownAt = Date.now();
+		}
 		this._position = { scene, segment };
 		// Re-prioritize background synthesis around where the viewer jumped.
 		this.narration.prefetchFrom(this.walkthrough, this._position);
@@ -255,6 +270,9 @@ export class WalkthroughPlayer extends Disposable {
 				return;
 			}
 			this.dropAudio();
+			if (next.scene !== this._position.scene) {
+				this.sceneShownAt = Date.now();
+			}
 			this._position = next;
 			this._onDidChange.fire();
 			void this.speak(run);

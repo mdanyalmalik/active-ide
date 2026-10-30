@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './media/active.css';
+import './activeSettings.js';
 import * as dom from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
@@ -14,7 +15,7 @@ import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -39,14 +40,15 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { ExplorerExtensions, IExplorerFileContributionRegistry } from '../../files/browser/explorerFileContrib.js';
 import { ActiveEvent, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
-import { ActiveChatInput, LearningProfileInput, WalkthroughInput } from './activeInputs.js';
+import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
 import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { ActiveChatEditor } from './chatEditor.js';
 import { explorerChangeCountsDescriptor } from './explorerStats.js';
 import { ActiveHistoryView } from './historyView.js';
-import { LearningProfileEditor } from './profileEditor.js';
+import { KnowledgeProfileEditor } from './profileEditor.js';
 import { ActiveCommandIds, WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughEditor } from './walkthroughEditor.js';
+import { ActiveWelcomeDialog } from './welcomeDialog.js';
 
 registerSingleton(IActiveService, ActiveService, InstantiationType.Delayed);
 
@@ -58,7 +60,7 @@ CommandsRegistry.registerCommand(WORKBENCH_EVENT_COMMAND, (accessor: ServicesAcc
 const editorPanes = Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(ActiveChatEditor, ActiveChatEditor.ID, localize('activeChatEditor', "Active Chat")), [new SyncDescriptor(ActiveChatInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(WalkthroughEditor, WalkthroughEditor.ID, localize('walkthroughEditor', "Active Walkthrough")), [new SyncDescriptor(WalkthroughInput)]);
-editorPanes.registerEditorPane(EditorPaneDescriptor.create(LearningProfileEditor, LearningProfileEditor.ID, localize('profileEditor', "Learning Profile")), [new SyncDescriptor(LearningProfileInput)]);
+editorPanes.registerEditorPane(EditorPaneDescriptor.create(KnowledgeProfileEditor, KnowledgeProfileEditor.ID, localize('profileEditor', "Knowledge Profile")), [new SyncDescriptor(KnowledgeProfileInput)]);
 
 // ---------------------------------------------------------------- views
 
@@ -118,7 +120,7 @@ class ActiveSessionView extends ViewPane {
 		if (this.activeService.player || this.activeService.offeredWalkthrough) {
 			button(localize('resumeWalkthroughButton', "Resume Walkthrough"), () => this.activeService.resumeWalkthrough());
 		}
-		button(localize('profileButton', "Learning Profile"), () => this.activeService.openProfile());
+		button(localize('profileButton', "Knowledge Profile"), () => this.activeService.openProfile());
 	}
 }
 
@@ -276,7 +278,7 @@ registerAction2(class extends Action2 {
 
 registerAction2(class extends Action2 {
 	constructor() {
-		super({ id: ActiveCommandIds.OpenProfile, title: localize2('openProfile', "Open Learning Profile"), category, f1: true });
+		super({ id: ActiveCommandIds.OpenProfile, title: localize2('openProfile', "Open Knowledge Profile"), category, f1: true });
 	}
 	run(accessor: ServicesAccessor): Promise<void> {
 		return accessor.get(IActiveService).openProfile();
@@ -289,6 +291,42 @@ registerAction2(class extends Action2 {
 	}
 	run(accessor: ServicesAccessor): Promise<void> {
 		return accessor.get(IActiveService).pickVoice();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.NewChat, title: localize2('newChat', "New Chat"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).newChat();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.ResumeChat, title: localize2('resumeChat', "Resume Chat"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).pickChatToResume();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.OpenSettings, title: localize2('openActiveSettings', "Open Settings"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).openSettings();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.PickCodingEffort, title: localize2('pickCodingEffort', "Change Coding Agent Effort"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).pickCodingEffort();
 	}
 });
 
@@ -312,7 +350,7 @@ registerAction2(class extends Action2 {
 
 registerAction2(class extends Action2 {
 	constructor() {
-		super({ id: ActiveCommandIds.SignIn, title: localize2('signInToAgent', "Sign In to Coding Agent or Switch Account"), category, f1: true });
+		super({ id: ActiveCommandIds.SignIn, title: localize2('signInToAgent', "Sign In to Coding Agent"), category, f1: true });
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const service = accessor.get(IActiveService);
@@ -334,8 +372,8 @@ registerAction2(class extends Action2 {
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const { confirmed } = await accessor.get(IDialogService).confirm({
-			message: localize('confirmDeleteAll', "Delete all saved Active history for this workspace?"),
-			detail: localize('confirmDeleteAllDetail', "Chat, captured versions, narration scripts and scene references are removed. Project files are not affected."),
+			message: localize('confirmDeleteAll', "Delete all Active history for this workspace?"),
+			detail: localize('confirmDeleteAllDetail', "Project files aren't affected."),
 			primaryButton: localize('deleteAll', "Delete All"),
 		});
 		if (confirmed) {
@@ -357,19 +395,6 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 	},
 }]);
 
-Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
-	id: 'activeWorkbench',
-	title: localize('activeConfigurationTitle', "Active"),
-	type: 'object',
-	properties: {
-		'active.startWithChat': {
-			type: 'boolean',
-			default: true,
-			scope: ConfigurationScope.APPLICATION,
-			description: localize('startWithChat', "Open Active chat across the whole work area on startup."),
-		},
-	},
-});
 
 // ---------------------------------------------------------------- startup & status bar
 
@@ -444,17 +469,20 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 		const offered = this.activeService.offeredWalkthrough;
 		let text: string;
 		let command: string | undefined;
-		if (offered) {
+		if (agent.setup) {
+			text = `$(rocket) ${localize('agentSetup', "Set up {0}", agent.provider.name)}`;
+			command = ActiveCommandIds.OpenChat;
+		} else if (offered) {
 			text = `$(play-circle) ${localize('walkthroughReadyStatus', "Walkthrough ready")}`;
 			command = WalkthroughCommandIds.Resume;
 		} else if (agent.status === 'running') {
 			text = `$(loading~spin) ${localize('agentWorking', "{0} working", agent.provider.name)}${status?.stage === 'drafting' ? ` · ${localize('drafting', "drafting explanation")}` : ''}`;
 		} else if (agent.backgroundTasks > 0) {
-			text = localize('turnCompleteBackground', "Turn complete · background checks running");
+			text = localize('turnCompleteBackground', "Turn complete · checks running");
 		} else if (status && ['waitingForBackground', 'finalizing'].includes(status.stage)) {
 			text = status.detail;
 		} else if (agent.status === 'unavailable') {
-			text = agent.setup ? `$(rocket) ${localize('agentSetup', "Set up {0}", agent.provider.name)}` : `$(warning) ${localize('agentUnavailable', "{0} unavailable", agent.provider.name)}`;
+			text = `$(warning) ${localize('agentUnavailable', "{0} unavailable", agent.provider.name)}`;
 			command = ActiveCommandIds.OpenChat;
 		} else {
 			text = localize('ready', "Ready for your task");
@@ -464,11 +492,11 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 
 	private narrationEntry() {
 		const narration = this.activeService.narration;
-		const voice = this.activeService.profile.voice;
+		const voice = this.activeService.narrationVoice;
 		const text = narration.available
 			? `$(unmute) ${voice && voice !== 'default' ? localize('narrationReadyVoice', "Phonon 31M · {0}", voice) : localize('narrationReady', "Phonon 31M · on-device")}`
 			: `$(mute) ${localize('narrationOff', "Narration unavailable")}`;
-		const tooltip = narration.available ? localize('narrationTooltip', "{0}. Click to preview and change the voice.", narration.detail) : narration.detail;
+		const tooltip = narration.available ? localize('narrationTooltip', "{0}. Click to change the voice.", narration.detail) : narration.detail;
 		return { name: localize('activeNarration', "Active Narration"), text, ariaLabel: text, tooltip, command: ActiveCommandIds.PickVoice };
 	}
 }
@@ -483,6 +511,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 	private readonly stack: HTMLElement;
 	private readonly chat: HTMLButtonElement;
 	private readonly walkthrough: HTMLButtonElement;
+	private host: HTMLElement | undefined;
 
 	constructor(
 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
@@ -503,6 +532,9 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this._register(activeService.onDidChangePlayer(update));
 		this._register(activeService.onDidChangeHandoff(update));
 		this._register(keybindingService.onDidUpdateKeybindings(update));
+		this._register(activeService.onDidChangeControlsHeight(update));
+		this._register(layoutService.onDidLayoutMainContainer(update));
+		this.host = host;
 		this.update();
 	}
 
@@ -520,8 +552,9 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		const onWalkthrough = active instanceof WalkthroughInput;
 		this.chat.classList.toggle('hidden', onChat);
 		this.walkthrough.classList.toggle('hidden', onWalkthrough || !!this.activeService.pendingHandoff || !this.activeService.hasRecentWalkthrough);
-		// Over a walkthrough the stack sits above its playback controls.
-		this.stack.classList.toggle('over-walkthrough', onWalkthrough);
+		// Over a walkthrough the stack sits just above its playback controls.
+		this.stack.classList.toggle('compact', (this.host?.clientWidth ?? 1000) < 560);
+		this.stack.style.bottom = onWalkthrough && this.activeService.controlsHeight ? `${this.activeService.controlsHeight + 14}px` : '';
 		const chatKey = this.keybindingService.lookupKeybinding(onWalkthrough ? WalkthroughCommandIds.OpenChat : ActiveCommandIds.OpenChat)?.getLabel();
 		this.chat.title = onWalkthrough
 			? localize('fabChatFromWalkthrough', "Pause and open chat{0}", chatKey ? ` (${chatKey})` : '')
@@ -535,4 +568,5 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 
 registerWorkbenchContribution2(ActiveStartup.ID, ActiveStartup, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(ActiveFloatingButtons.ID, ActiveFloatingButtons, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(ActiveWelcomeDialog.ID, ActiveWelcomeDialog, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(ActiveStatusBar.ID, ActiveStatusBar, WorkbenchPhase.AfterRestored);

@@ -9,7 +9,8 @@ import { ExplanationAgent, WalkthroughPlanner } from './explain/planner';
 import { buildElaborationPrompt, buildQuestionPrompt } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import { HistoryStore } from './history/historyStore';
-import type { ActiveEvent, AgentProviderInfo, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, LearningProfile, PendingCheck, ToolOutcome, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
+import { REASONING_EFFORTS } from './shared/activeProtocol';
+import type { ActiveEvent, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, KnowledgeProfile, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 
 export interface ControllerOptions {
@@ -17,7 +18,7 @@ export interface ControllerOptions {
 	readonly backgroundTimeoutMs: () => number;
 	readonly minMeaningfulLines: () => number;
 	readonly draftQuietMs: () => number;
-	readonly profile: () => LearningProfile;
+	readonly profile: () => KnowledgeProfile;
 	readonly emit: (event: ActiveEvent) => void;
 	readonly log: (line: string) => void;
 	/** The coding agent platform in use (Muse Code by default). */
@@ -32,8 +33,12 @@ export interface ControllerOptions {
 	/** Starts the coding agent host; throws with a human-readable blocker when unavailable. */
 	readonly startCodingHost: () => Promise<AgentHost>;
 	readonly startExplanationHost: () => Promise<AgentHost>;
-	readonly explanationWorkspace: string;
 	readonly workspaceRoot: string;
+	/** The model and reasoning effort each session should use (from settings; read at use, so changes apply). */
+	readonly runSettings: (role: 'coding' | 'explanation') => AgentRunSettings;
+	/** The coding session last open in this folder, resumed on startup; and a way to record the current one. */
+	readonly lastSessionId?: () => string | undefined;
+	readonly rememberSession?: (sessionId: string) => void;
 }
 
 interface LogicalTurn {
@@ -51,6 +56,8 @@ interface LogicalTurn {
 	draft?: { signature: string; draft: WalkthroughDraft };
 	drafting?: Promise<void>;
 	draftTimer?: NodeJS.Timeout;
+	/** Another draft was asked for while one was running (`final`: the agent has given its final answer). */
+	redraft?: 'draft' | 'final';
 	codingDone: boolean;
 	stage: WalkthroughStage;
 }
@@ -61,19 +68,26 @@ interface LogicalTurn {
  * A draft is reused only when none of it changed; a test run after the draft that
  * touched no tracked file must still reach the walkthrough.
  */
+/**
+ * What a draft depends on: the net code change and the tool results (tests are evidence).
+ * The agent's messages and reasoning are left out: its closing message always arrives after the
+ * last edit, and would otherwise make every draft stale at the end of the turn.
+ */
+/** Item kinds Muse emits for its own machinery; chat leaves them out. */
+const INTERNAL_ITEM_KINDS = new Set(['reminderChild', 'earlierHistory', 'damagedRange', 'compaction', 'hookRun', 'overdueNotice']);
+
+/** How many of a resumed session's most recent turns are put back in chat. */
+const MAX_RESTORED_TURNS = 30;
+
 function signatureOf(changes: readonly NetFileChange[], turn: LogicalTurn): string {
 	const hash = createHash('sha1');
 	for (const change of changes) {
 		hash.update(change.path).update('\0').update(change.final ?? '\u0001').update('\0');
 	}
 	for (const tool of turn.tools.values()) {
-		hash.update(`tool:${tool.id}:${tool.status}:${tool.output?.length ?? 0}\0`);
-	}
-	for (const message of turn.agentMessages.values()) {
-		hash.update(`message:${message}\0`);
-	}
-	for (const parts of turn.reasoning.values()) {
-		hash.update(`reasoning:${parts.join('\n')}\0`);
+		if (tool.status !== 'inProgress') {
+			hash.update(`tool:${tool.id}:${tool.status}\0`);
+		}
 	}
 	return hash.digest('hex');
 }
@@ -134,12 +148,18 @@ export class ActiveController implements AgentSessionListener {
 	private readonly walkthroughs = new Map<string, Walkthrough>();
 	private connecting: Promise<void> | undefined;
 	private turnCounter = 0;
+	private models: readonly AgentModelInfo[] = [];
+	/** The model each live session was last switched to, so a settings change only switches what changed. */
+	private readonly appliedModels = new WeakMap<AgentSession, string>();
 
 	constructor(private readonly options: ControllerOptions, private readonly tracker: ChangeTracker, private readonly history: HistoryStore) {
 		this.explainer = new ExplanationAgent(async listener => {
 			this.explanationHost ??= await options.startExplanationHost();
-			return this.explanationHost.startSession({ workspaceRoot: options.explanationWorkspace, readOnly: true, listener });
-		}, options.explanationWorkspace);
+			// The explanation session reads the live project under Muse's read-only permission profile.
+			const session = await this.explanationHost.startSession({ workspaceRoot: options.workspaceRoot, readOnly: true, listener });
+			await this.applyModel(session, 'explanation');
+			return session;
+		}, undefined, () => this.effortFor('explanation'));
 		this.planner = new WalkthroughPlanner(this.explainer, options.log);
 	}
 
@@ -161,9 +181,135 @@ export class ActiveController implements AgentSessionListener {
 		};
 	}
 
+	/** The coding session in use (tests). */
+	get sessionIdForTest(): string | undefined {
+		return this.coding?.sessionId;
+	}
+
 	/** Re-sends the agent state (for example after setup progress). */
 	refreshAgentState(): void {
 		this.options.emit({ type: 'agent', agent: this.agentState() });
+	}
+
+	/** Resumes `resumeId` when given (and its chat from history), otherwise starts a new session. */
+	private async openCodingSession(resumeId: string | undefined): Promise<AgentSession> {
+		const host = this.codingHost!;
+		const options = { workspaceRoot: this.options.workspaceRoot, readOnly: false, listener: this };
+		if (resumeId && host.resumeSession) {
+			try {
+				const session = await host.resumeSession(resumeId, options);
+				this.options.log(`resumed coding session ${session.sessionId} on ${host.description}`);
+				this.options.rememberSession?.(session.sessionId);
+				await this.restoreChat(session.sessionId);
+				return session;
+			} catch (error) {
+				this.options.log(`couldn't resume session ${resumeId} (${error instanceof Error ? error.message : String(error)}); starting a new one`);
+			}
+		}
+		const session = await host.startSession(options);
+		this.options.log(`coding session ${session.sessionId} on ${host.description}`);
+		this.options.rememberSession?.(session.sessionId);
+		return session;
+	}
+
+	/** Rebuilds a session's transcript from the turns history saved for it. */
+	private async restoreChat(sessionId: string): Promise<void> {
+		const turns = (await this.history.list()).filter(turn => turn.sessionId === sessionId).reverse().slice(-MAX_RESTORED_TURNS);
+		const entries: ChatEntry[] = [];
+		for (const turn of turns) {
+			// Chats saved before Muse's bookkeeping was filtered out may still hold its "Reminder child session" rows.
+			entries.push(...((await this.history.get(turn.turnId))?.chat ?? []).filter(entry => !(entry.role === 'tool' && /^Reminder child session/.test(entry.text))));
+		}
+		this.replaceChat(entries);
+	}
+
+	private replaceChat(entries: readonly ChatEntry[]): void {
+		this.chat.length = 0;
+		this.chatIndex.clear();
+		this.itemEntries.clear();
+		for (const entry of entries) {
+			this.chat.push(entry);
+			this.chatIndex.set(entry.id, entry);
+		}
+		this.options.emit({ type: 'chatReset', chat: this.chat });
+	}
+
+	/** Starts a fresh coding session (a new chat) in this folder. */
+	async newSession(): Promise<void> {
+		await this.switchSession(undefined);
+	}
+
+	/** Reattaches to an earlier coding session from this folder's history. */
+	async resumeSession(sessionId: string): Promise<void> {
+		await this.switchSession(sessionId);
+	}
+
+	private async switchSession(resumeId: string | undefined): Promise<void> {
+		if (this.turn && !this.turn.codingDone) {
+			this.system(`Wait for ${this.options.provider.name} to finish this task before switching chats.`, this.turn.id);
+			return;
+		}
+		if (!this.codingHost) {
+			await this.connect();
+		}
+		if (!this.codingHost || this.coding?.sessionId === resumeId) {
+			return;
+		}
+		try {
+			this.coding = await this.openCodingSession(resumeId);
+			if (!resumeId || this.coding.sessionId !== resumeId) {
+				this.replaceChat([]);
+			}
+			await this.applyModel(this.coding, 'coding');
+			this.refreshAgentState();
+		} catch (error) {
+			this.system(`Couldn't open that chat: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/** Applies changed model settings to the live sessions; reasoning effort is read for every turn anyway. */
+	async applyRunSettings(): Promise<void> {
+		if (this.coding) {
+			await this.applyModel(this.coding, 'coding');
+		}
+		const explanation = this.explainer.currentSession;
+		if (explanation) {
+			await this.applyModel(explanation, 'explanation');
+		}
+	}
+
+	private async applyModel(session: AgentSession, role: 'coding' | 'explanation'): Promise<void> {
+		// An empty setting means the agent's default model.
+		const wanted = this.options.runSettings(role).model || this.models.find(model => model.isDefault)?.id;
+		if (!wanted || !session.setModel || this.appliedModels.get(session) === wanted) {
+			return;
+		}
+		if (!this.appliedModels.has(session) && !this.options.runSettings(role).model) {
+			return; // a fresh session already runs the default
+		}
+		try {
+			await session.setModel(wanted);
+			this.appliedModels.set(session, wanted);
+			this.options.log(`${role} session now uses ${wanted}`);
+		} catch (error) {
+			this.options.log(`couldn't switch the ${role} model to ${wanted}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/** The configured effort, lowered to the closest tier the session's model supports. */
+	private effortFor(role: 'coding' | 'explanation'): ReasoningEffort | undefined {
+		const settings = this.options.runSettings(role);
+		const effort = settings.reasoningEffort;
+		if (!effort) {
+			return undefined;
+		}
+		const modelId = settings.model || this.models.find(model => model.isDefault)?.id;
+		const supported = this.models.find(model => model.id === modelId)?.efforts;
+		if (!supported?.length || supported.includes(effort)) {
+			return effort;
+		}
+		const lower = REASONING_EFFORTS.slice(0, REASONING_EFFORTS.indexOf(effort)).reverse().find(tier => supported.includes(tier));
+		return lower ?? REASONING_EFFORTS.find(tier => supported.includes(tier));
 	}
 
 	/** Restarts the agent hosts, e.g. after installing or signing in. */
@@ -249,8 +395,13 @@ export class ActiveController implements AgentSessionListener {
 				return;
 			}
 			this.codingHost = await this.options.startCodingHost();
-			this.coding = await this.codingHost.startSession({ workspaceRoot: this.options.workspaceRoot, readOnly: false, listener: this });
-			this.options.log(`coding session ${this.coding.sessionId} on ${this.codingHost.description}`);
+			// Pick up where this folder left off: the last session open here, else the one its latest turn used.
+			this.coding = await this.openCodingSession(this.options.lastSessionId?.() ?? history[0]?.sessionId);
+			this.models = (await this.codingHost.listModels?.().catch(() => undefined)) ?? [];
+			if (this.models.length) {
+				this.options.emit({ type: 'models', models: this.models });
+			}
+			await this.applyModel(this.coding, 'coding');
 			const host = this.codingHost;
 			void host.exited.then(reason => {
 				if (this.codingHost !== host) {
@@ -316,7 +467,7 @@ export class ActiveController implements AgentSessionListener {
 		this.setStatus('running');
 		if (!agentInitiated) {
 			try {
-				const protocolTurn = await this.coding!.startTurn(task);
+				const protocolTurn = await this.coding!.startTurn(task, undefined, this.effortFor('coding'));
 				turn.protocolTurns.add(protocolTurn);
 			} catch (error) {
 				this.system(`${this.options.provider.name} rejected the task: ${error instanceof Error ? error.message : String(error)}`, turn.id);
@@ -337,9 +488,6 @@ export class ActiveController implements AgentSessionListener {
 		const update = (text: string, status: string) => this.upsertChat({ id: answerId, role: 'explainer', text, status, at: Date.now() });
 		update('', 'streaming');
 		try {
-			if (walkthrough) {
-				await this.syncExplanationWorkspace(walkthrough);
-			}
 			const reply = await this.explainer.ask(buildQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile()), text => update(text, 'streaming'));
 			update(reply, 'done');
 		} catch (error) {
@@ -355,7 +503,6 @@ export class ActiveController implements AgentSessionListener {
 			if (!walkthrough) {
 				throw new Error('that walkthrough is no longer in history');
 			}
-			await this.syncExplanationWorkspace(walkthrough);
 			const reply = await this.explainer.ask(buildElaborationPrompt(walkthrough, request.sceneId, this.options.profile()), text => emit(text, 'streaming'));
 			emit(reply, 'done');
 		} catch (error) {
@@ -366,19 +513,6 @@ export class ActiveController implements AgentSessionListener {
 	private async loadWalkthrough(walkthroughId: string): Promise<Walkthrough | undefined> {
 		const turnId = walkthroughId.replace(/^wt-/, '');
 		return (await this.history.get(turnId))?.walkthrough;
-	}
-
-	private async syncExplanationWorkspace(walkthrough?: Walkthrough): Promise<void> {
-		const files = this.tracker.snapshotAll();
-		if (walkthrough) {
-			// Questions about a captured walkthrough see the captured versions, not later edits.
-			for (const file of Object.values(walkthrough.files)) {
-				if (file.final !== null) {
-					files.set(file.path, file.final);
-				}
-			}
-		}
-		await this.explainer.syncWorkspace(files);
 	}
 
 	// ---------------------------------------------------------------- change tracking
@@ -406,7 +540,7 @@ export class ActiveController implements AgentSessionListener {
 		turn.verdict = verdict;
 		turn.worthinessLog.push(`after edit #${edits[edits.length - 1].seq} (${edits.map(edit => edit.path).join(', ')}): ${verdict.worthy ? 'worth explaining' : 'not yet'} — ${verdict.reasons.join('; ')}`);
 		if (changed) {
-			this.setStage(turn, 'collecting', verdict.worthy ? 'Enough coherent work to explain; preparing a draft' : 'Watching changes');
+			this.setStage(turn, 'collecting', verdict.worthy ? 'Enough to explain; preparing a draft' : 'Watching changes');
 		}
 		if (verdict.worthy) {
 			this.scheduleDraft(turn);
@@ -422,26 +556,53 @@ export class ActiveController implements AgentSessionListener {
 			if (turn.codingDone || turn.drafting || this.turn !== turn) {
 				return;
 			}
-			turn.drafting = this.draft(turn).finally(() => { turn.drafting = undefined; });
+			this.requestDraft(turn, false);
 		}, this.options.draftQuietMs());
 	}
 
-	private async draft(turn: LogicalTurn): Promise<void> {
+	/**
+	 * Plans now, or right after the draft in flight. Called with `final` when the agent gives its final
+	 * answer: Muse then spends a while on its own end-of-turn checks before the turn completes, and the
+	 * walkthrough is planned meanwhile (it's reused at the end if nothing changed).
+	 */
+	private requestDraft(turn: LogicalTurn, final: boolean): void {
+		if (turn.draftTimer) {
+			clearTimeout(turn.draftTimer);
+			turn.draftTimer = undefined;
+		}
+		if (turn.drafting) {
+			turn.redraft = final ? 'final' : turn.redraft ?? 'draft';
+			return;
+		}
+		turn.drafting = (async () => {
+			try {
+				await this.draft(turn, final);
+				while (turn.redraft && this.turn === turn) {
+					const next = turn.redraft;
+					turn.redraft = undefined;
+					await this.draft(turn, next === 'final');
+				}
+			} finally {
+				turn.drafting = undefined;
+			}
+		})();
+	}
+
+	private async draft(turn: LogicalTurn, final = false): Promise<void> {
 		const changes = this.tracker.currentNetChanges();
 		const signature = signatureOf(changes, turn);
 		if (turn.draft?.signature === signature) {
 			return;
 		}
-		this.setStage(turn, 'drafting', `Drafting the walkthrough while ${this.options.provider.name} works`);
+		this.setStage(turn, 'drafting', final ? `Writing the walkthrough while ${this.options.provider.name} wraps up` : `Drafting while ${this.options.provider.name} works`);
 		try {
-			await this.syncExplanationWorkspace();
-			const result = await this.planner.plan(await this.planningContext(turn, changes, [], false), turn.draft?.draft);
+			const result = await this.planner.plan(await this.planningContext(turn, changes, [], final), turn.draft?.draft);
 			if (result.draft) {
 				turn.draft = { signature, draft: result.draft };
 				turn.worthinessLog.push(`draft prepared with ${result.draft.scenes.length} scenes`);
 			}
 			if (!turn.codingDone) {
-				this.setStage(turn, 'collecting', result.draft ? 'Draft ready; will reconcile when the turn finishes' : 'Draft failed validation; will retry at the end of the turn');
+				this.setStage(turn, 'collecting', result.draft ? (final ? `Walkthrough ready; ${this.options.provider.name} is finishing up` : 'Draft ready; will reconcile when the turn finishes') : 'Draft failed validation; will retry at the end of the turn');
 			}
 		} catch (error) {
 			this.options.log(`draft failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -500,6 +661,10 @@ export class ActiveController implements AgentSessionListener {
 			case 'agentMessage': {
 				if (completed && item.text && turn) {
 					turn.agentMessages.set(item.id, item.text);
+					// Progress notes are `commentary`; the final answer carries no such phase.
+					if (item.phase !== 'commentary' && !turn.codingDone && turn.verdict?.worthy) {
+						this.requestDraft(turn, true);
+					}
 				}
 				this.upsertAgentEntry(item.id, { role: 'agent', text: item.text ?? '', phase: item.phase, status: completed ? 'done' : 'streaming', turnId });
 				break;
@@ -556,7 +721,8 @@ export class ActiveController implements AgentSessionListener {
 			case 'userMessage':
 				break;
 			default:
-				if (completed && item.fallbackText) {
+				// Muse's own bookkeeping (its reminder helpers, history markers) isn't part of the conversation.
+				if (completed && item.fallbackText && !INTERNAL_ITEM_KINDS.has(item.kind)) {
 					this.upsertAgentEntry(item.id, { role: 'tool', text: item.fallbackText, status: item.status, turnId });
 				}
 		}
@@ -645,7 +811,8 @@ export class ActiveController implements AgentSessionListener {
 			note = `Turn ${terminal}; no changes to explain.`;
 			this.setStage(turn, 'notExplained', note);
 		} else if (!verdict.worthy) {
-			note = verdict.reasons.join('; ');
+			// The detailed reasons stay in the worthiness log; the user gets the short version.
+			note = verdict.reasons.some(reason => reason.startsWith('no meaningful')) ? 'No code changes to explain.' : 'Small change. Saved to history, not explained.';
 			this.setStage(turn, 'notExplained', note);
 		} else {
 			// Start the queued task right away: the coding agent never waits for explanations.
@@ -656,7 +823,7 @@ export class ActiveController implements AgentSessionListener {
 			for (const check of pending) {
 				this.openChecks.set(check.id, { turnId: turn.id, check });
 			}
-			this.setStage(turn, 'finalizing', 'Reconciling the explanation with the final changes');
+			this.setStage(turn, 'finalizing', 'Finishing the walkthrough');
 			try {
 				walkthrough = await this.finalizeWalkthrough(turn, files, changes, pending);
 				note = walkthrough ? `Walkthrough: ${walkthrough.title}` : 'The explanation did not survive reconciliation with the final changes.';
@@ -787,7 +954,6 @@ export class ActiveController implements AgentSessionListener {
 			result = this.planner.reconcile(turn.draft.draft, files, evidence);
 		}
 		if (!result?.draft) {
-			await this.syncExplanationWorkspace();
 			result = await this.planner.plan(await this.planningContext(turn, changes, pending, true), turn.draft?.draft);
 		}
 		if (result.dropped.length) {

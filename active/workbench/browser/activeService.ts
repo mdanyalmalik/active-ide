@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { timeout } from '../../../../base/common/async.js';
+import { fromNow } from '../../../../base/common/date.js';
+import { IConfigurationService, ConfigurationTarget } from '../../../../platform/configuration/common/configuration.js';
+import { effortDescription, effortLabel, updateModelChoices } from './activeSettings.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
@@ -23,8 +26,8 @@ import { IPaneCompositePartService } from '../../../services/panecomposite/brows
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IExplorerService } from '../../files/browser/files.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, LearningProfile, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, applyDetailFeedback } from '../common/activeProtocol.js';
-import { ActiveChatInput, LearningProfileInput, WalkthroughInput } from './activeInputs.js';
+import { ActiveEvent, ActiveSetting, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
 import { ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
 import { PlaybackPosition, WalkthroughPlayer } from './walkthroughPlayer.js';
@@ -63,7 +66,7 @@ export interface IActiveService {
 
 	readonly agent: AgentState;
 	readonly chat: readonly ChatEntry[];
-	readonly profile: LearningProfile;
+	readonly profile: KnowledgeProfile;
 	readonly history: readonly TurnSummary[];
 	readonly turnChanges: ReadonlyMap<string, FileChangeStat>;
 	readonly narration: NarrationStatus;
@@ -90,7 +93,6 @@ export interface IActiveService {
 	readonly onDidChangeOffer: Event<void>;
 	readonly onDidChangeHandoff: Event<void>;
 	/** Fired just before chat is replaced by a walkthrough, so chat can fade out. */
-	readonly onWillHandOff: Event<void>;
 	/** A pending check of some walkthrough finished or failed. */
 	readonly onDidChangeChecks: Event<string>;
 	readonly onDidChangeElaboration: Event<Elaboration>;
@@ -106,7 +108,7 @@ export interface IActiveService {
 	synthesize(text: string, voice?: string): Promise<SynthesizeResult>;
 	getHistory(turnId: string): Promise<HistoryDetail | undefined>;
 	deleteHistory(turnId?: string): Promise<void>;
-	saveProfile(profile: LearningProfile): Promise<void>;
+	saveProfile(profile: KnowledgeProfile): Promise<void>;
 
 	/** First-run setup of the coding agent (provider-agnostic). */
 	setupInstall(): Promise<void>;
@@ -122,6 +124,21 @@ export interface IActiveService {
 	/** Keeps chat open; the walkthrough stays available to play later. */
 	declineHandoff(): void;
 	openChat(fromWalkthrough: boolean): Promise<void>;
+	/** Makes `walkthrough` the one playing (its tab became active). */
+	selectWalkthrough(walkthrough: Walkthrough): void;
+	/** Opens Active's section of Settings. */
+	openSettings(): Promise<void>;
+	/** Starts a new chat (a new coding session) in this folder. */
+	newChat(): Promise<void>;
+	/** Lists this folder's earlier chats and resumes the chosen one. */
+	pickChatToResume(): Promise<void>;
+	/** The coding agent's reasoning effort setting (`default` or a tier). */
+	readonly codingEffort: string;
+	setCodingEffort(effort: string): Promise<void>;
+	pickCodingEffort(): Promise<void>;
+	/** Voice and speed come from settings. */
+	readonly narrationVoice: string;
+	readonly narrationSpeed: number;
 	openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs?: number): Promise<void>;
 	resumeWalkthrough(): Promise<void>;
 	openProfile(): Promise<void>;
@@ -138,12 +155,16 @@ export interface IActiveService {
 	readonly onDidChangeSpeaking: Event<void>;
 	/** Whether to ask how the level of detail was at the end of this walkthrough (occasionally, not every time). */
 	shouldAskForFeedback(walkthrough: Walkthrough): boolean;
-	recordDetailFeedback(walkthrough: Walkthrough, feedback: DetailFeedback): Promise<LearningProfile>;
+	recordDetailFeedback(walkthrough: Walkthrough, feedback: DetailFeedback): Promise<KnowledgeProfile>;
 	setVoice(voice: string): Promise<void>;
 	pickVoice(): Promise<void>;
 	/** The walkthrough being watched, else the offered one, else the newest in history. */
 	openRecentWalkthrough(): Promise<void>;
 	pickFromHistory(): Promise<void>;
+	/** Height of the walkthrough's playback controls, so floating buttons can sit above them. */
+	readonly controlsHeight: number;
+	readonly onDidChangeControlsHeight: Event<void>;
+	setControlsHeight(height: number): void;
 }
 
 export class ActiveService extends Disposable implements IActiveService {
@@ -168,12 +189,11 @@ export class ActiveService extends Disposable implements IActiveService {
 	private readonly _onDidChangePlayback = this._register(new Emitter<void>());
 	readonly onDidChangePlayback = this._onDidChangePlayback.event;
 	private readonly playbackListener = this._register(new MutableDisposable());
+	private readonly skipListener = this._register(new MutableDisposable());
 	private readonly _onDidChangeOffer = this._register(new Emitter<void>());
 	readonly onDidChangeOffer = this._onDidChangeOffer.event;
 	private readonly _onDidChangeHandoff = this._register(new Emitter<void>());
 	readonly onDidChangeHandoff = this._onDidChangeHandoff.event;
-	private readonly _onWillHandOff = this._register(new Emitter<void>());
-	readonly onWillHandOff = this._onWillHandOff.event;
 	private _pendingHandoff: Walkthrough | undefined;
 	private readonly _onDidChangeChecks = this._register(new Emitter<string>());
 	readonly onDidChangeChecks = this._onDidChangeChecks.event;
@@ -184,12 +204,16 @@ export class ActiveService extends Disposable implements IActiveService {
 	/** Checks that finished after their walkthrough was made, by walkthrough id then check id. */
 	private readonly checkUpdates = new Map<string, Map<string, PendingCheck>>();
 	private readonly elaborations = new Map<string, Elaboration>();
-	private readonly clipPlayer = this._register(new ClipPlayer(() => this._profile.narrationRate));
+	private readonly clipPlayer = this._register(new ClipPlayer(() => this.narrationSpeed));
 	private readonly askedFeedback = new Set<string>();
+	private _controlsHeight = 0;
+	private readonly _onDidChangeControlsHeight = this._register(new Emitter<void>());
+	readonly onDidChangeControlsHeight = this._onDidChangeControlsHeight.event;
 
 	private _agent: AgentState = { status: 'starting', provider: DEFAULT_PROVIDER, workspaceName: '', backgroundTasks: 0 };
 	private readonly _chat: ChatEntry[] = [];
-	private _profile: LearningProfile = DEFAULT_PROFILE;
+	private _profile: KnowledgeProfile = DEFAULT_PROFILE;
+	private _models: readonly AgentModelInfo[] = [];
 	private _history: TurnSummary[] = [];
 	private readonly _turnChanges = new Map<string, FileChangeStat>();
 	private _narration: NarrationStatus = { available: false, detail: localize('narrationStarting', "Starting narration") };
@@ -219,9 +243,19 @@ export class ActiveService extends Disposable implements IActiveService {
 		@IExplorerService private readonly explorerService: IExplorerService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IStorageService private readonly storageService: IStorageService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
 		super();
+		this._register(this.configurationService.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration(ActiveSetting.NarrationVoice)) {
+				this.narrationCache.clear();
+				this._onDidChangeNarration.fire();
+			}
+			if (event.affectsConfiguration(ActiveSetting.NarrationSpeed)) {
+				this.player?.updateRate();
+			}
+		}));
 		this.availableKey = ActiveWalkthroughAvailable.bindTo(contextKeyService);
 		this._register(this.trustService.onDidChangeTrust(trusted => {
 			if (trusted) {
@@ -237,7 +271,7 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	get agent(): AgentState { return this._agent; }
 	get chat(): readonly ChatEntry[] { return this._chat; }
-	get profile(): LearningProfile { return this._profile; }
+	get profile(): KnowledgeProfile { return this._profile; }
 	get history(): readonly TurnSummary[] { return this._history; }
 	get turnChanges(): ReadonlyMap<string, FileChangeStat> { return this._turnChanges; }
 	get narration() { return this._narration; }
@@ -246,6 +280,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	get offeredWalkthrough(): Walkthrough | undefined { return this._offered; }
 	get chatContext(): ChatContext | undefined { return this._chatContext; }
 	get pendingHandoff(): Walkthrough | undefined { return this._pendingHandoff; }
+	get controlsHeight(): number { return this._controlsHeight; }
 	get speaking(): boolean { return this.clipPlayer.speaking; }
 	get onDidChangeSpeaking(): Event<void> { return this.clipPlayer.onDidChange; }
 	get hasRecentWalkthrough(): boolean { return !!this.player || !!this._offered || !!this._pendingHandoff || this._history.some(turn => !!turn.walkthroughId); }
@@ -258,7 +293,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	private async doInitialize(): Promise<void> {
 		await this.trustService.workspaceTrustInitialized;
 		if (this.needsTrust) {
-			this._agent = { status: 'unavailable', provider: this._agent.provider, blocker: localize('restricted', "This folder is open in Restricted Mode. {0} edits files and runs commands here, so Active starts it only in a trusted folder.", this._agent.provider.name), workspaceName: this.workspaceService.getWorkspace().folders[0]?.name ?? '', backgroundTasks: 0 };
+			this._agent = { status: 'unavailable', provider: this._agent.provider, blocker: localize('restricted', "This folder is in Restricted Mode. {0} edits files and runs commands, so it only runs in trusted folders.", this._agent.provider.name), workspaceName: this.workspaceService.getWorkspace().folders[0]?.name ?? '', backgroundTasks: 0 };
 			this._onDidChangeAgent.fire();
 			return;
 		}
@@ -277,7 +312,7 @@ export class ActiveService extends Disposable implements IActiveService {
 			}
 			await timeout(500);
 		}
-		this._agent = { status: 'unavailable', provider: this._agent.provider, blocker: localize('extensionMissing', "The Active agent services (built-in extension `active-agent`) did not start. Check the Active output channel."), workspaceName: '', backgroundTasks: 0 };
+		this._agent = { status: 'unavailable', provider: this._agent.provider, blocker: localize('extensionMissing', "Active's agent services didn't start. See the Active output channel."), workspaceName: '', backgroundTasks: 0 };
 		this._onDidChangeAgent.fire();
 	}
 
@@ -316,6 +351,10 @@ export class ActiveService extends Disposable implements IActiveService {
 				this._onDidChangeChat.fire(event.entry);
 				break;
 			}
+			case 'chatReset':
+				this._chat.splice(0, this._chat.length, ...event.chat);
+				this._onDidChangeChat.fire(undefined);
+				break;
 			case 'turnChanges':
 				this.setTurnChanges(event.files);
 				break;
@@ -359,12 +398,12 @@ export class ActiveService extends Disposable implements IActiveService {
 				break;
 			}
 			case 'profile':
-				if (event.profile.voice !== this._profile.voice) {
-					this.narrationCache.clear();
-				}
 				this._profile = event.profile;
 				this._onDidChangeProfile.fire();
-				this.player?.updateRate();
+				break;
+			case 'models':
+				this._models = event.models;
+				updateModelChoices(event.models);
 				break;
 		}
 	}
@@ -411,8 +450,6 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 		this._pendingHandoff = undefined;
 		this._onDidChangeHandoff.fire();
-		this._onWillHandOff.fire();
-		await timeout(260);
 		await this.openWalkthrough(walkthrough, undefined, 650);
 	}
 
@@ -452,7 +489,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		await this.commandService.executeCommand(ExtensionCommand.DecideApproval, { approvalId, choiceId });
 	}
 
-	async synthesize(text: string, voice = this._profile.voice): Promise<SynthesizeResult> {
+	async synthesize(text: string, voice = this.narrationVoice): Promise<SynthesizeResult> {
 		return (await this.commandService.executeCommand<SynthesizeResult>(ExtensionCommand.Synthesize, { text, voice })) ?? { error: 'no response' };
 	}
 
@@ -508,7 +545,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		await this.commandService.executeCommand(ExtensionCommand.Reconnect);
 	}
 
-	async saveProfile(profile: LearningProfile): Promise<void> {
+	async saveProfile(profile: KnowledgeProfile): Promise<void> {
 		await this.commandService.executeCommand(ExtensionCommand.ProfileSet, profile);
 	}
 
@@ -535,15 +572,37 @@ export class ActiveService extends Disposable implements IActiveService {
 			this._chatContext = undefined;
 		}
 		this._onDidChangePlayer.fire();
-		await this.withProgrammaticOpen(async () => {
-			const chat = new ActiveChatInput();
-			const active = this.editorService.activeEditor;
-			if (active instanceof WalkthroughInput && this.editorService.activeEditorPane) {
-				await this.editorService.replaceEditors([{ editor: active, replacement: chat }], this.editorService.activeEditorPane.group);
-			} else {
-				await this.editorService.openEditor(chat, { pinned: true });
+		// Chat and walkthroughs are ordinary tabs: open or reveal, never replace one another.
+		await this.withProgrammaticOpen(() => this.editorService.openEditor(new ActiveChatInput(), { pinned: true, revealIfOpened: true }));
+	}
+
+	selectWalkthrough(walkthrough: Walkthrough): void {
+		if (this.player?.walkthrough.id !== walkthrough.id) {
+			this.activatePlayer(walkthrough);
+			this._onDidChangePlayer.fire();
+		}
+	}
+
+	private activatePlayer(walkthrough: Walkthrough, start?: PlaybackPosition): void {
+		if (this.player?.walkthrough.id !== walkthrough.id) {
+			if (this.player) {
+				this.positions.set(this.player.walkthrough.id, this.player.position);
 			}
-		});
+			const position = start ?? this.positions.get(walkthrough.id) ?? { scene: 0, segment: 0 };
+			this.narrationCache.prefetchFrom(walkthrough, position);
+			const player = new WalkthroughPlayer(walkthrough, position, this.narrationCache, () => this.narrationSpeed);
+			this.playerRef.value = player;
+			this.skipListener.value = player.onDidSkipEarly(sceneIndex => void this.recordEarlySkip(walkthrough, sceneIndex));
+			this.playbackListener.value = player.onDidChange(() => {
+				if (player.playing) {
+					// Walkthrough narration and a deeper explanation never talk over each other.
+					this.clipPlayer.stop();
+				}
+				this._onDidChangePlayback.fire();
+			});
+		} else if (start) {
+			this.player.seek(start);
+		}
 	}
 
 	async openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs = 0): Promise<void> {
@@ -557,24 +616,7 @@ export class ActiveService extends Disposable implements IActiveService {
 			this.inputs.set(walkthrough.id, input);
 			this._register(input.onWillDispose(() => this.inputs.delete(walkthrough.id)));
 		}
-		if (this.player?.walkthrough.id !== walkthrough.id) {
-			if (this.player) {
-				this.positions.set(this.player.walkthrough.id, this.player.position);
-			}
-			const position = start ?? this.positions.get(walkthrough.id) ?? { scene: 0, segment: 0 };
-			this.narrationCache.prefetchFrom(walkthrough, position);
-			const player = new WalkthroughPlayer(walkthrough, position, this.narrationCache, () => this._profile.narrationRate);
-			this.playerRef.value = player;
-			this.playbackListener.value = player.onDidChange(() => {
-				if (player.playing) {
-					// Walkthrough narration and a deeper explanation never talk over each other.
-					this.clipPlayer.stop();
-				}
-				this._onDidChangePlayback.fire();
-			});
-		} else if (start) {
-			this.player.seek(start);
-		}
+		this.activatePlayer(walkthrough, start);
 		if (this._offered?.id === walkthrough.id) {
 			this._offered = undefined;
 		}
@@ -584,12 +626,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		this.setTurnChanges(Object.values(walkthrough.files).map(file => ({ path: file.path, added: file.added, removed: file.removed })));
 		this._onDidChangePlayer.fire();
 		await this.withProgrammaticOpen(async () => {
-			const active = this.editorService.activeEditor;
-			if (active instanceof ActiveChatInput && this.editorService.activeEditorPane) {
-				await this.editorService.replaceEditors([{ editor: active, replacement: input }], this.editorService.activeEditorPane.group);
-			} else {
-				await this.editorService.openEditor(input, { pinned: true });
-			}
+			await this.editorService.openEditor(input, { pinned: true, revealIfOpened: true });
 			// Show Explorer (with change counts) only when the editor keeps enough room for the walkthrough.
 			if (this.layoutService.mainContainerDimension.width >= 1000 || this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
 				this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
@@ -629,7 +666,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async openProfile(): Promise<void> {
-		await this.editorService.openEditor(new LearningProfileInput(), { pinned: true });
+		await this.editorService.openEditor(new KnowledgeProfileInput(), { pinned: true });
 	}
 
 	/** Pauses the walkthrough and opens the editable file at the focused location. */
@@ -650,15 +687,22 @@ export class ActiveService extends Disposable implements IActiveService {
 		try {
 			const current = (await this.fileService.readFile(resource)).value.toString();
 			if (captured !== undefined && captured !== null && current !== captured) {
-				this.notificationService.info(localize('fileChanged', "{0} has changed since the captured version shown in the walkthrough.", scene.file));
+				this.notificationService.info(localize('fileChanged', "{0} has changed since this walkthrough was captured.", scene.file));
 			}
 		} catch {
-			this.notificationService.info(localize('fileMissing', "{0} no longer exists on disk; the walkthrough keeps its captured version.", scene.file));
+			this.notificationService.info(localize('fileMissing', "{0} no longer exists. The walkthrough keeps its captured copy.", scene.file));
 		}
 		this._onDidChangePlayer.fire();
 	}
 
 	// ------------------------------------------------------------- explanations
+
+	setControlsHeight(height: number): void {
+		if (height !== this._controlsHeight) {
+			this._controlsHeight = height;
+			this._onDidChangeControlsHeight.fire();
+		}
+	}
 
 	pendingChecks(walkthrough: Walkthrough): readonly PendingCheck[] {
 		const updates = this.checkUpdates.get(walkthrough.id);
@@ -704,22 +748,107 @@ export class ActiveService extends Disposable implements IActiveService {
 		return ask;
 	}
 
-	async recordDetailFeedback(walkthrough: Walkthrough, feedback: DetailFeedback): Promise<LearningProfile> {
+	async recordDetailFeedback(walkthrough: Walkthrough, feedback: DetailFeedback): Promise<KnowledgeProfile> {
 		const topics = walkthrough.terms.map(term => term.name).slice(0, 3);
 		const updated = applyDetailFeedback(this._profile, feedback, topics);
 		await this.saveProfile(updated);
 		return updated;
 	}
 
-	async setVoice(voice: string): Promise<void> {
-		if (voice !== this._profile.voice) {
-			await this.saveProfile({ ...this._profile, voice });
+	/** A quick Next is a very slight hint that the developer already knew what the scene covered. */
+	private async recordEarlySkip(walkthrough: Walkthrough, sceneIndex: number): Promise<void> {
+		const topics = sceneTopics(walkthrough, sceneIndex);
+		if (topics.length) {
+			await this.saveProfile(applySkipSignal(this._profile, topics));
 		}
+	}
+
+	get narrationVoice(): string {
+		return this.configurationService.getValue<string>(ActiveSetting.NarrationVoice) || 'default';
+	}
+
+	get narrationSpeed(): number {
+		const speed = this.configurationService.getValue<number>(ActiveSetting.NarrationSpeed);
+		return typeof speed === 'number' && speed >= 0.5 && speed <= 2 ? speed : 1;
+	}
+
+	async setVoice(voice: string): Promise<void> {
+		if (voice !== this.narrationVoice) {
+			await this.configurationService.updateValue(ActiveSetting.NarrationVoice, voice === 'default' ? '' : voice, ConfigurationTarget.USER);
+		}
+	}
+
+	get codingEffort(): string {
+		return this.configurationService.getValue<string>(ActiveSetting.CodingEffort) || 'default';
+	}
+
+	async setCodingEffort(effort: string): Promise<void> {
+		await this.configurationService.updateValue(ActiveSetting.CodingEffort, effort, ConfigurationTarget.USER);
+	}
+
+	async pickCodingEffort(): Promise<void> {
+		const current = this.codingEffort;
+		const modelId = this.configurationService.getValue<string>(ActiveSetting.CodingModel) || this._models.find(model => model.isDefault)?.id;
+		const model = this._models.find(candidate => candidate.id === modelId);
+		type EffortItem = IQuickPickItem & { effort: string };
+		const tiers = ['default', ...REASONING_EFFORTS.filter(tier => !model?.efforts.length || model.efforts.includes(tier))];
+		const items: EffortItem[] = tiers.map(effort => ({
+			effort,
+			label: effort === 'default' && model?.defaultEffort ? localize('effortDefaultIs', "Default ({0})", effortLabel(model.defaultEffort)) : effortLabel(effort),
+			description: effort === current ? localize('currentEffort', "current") : undefined,
+			detail: effortDescription(effort),
+		}));
+		const chosen = await this.quickInputService.pick(items, {
+			title: localize('pickEffortTitle', "Coding Agent Effort"),
+			placeHolder: localize('pickEffortPlaceholder', "How much {0} reasons before acting. Applies from the next task.", this._agent.provider.name),
+			activeItem: items.find(item => item.effort === current),
+		});
+		if (chosen) {
+			await this.setCodingEffort(chosen.effort);
+		}
+	}
+
+	async newChat(): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.NewSession);
+		await this.openChat(false);
+	}
+
+	async pickChatToResume(): Promise<void> {
+		// Chats are coding sessions; history records which session each turn ran in.
+		const sessions = new Map<string, TurnSummary[]>();
+		for (const turn of this._history) {
+			sessions.set(turn.sessionId, [...(sessions.get(turn.sessionId) ?? []), turn]);
+		}
+		type ChatItem = IQuickPickItem & { sessionId: string };
+		const current = this._agent.sessionId;
+		const items: ChatItem[] = [...sessions.entries()].map(([sessionId, turns]) => {
+			const latest = turns[0];
+			const first = turns[turns.length - 1];
+			return {
+				sessionId,
+				label: first.task.split('\n')[0].slice(0, 80),
+				description: sessionId === current ? localize('currentChat', "current") : fromNow(latest.startedAt, true),
+				detail: turns.length === 1 ? localize('oneTask', "1 task") : localize('tasks', "{0} tasks · latest: {1}", turns.length, latest.task.split('\n')[0].slice(0, 60)),
+			};
+		});
+		if (!items.length) {
+			this.notificationService.info(localize('noChats', "No earlier chats in this folder yet."));
+			return;
+		}
+		const chosen = await this.quickInputService.pick(items, { title: localize('resumeChatTitle', "Resume a Chat"), placeHolder: localize('resumeChatPlaceholder', "Earlier chats in this folder, newest first"), matchOnDetail: true });
+		if (chosen && chosen.sessionId !== current) {
+			await this.commandService.executeCommand(ExtensionCommand.ResumeSession, chosen.sessionId);
+		}
+		await this.openChat(false);
+	}
+
+	async openSettings(): Promise<void> {
+		await this.commandService.executeCommand('workbench.action.openSettings', '@tag:active');
 	}
 
 	async pickVoice(): Promise<void> {
 		const voices: readonly VoiceInfo[] = this._narration.voices?.length ? this._narration.voices : [{ name: 'default', description: localize('builtInVoice', "Phonon's built-in voice") }];
-		const current = this._profile.voice || 'default';
+		const current = this.narrationVoice;
 		type VoiceItem = IQuickPickItem & { voice: string };
 		const item = (voice: VoiceInfo): VoiceItem => ({
 			voice: voice.name,
@@ -738,13 +867,13 @@ export class ActiveService extends Disposable implements IActiveService {
 		const picker = this.quickInputService.createQuickPick<VoiceItem>({ useSeparators: true });
 		picker.title = localize('pickVoiceTitle', "Narration Voice");
 		picker.placeholder = this._narration.available
-			? localize('pickVoicePlaceholder', "Choose a voice for walkthrough narration. Use ▶ to hear it first.")
+			? localize('pickVoicePlaceholder', "Pick a voice. ▶ previews it.")
 			: localize('pickVoiceUnavailable', "Narration is unavailable: {0}", this._narration.detail);
 		picker.matchOnDetail = true;
 		picker.items = items;
 		picker.activeItems = picker.items.filter((candidate): candidate is VoiceItem => (candidate as VoiceItem).voice === current);
 		const disposables = [
-			picker.onDidTriggerItemButton(event => void this.speak(localize('voiceSample', "Hi, I'm {0}. This is how I'll sound explaining your code.", event.item.voice === 'default' ? localize('phonon', "Phonon") : event.item.voice), event.item.voice)),
+			picker.onDidTriggerItemButton(event => void this.speak(localize('voiceSample', "Hi, I'm {0}. This is how I'll sound.", event.item.voice === 'default' ? localize('phonon', "Phonon") : event.item.voice), event.item.voice)),
 			picker.onDidAccept(() => {
 				const chosen = picker.selectedItems[0];
 				picker.hide();
@@ -783,7 +912,7 @@ export class ActiveService extends Disposable implements IActiveService {
 			description: `${localize('turnNumber', "Turn {0}", turn.index)} · ${new Date(turn.endedAt ?? turn.startedAt).toLocaleString()}${turn.walkthroughId === currentId ? ` · ${localize('watchingNow', "watching now")}` : ''}`,
 			detail: turn.task,
 		}));
-		items.push({ label: `$(history) ${localize('allHistory', "Show All History…")}`, detail: localize('allHistoryDetail', "Every turn, including those that weren't explained") });
+		items.push({ label: `$(history) ${localize('allHistory', "Show All History…")}`, detail: localize('allHistoryDetail', "Including turns without a walkthrough") });
 		const picked = await this.quickInputService.pick(items, { title: localize('historyPickTitle', "Walkthrough History"), placeHolder: localize('historyPickPlaceholder', "Replay an earlier walkthrough"), matchOnDetail: true });
 		if (!picked) {
 			return;

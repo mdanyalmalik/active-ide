@@ -9,6 +9,7 @@
  * be substituted by writing a new adapter.
  */
 
+import type { AgentModelInfo } from '../shared/activeProtocol';
 export interface AgentItem {
 	readonly id: string;
 	readonly turnId?: string | null;
@@ -60,13 +61,17 @@ export interface AgentSessionListener {
 
 export interface AgentSession {
 	readonly sessionId: string;
-	/** Starts a turn; resolves with the turn id once the host admits it. */
-	startTurn(text: string, displayText?: string): Promise<string>;
+	/** Starts a turn; resolves with the turn id once the host admits it. `reasoningEffort` applies to this turn only. */
+	startTurn(text: string, displayText?: string, reasoningEffort?: string): Promise<string>;
+	/** Switches the model for the session's later model calls, when the provider supports it. */
+	setModel?(modelId: string): Promise<void>;
 	decideApproval(approvalId: string, choiceId: string): Promise<void>;
 	listTasks(): Promise<AgentTask[]>;
 	readOutput(itemId: string, outputRef: string, maxBytes?: number): Promise<string | undefined>;
 	/** A short description of the signed-in account (e.g. a subscription tier), when the provider reports one. */
 	accountSummary?(): Promise<string | undefined>;
+	/** Stops a running turn, when the provider supports it. */
+	interruptTurn?(turnId: string): Promise<void>;
 }
 
 export interface AgentSessionOptions {
@@ -77,7 +82,11 @@ export interface AgentSessionOptions {
 
 export interface AgentHost {
 	readonly description: string;
+	/** The models the agent offers, when the provider can list them. */
+	listModels?(): Promise<AgentModelInfo[]>;
 	startSession(options: AgentSessionOptions): Promise<AgentSession>;
+	/** Reattaches to a stored session (for example the one open before a restart), when the provider supports it. */
+	resumeSession?(sessionId: string, options: AgentSessionOptions): Promise<AgentSession>;
 	readonly exited: Promise<string>;
 	dispose(): Promise<void>;
 }

@@ -27,36 +27,8 @@
 	},
 	"contributes": {
 		"configuration": {
-			"title": "Active",
+			"title": "Active (development)",
 			"properties": {
-				"active.muse.binaryPath": {
-					"type": "string",
-					"default": "",
-					"description": "Path to the `muse` CLI. Empty searches PATH and ~/.local/bin."
-				},
-				"active.walkthrough.backgroundTimeoutSeconds": {
-					"type": "number",
-					"default": 20,
-					"minimum": 0,
-					"description": "How long to wait for background tasks (tests, builds) after a coding turn before explaining. Unfinished checks are marked pending; the tasks keep running."
-				},
-				"active.explain.minMeaningfulLines": {
-					"type": "number",
-					"default": 8,
-					"minimum": 1,
-					"description": "Meaningful changed lines (excluding whitespace, comments and moves) that make a single turn worth explaining. Turns are assessed independently."
-				},
-				"active.explain.draftQuietSeconds": {
-					"type": "number",
-					"default": 6,
-					"minimum": 1,
-					"description": "Quiet period after the last change before drafting the walkthrough while the agent is still working."
-				},
-				"active.narration.pythonPath": {
-					"type": "string",
-					"default": "",
-					"description": "Python interpreter with the `ptts` package (Phonon). Empty uses .tools/tts-venv or ~/.active/tts-venv."
-				},
 				"active.dev.agentBackend": {
 					"type": "string",
 					"enum": [
@@ -77,19 +49,6 @@
 					"tags": [
 						"experimental"
 					]
-				},
-				"active.agent.provider": {
-					"type": "string",
-					"enum": [
-						"muse",
-						"bridge"
-					],
-					"enumDescriptions": [
-						"Muse Code (default)",
-						"DEV ONLY: Claude Code subagent bridge"
-					],
-					"default": "muse",
-					"description": "The coding agent Active works with. More providers can be added; `bridge` is a development-only test backend."
 				},
 				"active.dev.installCommand": {
 					"type": "string",

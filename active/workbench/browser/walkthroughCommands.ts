@@ -14,10 +14,14 @@ export const enum WalkthroughCommandIds {
 
 export const enum ActiveCommandIds {
 	OpenChat = 'active.openChat',
-	OpenProfile = 'active.openLearningProfile',
+	OpenProfile = 'active.openKnowledgeProfile',
 	DeleteAllHistory = 'active.history.deleteAll',
 	SignIn = 'active.signInToAgent',
 	PickVoice = 'active.pickNarrationVoice',
+	OpenSettings = 'active.openSettings',
+	NewChat = 'active.newChat',
+	ResumeChat = 'active.resumeChat',
+	PickCodingEffort = 'active.pickCodingEffort',
 	OpenRecentWalkthrough = 'active.openRecentWalkthrough',
 	WalkthroughHistory = 'active.walkthroughHistory',
 }

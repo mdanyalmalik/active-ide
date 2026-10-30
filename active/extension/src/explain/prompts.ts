@@ -3,13 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { CapturedFile, LearningProfile, PendingCheck, ToolOutcome, Walkthrough, WalkthroughDraft } from '../shared/activeProtocol';
+import type { CapturedFile, KnowledgeProfile, PendingCheck, ToolOutcome, Walkthrough, WalkthroughDraft } from '../shared/activeProtocol';
 import { diffLines, splitLines, unifiedDiff } from '../tracking/lineDiff';
 
 export interface PlanningContext {
 	readonly task: string;
 	readonly turnIndex: number;
-	readonly profile: LearningProfile;
+	readonly profile: KnowledgeProfile;
 	readonly files: Readonly<Record<string, CapturedFile>>;
 	readonly agentMessages: readonly string[];
 	readonly reasoningSummaries: readonly string[];
@@ -61,7 +61,7 @@ export function numberedExcerpt(file: CapturedFile, version: 'baseline' | 'final
 	return out.join('\n');
 }
 
-function familiarityList(items: LearningProfile['languages']): string {
+function familiarityList(items: KnowledgeProfile['languages']): string {
 	return items.length ? items.map(item => `${item.name} (${item.familiarity})`).join(', ') : 'not specified';
 }
 
@@ -73,13 +73,13 @@ function detailLean(bias: number | undefined): string {
 	return ` (from their feedback: lean ${amount} toward ${bias > 0 ? 'more' : 'less'} detail within this depth)`;
 }
 
-export function describeProfile(profile: LearningProfile): string {
+export function describeProfile(profile: KnowledgeProfile): string {
 	return [
 		`Background: ${profile.background || 'not specified'} (${profile.yearsProgramming} years programming)`,
 		`Languages: ${familiarityList(profile.languages)}`,
 		`Concepts: ${familiarityList(profile.concepts)}`,
-		`Wants to learn: ${profile.wantToLearn || 'not specified'}`,
-		`Gloss over: ${profile.glossOver || 'not specified'}`,
+		`Follow closely: ${profile.followClosely || 'not specified'}`,
+		`Skim past: ${profile.glossOver || 'not specified'}`,
 		`Depth: ${profile.depth}${detailLean(profile.detailBias)}. Mathematical notation: ${profile.math}.`,
 		`Useful visuals: ${profile.preferredVisuals.join(', ') || 'any'}`,
 		profile.notes ? `Notes: ${profile.notes}` : '',
@@ -113,7 +113,7 @@ const SCHEMA = `{
   }]
 }`;
 
-const TEACHING = `Teach like a strong coding video, one coherent idea per scene — never a chronological recital of edits:
+const EXPLAINING = `Brief the developer like a sharp colleague walking them through a change, one coherent idea per scene — never a chronological recital of edits. They may be junior or senior; keep them informed at the level their profile asks for, without lecturing:
 1. Open with the problem or intuition (why this change exists).
 2. When it helps, show a conceptual model (diagram, equation or chart) before the code.
 3. Connect the model to the implementation: put the editor on the exact lines and say how they realize the idea.
@@ -123,7 +123,7 @@ Pick the visual that explains best: "diff" when the before/after contrast matter
 Narration is spoken aloud: plain sentences, no markdown, no code blocks, no line numbers; 1-3 sentences per segment; use cues so the visual changes in step with the words.
 Ground every implementation claim in the captured code and tool results. Anything not observed (example timings, hypothetical callers) must be framed as an example in the narration and marked "illustrative": true / "source": "illustrative".
 Never say a check passed unless a tool outcome shows it. Mention pending checks as still running.
-Tool outcome ids exist only for a chart's "evidence" field: never mention ids, "tool outcome", or other internal names in titles or narration. Describe evidence the way the learner saw it (for example "the test run at the end of this turn").`;
+Tool outcome ids exist only for a chart's "evidence" field: never mention ids, "tool outcome", or other internal names in titles or narration. Describe evidence the way the developer saw it (for example "the test run at the end of this turn").`;
 
 function toolSection(tools: readonly ToolOutcome[]): string {
 	if (!tools.length) {
@@ -143,10 +143,10 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 		return `### ${file.path} (${status})\nDIFF:\n${diff || '(no net change)'}\n\nFINAL VERSION (line numbers are what "focus", "range" and "anchorLine" refer to):\n${numberedExcerpt(file, file.final === null ? 'baseline' : 'final')}`;
 	}).join('\n\n');
 	const sections = [
-		`You are the explanation planner inside Active, an IDE that narrates what a coding agent just did. You only read; you never modify files. The working directory is a read-only snapshot of the project; you may read other files for context.`,
-		`Produce a walkthrough of this turn's code change for the learner below as a single JSON object matching this schema (reply with only the JSON in one \`\`\`json block):\n${SCHEMA}`,
-		TEACHING,
-		`LEARNER PROFILE\n${describeProfile(context.profile)}\nAdapt concept selection, detail, vocabulary and pacing to this profile: skip what they want glossed over, spend scenes on what they want to learn. ${context.profile.math === 'avoid' ? 'Avoid equations.' : ''} Aim for ${context.profile.depth === 'overview' ? '3-4' : context.profile.depth === 'deep' ? '6-9' : '4-6'} scenes.`,
+		`You are the explanation planner inside Active, an IDE that narrates what a coding agent just did. You only read; you never modify files (your session runs under a read-only permission profile). The working directory is the live project, so you may read other files for context, but it can keep changing while you work: the CAPTURED FILES below are the authoritative versions for this turn.`,
+		`Produce a walkthrough of this turn's code change for the developer below as a single JSON object matching this schema (reply with only the JSON in one \`\`\`json block):\n${SCHEMA}`,
+		EXPLAINING,
+		`DEVELOPER PROFILE\n${describeProfile(context.profile)}\nAdapt what you cover, detail, vocabulary and pacing to this profile: skim what they want skimmed, spend scenes on what they follow closely, and don't explain what they already know well. ${context.profile.math === 'avoid' ? 'Avoid equations.' : ''} Aim for ${context.profile.depth === 'overview' ? '3-4' : context.profile.depth === 'deep' ? '6-9' : '4-6'} scenes.`,
 		`TASK (turn ${context.turnIndex})\n${context.task}`,
 		`AGENT MESSAGES\n${context.agentMessages.join('\n---\n') || '(none)'}`,
 		`EXPOSED REASONING SUMMARIES\n${context.reasoningSummaries.join('\n---\n') || '(none)'}`,
@@ -170,20 +170,20 @@ export function buildRepairPrompt(errors: readonly string[]): string {
 }
 
 /** Asks the read-only explanation session to re-explain one scene in greater depth. */
-export function buildElaborationPrompt(walkthrough: Walkthrough, sceneId: string, profile: LearningProfile): string {
+export function buildElaborationPrompt(walkthrough: Walkthrough, sceneId: string, profile: KnowledgeProfile): string {
 	const scene = walkthrough.scenes.find(candidate => candidate.id === sceneId);
-	const question = `MORE DETAIL: Re-explain "${scene?.title ?? 'this part'}" in greater depth than the walkthrough did. Go a level deeper: how the focused lines work step by step, why they are written this way, edge cases and what would break if they were different. Assume the learner understood the short version. Use 2-4 short paragraphs of plain spoken prose (it will be read aloud), no headings or bullet lists, and refer to code by name rather than pasting it.`;
+	const question = `MORE DETAIL: Re-explain "${scene?.title ?? 'this part'}" in greater depth than the walkthrough did. Go a level deeper: how the focused lines work step by step, why they are written this way, edge cases and what would break if they were different. Assume they understood the short version. Use 2-4 short paragraphs of plain spoken prose (it will be read aloud), no headings or bullet lists, and refer to code by name rather than pasting it.`;
 	return buildQuestionPrompt(question, walkthrough, sceneId, profile);
 }
 
-export function buildQuestionPrompt(question: string, walkthrough: Walkthrough | undefined, sceneId: string | undefined, profile: LearningProfile): string {
-	const parts = [`You are answering a learner's question inside Active. You only read; never modify files. Answer conversationally and concisely in plain text (short code snippets are fine). Ground claims in the captured code; say so when something is not observed.`, `LEARNER PROFILE\n${describeProfile(profile)}`];
+export function buildQuestionPrompt(question: string, walkthrough: Walkthrough | undefined, sceneId: string | undefined, profile: KnowledgeProfile): string {
+	const parts = [`You are answering a developer's question inside Active. You only read; never modify files. Answer conversationally and concisely in plain text (short code snippets are fine). Ground claims in the captured code; say so when something is not observed. You run in the live project, which may have changed since a walkthrough was captured: when they differ, the captured code below is what the walkthrough explained.`, `DEVELOPER PROFILE\n${describeProfile(profile)}`];
 	if (walkthrough) {
 		const scene = walkthrough.scenes.find(candidate => candidate.id === sceneId);
 		parts.push(`CURRENT WALKTHROUGH: ${walkthrough.title} — ${walkthrough.summary}\nTask: ${walkthrough.task}\nScenes: ${walkthrough.scenes.map((candidate, index) => `${index + 1}. ${candidate.title}`).join('; ')}`);
 		if (scene) {
 			const file = walkthrough.files[scene.file];
-			parts.push(`THE LEARNER PAUSED ON: "${scene.title}" (${scene.file})\nNarration: ${scene.narration.map(segment => segment.text).join(' ')}\nFocused code:\n${file ? scene.focus.map(range => numberedExcerpt({ ...file, final: scene.version === 'final' ? file.final : file.baseline }).split('\n').filter(line => {
+			parts.push(`THE DEVELOPER PAUSED ON: "${scene.title}" (${scene.file})\nNarration: ${scene.narration.map(segment => segment.text).join(' ')}\nFocused code:\n${file ? scene.focus.map(range => numberedExcerpt({ ...file, final: scene.version === 'final' ? file.final : file.baseline }).split('\n').filter(line => {
 				const number = Number(line.split('│')[0]);
 				return number >= Math.max(1, range.startLine - 3) && number <= range.endLine + 3;
 			}).join('\n')).join('\n…\n') : ''}`);

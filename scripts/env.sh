@@ -8,3 +8,7 @@ NODE_DIR="$ACTIVE_ROOT/.tools/node-v$NODE_VERSION-$(uname -s | tr '[:upper:]' '[
 if [ -x "$NODE_DIR/bin/node" ]; then
 	export PATH="$NODE_DIR/bin:$PATH"
 fi
+# Code OSS's .npmrc carries Electron build options (disturl, target, runtime, …) that native modules
+# need; npm 11 still passes them on but warns "Unknown project config" on every command. Real errors
+# still print.
+export npm_config_loglevel="${npm_config_loglevel:-error}"

@@ -9,10 +9,12 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
+import type { AgentSession } from '../agents/agentTypes';
+import { ExplanationAgent } from '../explain/planner';
 import { buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
 import { assessWorthiness } from '../explain/worthiness';
 import { HistoryStore } from '../history/historyStore';
-import { applyDetailFeedback, CapturedFile, DEFAULT_PROFILE, extractJsonObject, LearningProfile, validateWalkthrough, Walkthrough } from '../shared/activeProtocol';
+import { applyDetailFeedback, applySkipSignal, CapturedFile, DEFAULT_PROFILE, extractJsonObject, KnowledgeProfile, validateWalkthrough, Walkthrough } from '../shared/activeProtocol';
 import { ChangeTracker, NetFileChange } from '../tracking/changeTracker';
 import { diffLines, diffStats, unifiedDiff } from '../tracking/lineDiff';
 import { WorkspaceFiles } from '../tracking/workspaceFiles';
@@ -207,16 +209,16 @@ describe('personalization', () => {
 	test('the learner profile shapes the planning prompt', () => {
 		const files = { 'a.js': { path: 'a.js', baseline: 'x\n', final: 'y\n', added: 1, removed: 1 } };
 		const context = { task: 't', turnIndex: 1, files, agentMessages: [], reasoningSummaries: ['exposed summary'], tools: [], pending: [{ id: 'p', label: 'npm test', state: 'running' as const }], history: [], userNotes: [], final: true };
-		const novice = buildPlanningPrompt({ ...context, profile: { ...DEFAULT_PROFILE, depth: 'overview', math: 'avoid', glossOver: 'CSS', wantToLearn: 'async timing' } });
+		const novice = buildPlanningPrompt({ ...context, profile: { ...DEFAULT_PROFILE, depth: 'overview', math: 'avoid', glossOver: 'CSS', followClosely: 'async timing' } });
 		const expert = buildPlanningPrompt({ ...context, profile: { ...DEFAULT_PROFILE, depth: 'deep', math: 'comfortable' } });
 		assert.deepStrictEqual(
-			[novice.includes('Aim for 3-4 scenes'), novice.includes('Avoid equations.'), novice.includes('Gloss over: CSS'), novice.includes('Wants to learn: async timing'), expert.includes('Aim for 6-9 scenes'), expert.includes('Avoid equations.'), novice.includes('- npm test'), novice.includes('exposed summary')],
+			[novice.includes('Aim for 3-4 scenes'), novice.includes('Avoid equations.'), novice.includes('Skim past: CSS'), novice.includes('Follow closely: async timing'), expert.includes('Aim for 6-9 scenes'), expert.includes('Avoid equations.'), novice.includes('- npm test'), novice.includes('exposed summary')],
 			[true, true, true, true, true, false, true, true],
 		);
 	});
 
 	test('detail feedback nudges the detail preference slightly and topic knowledge more', () => {
-		const start: LearningProfile = { ...DEFAULT_PROFILE, concepts: [{ name: 'Token bucket', familiarity: 'some' }] };
+		const start: KnowledgeProfile = { ...DEFAULT_PROFILE, concepts: [{ name: 'Token bucket', familiarity: 'some' }] };
 		const lighter = applyDetailFeedback(start, 'tooMuch', ['token bucket', 'Retry-After']);
 		assert.equal(lighter.detailBias, -0.2);
 		assert.equal(lighter.depth, 'balanced');
@@ -234,10 +236,47 @@ describe('personalization', () => {
 		assert.ok(buildPlanningPrompt({ task: 't', turnIndex: 1, files: {}, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, profile: lighter }).includes('lean slightly toward less detail'));
 	});
 
+	test('skipping a scene early nudges its topics very slightly', () => {
+		const start: KnowledgeProfile = { ...DEFAULT_PROFILE, concepts: [{ name: 'unit table', familiarity: 'comfortable' }], detailBias: 0.3 };
+		const after = applySkipSignal(start, ['Unit table', 'regex']);
+		assert.deepStrictEqual(after.concepts, [
+			{ name: 'unit table', familiarity: 'comfortable', level: 2.1 },
+			{ name: 'regex', familiarity: 'some', level: 1.1 },
+		]);
+		assert.equal(after.detailBias, 0.3);
+		assert.equal(applySkipSignal(start, []), start);
+	});
+
 	test('the deeper explanation prompt targets one scene', () => {
 		const walkthrough = { id: 'wt-1', title: 'Rate limiting', summary: 's', task: 't', scenes: [{ id: 'model', title: 'Token bucket', file: 'a.js', version: 'final', anchorLine: 1, focus: [{ startLine: 1, endLine: 1 }], narration: [{ text: 'Tokens refill.' }] }], files: { 'a.js': { path: 'a.js', baseline: null, final: 'refill()\n', added: 1, removed: 0 } } } as unknown as Walkthrough;
 		const prompt = buildElaborationPrompt(walkthrough, 'model', DEFAULT_PROFILE);
 		assert.match(prompt, /QUESTION\nMORE DETAIL: Re-explain "Token bucket"/);
-		assert.match(prompt, /THE LEARNER PAUSED ON: "Token bucket"/);
+		assert.match(prompt, /THE DEVELOPER PAUSED ON: "Token bucket"/);
+	});
+});
+
+describe('explanation agent', () => {
+	test('a turn that never finishes is interrupted and the next request still runs', async () => {
+		const interrupted: string[] = [];
+		let turns = 0;
+		let agent: ExplanationAgent;
+		const session = {
+			sessionId: 's',
+			startTurn: async () => {
+				const turnId = `t${++turns}`;
+				if (turnId === 't2') {
+					setTimeout(() => {
+						agent.onItem({ id: 'm', turnId, kind: 'agentMessage', status: 'completed', text: 'second' }, true);
+						agent.onTurnCompleted(turnId, 'completed');
+					}, 5);
+				}
+				return turnId;
+			},
+			interruptTurn: async (turnId: string) => { interrupted.push(turnId); },
+		} as unknown as AgentSession;
+		agent = new ExplanationAgent(async () => session, 50);
+		await assert.rejects(agent.ask('first'), /took longer than/);
+		assert.deepEqual(interrupted, ['t1']);
+		assert.equal(await agent.ask('second'), 'second');
 	});
 });

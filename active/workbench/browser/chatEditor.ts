@@ -15,6 +15,7 @@ import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
@@ -24,7 +25,8 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import type { ChatEntry } from '../common/activeProtocol.js';
+import { ActiveSetting, type ChatEntry } from '../common/activeProtocol.js';
+import { effortLabel } from './activeSettings.js';
 import { ActiveChatInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
 import { renderSetupPanel, SetupPanelViewState } from './setupPanel.js';
@@ -52,6 +54,7 @@ export class ActiveChatEditor extends EditorPane {
 	private stageLine!: HTMLElement;
 	private composerContext!: HTMLElement;
 	private textarea!: HTMLTextAreaElement;
+	private effortButton!: HTMLButtonElement;
 	private sendButton!: HTMLButtonElement;
 	private modeLabel!: HTMLElement;
 	private footerRow!: HTMLElement;
@@ -61,6 +64,7 @@ export class ActiveChatEditor extends EditorPane {
 	private readonly noticeStore = this._register(new DisposableStore());
 	private readonly footerStore = this._register(new DisposableStore());
 	private readonly handoffStore = this._register(new DisposableStore());
+	private readonly headerStore = this._register(new DisposableStore());
 	private introLead!: HTMLElement;
 	private readonly setupView: SetupPanelViewState = { showLog: false, apiKeyDraft: '' };
 	private handoffCard!: HTMLElement;
@@ -74,6 +78,7 @@ export class ActiveChatEditor extends EditorPane {
 		@IMarkdownRendererService private readonly markdownRenderer: IMarkdownRendererService,
 		@IOpenerService private readonly openerService: IOpenerService,
 		@ICommandService private readonly commandService: ICommandService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super(ActiveChatEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -110,12 +115,26 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(dom.addDisposableListener(this.textarea, dom.EventType.INPUT, () => this.updateSendState()));
 		const bar = dom.append(composer, $('.composer-bar'));
 		this.modeLabel = dom.append(bar, $('.composer-mode'));
-		this.sendButton = dom.append(bar, $('button.send')) as HTMLButtonElement;
+		const tools = dom.append(bar, $('.composer-tools'));
+		// The coding agent's effort, one click from where the task is typed.
+		this.effortButton = dom.append(tools, $('button.composer-effort')) as HTMLButtonElement;
+		this._register(dom.addDisposableListener(this.effortButton, dom.EventType.CLICK, () => this.activeService.pickCodingEffort()));
+		const settings = dom.append(tools, $('button.composer-icon')) as HTMLButtonElement;
+		settings.classList.add(...ThemeIcon.asClassNameArray(Codicon.settingsGear));
+		settings.title = localize('chatSettings', "Active Settings: models, effort, voice");
+		settings.setAttribute('aria-label', settings.title);
+		this._register(dom.addDisposableListener(settings, dom.EventType.CLICK, () => this.activeService.openSettings()));
+		this._register(this.configurationService.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration(ActiveSetting.CodingEffort) || event.affectsConfiguration(ActiveSetting.CodingModel)) {
+				this.renderEffort();
+			}
+		}));
+		this.sendButton = dom.append(tools, $('button.send')) as HTMLButtonElement;
 		this.sendButton.textContent = localize('send', "Send ↑");
 		this._register(dom.addDisposableListener(this.sendButton, dom.EventType.CLICK, () => this.send()));
 
 		this.footerRow = dom.append(dock, $('.active-chat-footer'));
-		dom.append(this.intro, $('p.active-chat-tagline')).textContent = localize('tagline', "Code, visuals, and narration unfold together inside the editor.");
+		dom.append(this.intro, $('p.active-chat-tagline')).textContent = localize('tagline', "Code, visuals and narration, right in the editor.");
 
 		this._register(this.activeService.onDidChangeChat(entry => entry ? this.renderEntry(entry, true) : this.renderTranscript()));
 		this._register(this.activeService.onDidChangeAgent(() => this.renderChrome()));
@@ -124,7 +143,6 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(this.activeService.onDidChangeOffer(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangePlayer(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangeHandoff(() => this.renderHandoff()));
-		this._register(this.activeService.onWillHandOff(() => this.root.classList.add('leaving')));
 		this._register(toDisposable(() => this.stopCountdown()));
 	}
 
@@ -133,7 +151,6 @@ export class ActiveChatEditor extends EditorPane {
 		this.inputStore.clear();
 		// Reopening chat always starts on a new coding task; asking about the walkthrough is one click away.
 		this.mode = 'task';
-		this.root.classList.remove('leaving');
 		this.root.classList.remove('entering');
 		void this.root.offsetWidth;
 		this.root.classList.add('entering');
@@ -220,8 +237,8 @@ export class ActiveChatEditor extends EditorPane {
 		const typing = !!this.textarea.value.trim();
 		if (detail) {
 			detail.textContent = typing
-				? localize('handoffPaused', "Waiting while you type. Start it whenever you are ready.")
-				: localize('handoffCountdown', "Starting in {0}… The coding agent keeps working while you watch.", this.secondsLeft);
+				? localize('handoffPaused', "Paused while you type.")
+				: localize('handoffCountdown', "Starting in {0}…", this.secondsLeft);
 		}
 		if (bar) {
 			bar.style.width = `${typing ? 100 : Math.max(0, (this.secondsLeft / HANDOFF_SECONDS) * 100)}%`;
@@ -254,7 +271,7 @@ export class ActiveChatEditor extends EditorPane {
 		const agent = this.activeService.agent;
 		dom.clearNode(this.header);
 		dom.append(this.header, $('span.title')).textContent = localize('headerTitle', "{0} · {1}", agent.provider.name, agent.workspaceName || localize('noWorkspace', "no folder"));
-		this.introLead.textContent = localize('introLead', "Work with {0}, then follow a walkthrough shaped around what you know and want to learn.", agent.provider.name);
+		this.introLead.textContent = localize('introLead', "{0} writes the code. Active walks you through what changed.", agent.provider.name);
 		if (agent.account) {
 			const account = dom.append(this.header, $('span.agent-account'));
 			account.textContent = agent.account;
@@ -272,6 +289,17 @@ export class ActiveChatEditor extends EditorPane {
 			running: localize('statusRunning', "Working"),
 			error: localize('statusError', "Error"),
 		}[agent.status];
+		// Chats are sessions: start a new one, or go back to an earlier one from this folder.
+		this.headerStore.clear();
+		const headerAction = (icon: ThemeIcon, label: string, title: string, run: () => unknown) => {
+			const button = dom.append(this.header, $('button.header-action')) as HTMLButtonElement;
+			dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(icon));
+			dom.append(button, $('span.label')).textContent = label;
+			button.title = title;
+			this.headerStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => run()));
+		};
+		headerAction(Codicon.history, localize('resumeChat', "Chats"), localize('resumeChatTitle', "Resume an earlier chat in this folder"), () => this.activeService.pickChatToResume());
+		headerAction(Codicon.add, localize('newChat', "New Chat"), localize('newChatTitle', "Start a new chat (a new {0} session)", agent.provider.name), () => this.activeService.newChat());
 		this.renderNotices();
 		this.renderStage();
 		this.renderComposerContext();
@@ -303,11 +331,11 @@ export class ActiveChatEditor extends EditorPane {
 		}
 		if (!this.activeService.profile.configured) {
 			const card = dom.append(this.notices, $('.notice'));
-			dom.append(card, $('.notice-title')).textContent = localize('profileTitle', "Shape walkthroughs around you");
-			dom.append(card, $('.notice-detail')).textContent = localize('profileDetail', "Tell Active what you already know, what you want to learn, and how you like explanations. You can change it any time.");
+			dom.append(card, $('.notice-title')).textContent = localize('profileNoticeTitle', "Personalize walkthroughs");
+			dom.append(card, $('.notice-detail')).textContent = localize('profileDetail', "Tell Active what you know and how much detail you want.");
 			const actions = dom.append(card, $('.notice-actions'));
 			const setup = dom.append(actions, $('button.primary'));
-			setup.textContent = localize('setupProfile', "Set Up Learning Profile");
+			setup.textContent = localize('setupProfile', "Set Up Knowledge Profile");
 			this.noticeStore.add(dom.addDisposableListener(setup, dom.EventType.CLICK, () => this.activeService.openProfile()));
 		}
 		const player = this.activeService.player;
@@ -321,7 +349,7 @@ export class ActiveChatEditor extends EditorPane {
 				: localize('walkthroughPausedTitle', "Walkthrough paused: {0}", target.title);
 			if (!offered && player) {
 				dom.append(card, $('.notice-detail')).textContent = context
-					? localize('pausedAtScene', "Paused at {0} of {1}: “{2}”. To ask about it, pick “Ask About” below the message box.", context.sceneIndex + 1, player.walkthrough.scenes.length, context.title)
+					? localize('pausedAtScene', "Paused at {0} of {1}: “{2}”.", context.sceneIndex + 1, player.walkthrough.scenes.length, context.title)
 					: localize('pausedAt', "Paused at idea {0} of {1}.", player.position.scene + 1, player.walkthrough.scenes.length);
 			}
 			const actions = dom.append(card, $('.notice-actions'));
@@ -352,7 +380,7 @@ export class ActiveChatEditor extends EditorPane {
 				icon.classList.add('codicon-modifier-spin');
 			}
 			const text = dom.append(this.stageLine, $('span.stage-text'));
-			text.textContent = preparing ? localize('preparingWalkthrough', "Preparing a walkthrough of this change · {0}", parts.join(' · ')) : parts.join(' · ');
+			text.textContent = preparing ? localize('preparingWalkthrough', "Preparing a walkthrough · {0}", parts.join(' · ')) : parts.join(' · ');
 		}
 		this.stageLine.classList.toggle('preparing', preparing);
 		this.stageLine.classList.toggle('hidden', parts.length === 0);
@@ -377,15 +405,26 @@ export class ActiveChatEditor extends EditorPane {
 		}
 		this.sendButton.textContent = this.mode === 'ask' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
 		this.modeLabel.textContent = this.mode === 'ask' ? localize('explanationSession', "Explanation session (read-only)") : this.activeService.agent.provider.name;
-		this.textarea.placeholder = this.mode === 'ask' ? localize('askPlaceholder', "Ask about this part of the walkthrough…") : localize('taskPlaceholder', "Describe a coding task…");
+		this.textarea.placeholder = this.mode === 'ask' ? localize('askPlaceholder', "Ask about this part…") : localize('taskPlaceholder', "Describe a coding task…");
+		this.renderEffort();
 		this.updateSendState();
+	}
+
+	private renderEffort(): void {
+		const effort = this.activeService.codingEffort;
+		dom.clearNode(this.effortButton);
+		dom.append(this.effortButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.lightbulb));
+		dom.append(this.effortButton, $('span')).textContent = localize('effortButton', "Effort: {0}", effortLabel(effort));
+		this.effortButton.title = localize('effortTitle', "How much {0} reasons before acting. Higher is slower and costs more.", this.activeService.agent.provider.name);
+		// Effort applies to coding tasks; questions use the explanation model's setting.
+		this.effortButton.classList.toggle('hidden', this.mode === 'ask');
 	}
 
 	private renderFooter(): void {
 		this.footerStore.clear();
 		dom.clearNode(this.footerRow);
 		const profile = dom.append(this.footerRow, $('button.link'));
-		profile.textContent = localize('learningProfile', "Learning Profile");
+		profile.textContent = localize('knowledgeProfile', "Knowledge Profile");
 		this.footerStore.add(dom.addDisposableListener(profile, dom.EventType.CLICK, () => this.activeService.openProfile()));
 	}
 

@@ -37,14 +37,13 @@ async function harness(backgroundTimeoutMs: number): Promise<Harness> {
 	await fs.cp(path.join(repo, 'demo', 'ledger-api'), root, { recursive: true });
 	execSync('git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: root });
 	const storage = await fs.mkdtemp(path.join(os.tmpdir(), 'active-storage-'));
-	const explain = path.join(storage, 'explain');
-	await fs.mkdir(explain, { recursive: true });
 	const events: ActiveEvent[] = [];
 	const waiters: Array<{ predicate: (event: ActiveEvent) => boolean; resolve: (event: ActiveEvent) => void }> = [];
 	const files = new WorkspaceFiles(root);
 	const tracker = new ChangeTracker(files);
 	const history = new HistoryStore(path.join(storage, 'history'));
 	let controller: ActiveController;
+	let remembered: string | undefined;
 	const emit = (event: ActiveEvent) => {
 		events.push(event);
 		for (const waiter of [...waiters]) {
@@ -63,7 +62,6 @@ async function harness(backgroundTimeoutMs: number): Promise<Harness> {
 		accountHint: async () => undefined,
 		workspaceName: 'ledger-api',
 		workspaceRoot: root,
-		explanationWorkspace: explain,
 		backgroundTimeoutMs: () => backgroundTimeoutMs,
 		minMeaningfulLines: () => 8,
 		draftQuietMs: () => 300,
@@ -71,7 +69,10 @@ async function harness(backgroundTimeoutMs: number): Promise<Harness> {
 		emit,
 		log: () => undefined,
 		startCodingHost: () => MuseHost.spawn(host, root, () => undefined),
-		startExplanationHost: () => MuseHost.spawn(host, explain, () => undefined),
+		runSettings: () => ({}),
+		lastSessionId: () => remembered,
+		rememberSession: sessionId => { remembered = sessionId; },
+		startExplanationHost: () => MuseHost.spawn(host, root, () => undefined),
 	}, tracker, history);
 	// Stand in for the extension's file watcher: poll the workspace.
 	const poll = setInterval(() => {
@@ -124,6 +125,18 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		const readyIndex = h.events.findIndex(event => event.type === 'walkthroughReady');
 		const idleIndex = h.events.findIndex(event => event.type === 'agent' && event.agent.status === 'idle' && h.events.indexOf(event) > 2);
 		assert.ok(idleIndex >= 0 && idleIndex < readyIndex);
+		// It was planned from the agent's final answer, and the end of the turn reused that plan.
+		const details = h.events.flatMap(event => event.type === 'walkthroughStatus' ? [event.status.detail] : []);
+		assert.ok(details.some(detail => /while .* wraps up/.test(detail)), details.join(' | '));
+	});
+
+	test('reconnecting resumes the folder\'s last session and puts its chat back', async () => {
+		const sessionId = h.controller.sessionIdForTest;
+		const reset = h.waitFor((event): event is Extract<ActiveEvent, { type: 'chatReset' }> => event.type === 'chatReset');
+		await h.controller.reconnect();
+		const { chat } = await reset;
+		assert.equal(h.controller.sessionIdForTest, sessionId);
+		assert.ok(chat.some(entry => entry.role === 'user' && /parseDuration/.test(entry.text)), 'the earlier task is back in chat');
 	});
 
 	test('a tiny change is kept in history but not explained', async () => {
@@ -166,6 +179,15 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		assert.deepStrictEqual(detail!.walkthrough!.pending.map(check => check.state), ['finished']);
 	});
 
+	test('the explanation session refuses to start without the read-only profile', async () => {
+		const strict = await MuseHost.spawn(host, h.root, () => undefined, { ACTIVE_SCRIPTED_NO_READ_ONLY: '1' });
+		try {
+			await assert.rejects(strict.startSession({ workspaceRoot: h.root, readOnly: true, listener: {} }), /read-only permission profile/);
+		} finally {
+			await strict.dispose();
+		}
+	});
+
 	test('"more detail" streams a deeper explanation of one scene', async () => {
 		const turns = await h.history.list();
 		const done = h.waitFor((event): event is Extract<ActiveEvent, { type: 'elaboration' }> => event.type === 'elaboration' && event.status === 'done');
@@ -182,7 +204,7 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		await h.controller.ask({ question: 'Why does refill not need a timer?', walkthroughId: walkthrough.id, sceneId: 'model' });
 		const { entry } = await answered as { entry: ChatEntry };
 		assert.match(entry.text, /never needs a timer/);
-		// The explanation session works on a snapshot copy, so the project is untouched by it.
+		// The explanation session is read-only, so the project is untouched by it.
 		assert.equal(await fs.readFile(path.join(h.root, 'src', 'rateLimiter.js'), 'utf8'), '// rewritten later\n');
 	});
 });

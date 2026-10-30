@@ -3,8 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { promises as fs } from 'node:fs';
-import * as path from 'node:path';
 import type { AgentItem, AgentSession } from '../agents/agentTypes';
 import { CapturedFile, extractJsonObject, validateWalkthrough, WalkthroughDraft } from '../shared/activeProtocol';
 import { buildPlanningPrompt, buildRepairPrompt, PlanningContext } from './prompts';
@@ -18,8 +16,8 @@ interface PendingTurn {
 
 /**
  * Wraps the read-only explanation session: one request at a time, each a turn
- * whose final agent message is the answer. Its workspace is a snapshot
- * directory, never the project.
+ * whose final agent message is the answer. It reads the live project under the
+ * agent's read-only permission profile.
  */
 export class ExplanationAgent {
 	private session: AgentSession | undefined;
@@ -27,7 +25,20 @@ export class ExplanationAgent {
 	private early = new Map<string, { messages: string[]; terminal?: string; error?: string }>();
 	private queue: Promise<unknown> = Promise.resolve();
 
-	constructor(private readonly openSession: (listener: ExplanationAgent) => Promise<AgentSession>, readonly workspace: string) { }
+	/**
+	 * `turnTimeoutMs`: a turn that runs longer is interrupted, so one stuck reply can't hold up every later request.
+	 * `reasoningEffort`: read for each request, so a settings change applies to the next one.
+	 */
+	constructor(
+		private readonly openSession: (listener: ExplanationAgent) => Promise<AgentSession>,
+		private readonly turnTimeoutMs = 5 * 60 * 1000,
+		private readonly reasoningEffort: () => string | undefined = () => undefined,
+	) { }
+
+	/** The open session, if any (for applying a model change). */
+	get currentSession(): AgentSession | undefined {
+		return this.session;
+	}
 
 	/** Forgets the session (after a reconnect the old host is gone). */
 	reset(): void {
@@ -89,7 +100,7 @@ export class ExplanationAgent {
 		const run = async () => {
 			const session = await this.ensureSession();
 			return new Promise<string>((resolve, reject) => {
-				void session.startTurn(prompt).then(turnId => {
+				void session.startTurn(prompt, undefined, this.reasoningEffort()).then(turnId => {
 					const pending: PendingTurn = { messages: [], onText, resolve, reject };
 					const early = this.early.get(turnId);
 					this.early.delete(turnId);
@@ -105,29 +116,26 @@ export class ExplanationAgent {
 						}
 					}
 					this.turns.set(turnId, pending);
+					const timer = setTimeout(() => {
+						if (this.turns.get(turnId) !== pending) {
+							return;
+						}
+						this.turns.delete(turnId);
+						void session.interruptTurn?.(turnId).catch(() => undefined);
+						reject(new Error(`explanation turn took longer than ${Math.round(this.turnTimeoutMs / 1000)}s and was stopped`));
+					}, this.turnTimeoutMs);
+					const settle = <T>(done: (value: T) => void) => (value: T) => {
+						clearTimeout(timer);
+						done(value);
+					};
+					pending.resolve = settle(resolve);
+					pending.reject = settle(reject);
 				}, reject);
 			});
 		};
 		const result = this.queue.then(run, run);
 		this.queue = result.catch(() => undefined);
 		return result;
-	}
-
-	/** Mirrors the captured project files into the explanation workspace (the only place it can read). */
-	async syncWorkspace(files: Map<string, string>): Promise<void> {
-		for (const [relative, content] of files) {
-			const target = path.join(this.workspace, ...relative.split('/'));
-			let existing: string | undefined;
-			try {
-				existing = await fs.readFile(target, 'utf8');
-			} catch {
-				existing = undefined;
-			}
-			if (existing !== content) {
-				await fs.mkdir(path.dirname(target), { recursive: true });
-				await fs.writeFile(target, content, 'utf8');
-			}
-		}
 	}
 }
 

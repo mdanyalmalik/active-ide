@@ -4,21 +4,48 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, AskRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, LearningProfile, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, AskRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
 import { PhononNarrator } from './tts/phonon';
 
+/** The coding session last open in this folder (resumed on the next start). */
+const LAST_SESSION_KEY = 'active.codingSessionId';
+
 function config<T>(key: string, fallback: T): T {
 	return vscode.workspace.getConfiguration('active').get<T>(key, fallback);
+}
+
+/** The model and effort a role should use. `default` effort and an empty model leave Muse's own defaults. */
+function runSettings(role: 'coding' | 'explanation'): AgentRunSettings {
+	const settings = vscode.workspace.getConfiguration();
+	const model = settings.get<string>(role === 'coding' ? ActiveSetting.CodingModel : ActiveSetting.ExplanationModel, '').trim();
+	const effort = settings.get<string>(role === 'coding' ? ActiveSetting.CodingEffort : ActiveSetting.ExplanationEffort, 'default');
+	return {
+		model: model || undefined,
+		reasoningEffort: (REASONING_EFFORTS as readonly string[]).includes(effort) ? effort as ReasoningEffort : undefined,
+	};
+}
+
+/** Voice and speed used to live in the knowledge profile; carry them over to settings once. */
+async function migrateNarrationSettings(stored: Partial<KnowledgeProfile>): Promise<void> {
+	const settings = vscode.workspace.getConfiguration();
+	const voice = settings.inspect<string>(ActiveSetting.NarrationVoice);
+	if (stored.voice && stored.voice !== 'default' && voice?.globalValue === undefined) {
+		await settings.update(ActiveSetting.NarrationVoice, stored.voice, vscode.ConfigurationTarget.Global);
+	}
+	const speed = settings.inspect<number>(ActiveSetting.NarrationSpeed);
+	if (stored.narrationRate !== undefined && stored.narrationRate !== 1 && speed?.globalValue === undefined) {
+		await settings.update(ActiveSetting.NarrationSpeed, stored.narrationRate, vscode.ConfigurationTarget.Global);
+	}
 }
 
 function resolvePython(extensionPath: string): string {
@@ -38,10 +65,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(output);
 	const log = (line: string) => output.info(line);
 
-	let profile: LearningProfile = DEFAULT_PROFILE;
+	let profile: KnowledgeProfile = DEFAULT_PROFILE;
 	const profileStore = new ProfileStore(path.join(context.globalStorageUri.fsPath, 'profile.json'));
-	// Older saved profiles may lack newer fields.
-	profile = { ...DEFAULT_PROFILE, ...(await profileStore.read(DEFAULT_PROFILE)) };
+	// Older saved profiles may lack newer fields (`followClosely` was `wantToLearn`).
+	const stored = await profileStore.read<Partial<KnowledgeProfile> & { wantToLearn?: string }>(DEFAULT_PROFILE);
+	const { wantToLearn, voice: _voice, narrationRate: _rate, ...rest } = stored;
+	profile = { ...DEFAULT_PROFILE, ...rest, followClosely: rest.followClosely ?? wantToLearn ?? '' };
+	await migrateNarrationSettings(stored).catch(error => log(`couldn't move narration settings: ${error}`));
 
 	const emit = (event: ActiveEvent) => {
 		void vscode.commands.executeCommand(WORKBENCH_EVENT_COMMAND, event).then(undefined, () => undefined);
@@ -55,12 +85,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	register(ExtensionCommand.Synthesize, async (request: { text: string; voice?: string }): Promise<SynthesizeResult> => {
 		try {
-			return { wav: await narrator.synthesize(request.text, request.voice ?? profile.voice) };
+			const voice = request.voice || vscode.workspace.getConfiguration().get<string>(ActiveSetting.NarrationVoice, '') || 'default';
+			return { wav: await narrator.synthesize(request.text, voice) };
 		} catch (error) {
 			return { error: error instanceof Error ? error.message : String(error) };
 		}
 	});
-	register(ExtensionCommand.ProfileSet, async (next: LearningProfile) => {
+	register(ExtensionCommand.ProfileSet, async (next: KnowledgeProfile) => {
 		profile = { ...DEFAULT_PROFILE, ...next, version: 1 };
 		await profileStore.write(profile);
 		emit({ type: 'profile', profile });
@@ -84,8 +115,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	}
 
 	const root = folder.uri.fsPath;
-	const explanationWorkspace = path.join(storage, 'explain-workspaces', workspaceKey);
-	mkdirSync(explanationWorkspace, { recursive: true });
+	// Earlier versions explained from snapshot copies of the project; the copies are no longer used.
+	rmSync(path.join(storage, 'explain-workspaces'), { recursive: true, force: true });
 
 	const files = new WorkspaceFiles(root);
 	const tracker = new ChangeTracker(files);
@@ -109,13 +140,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		log,
 	});
 
-	const startHost = async (cwd: string) => {
+	// Both sessions run in the project; the explanation one under a read-only permission profile.
+	const startHost = async (role: 'coding' | 'explanation') => {
 		const bin = setup.locate();
 		if (!bin) {
 			throw new Error(`${provider.displayName} is not installed.`);
 		}
 		try {
-			return await provider.startHost(bin, { role: cwd === root ? 'coding' : 'explanation', cwd, env: await setup.agentEnv(), log: line => log(`[${provider.id}] ${line}`) });
+			return await provider.startHost(bin, { role, cwd: root, env: await setup.agentEnv(), log: line => log(`[${provider.id}] ${line}`) });
 		} catch (error) {
 			throw new Error(`Could not start ${provider.displayName} (${bin}): ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -130,18 +162,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		accountHint: async () => (await setup.usesApiKey()) ? 'API key' : undefined,
 		workspaceName: folder.name,
 		workspaceRoot: root,
-		explanationWorkspace,
 		backgroundTimeoutMs: () => Math.max(0, config<number>('walkthrough.backgroundTimeoutSeconds', 20)) * 1000,
 		minMeaningfulLines: () => config<number>('explain.minMeaningfulLines', 8),
 		draftQuietMs: () => Math.max(1, config<number>('explain.draftQuietSeconds', 6)) * 1000,
 		profile: () => profile,
 		emit,
 		log,
-		startCodingHost: () => startHost(root),
-		startExplanationHost: () => startHost(explanationWorkspace),
+		startCodingHost: () => startHost('coding'),
+		startExplanationHost: () => startHost('explanation'),
+		runSettings,
+		lastSessionId: () => context.workspaceState.get<string>(LAST_SESSION_KEY),
+		rememberSession: sessionId => void context.workspaceState.update(LAST_SESSION_KEY, sessionId),
 	}, tracker, history);
 	controller = active;
 	context.subscriptions.push({ dispose: () => void active.dispose() });
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+		if ([ActiveSetting.CodingModel, ActiveSetting.ExplanationModel].some(key => event.affectsConfiguration(key))) {
+			void active.applyRunSettings();
+		}
+	}));
 
 	// Capture every change on disk (file tools and shell commands alike).
 	const timers = new Map<string, NodeJS.Timeout>();
@@ -181,6 +220,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	register(ExtensionCommand.SetupSaveApiKey, (key: string) => setup.saveApiKey(key));
 	register(ExtensionCommand.SetupCancel, () => setup.cancel());
 	register(ExtensionCommand.Reconnect, () => active.reconnect());
+	register(ExtensionCommand.NewSession, () => active.newSession());
+	register(ExtensionCommand.ResumeSession, (sessionId: string) => active.resumeSession(sessionId));
 	register(ExtensionCommand.Elaborate, (request: ElaborateRequest) => active.elaborate(request));
 	register(ExtensionCommand.SetupRestart, () => {
 		setup.restart();

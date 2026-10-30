@@ -78,6 +78,19 @@ export interface AgentProvider {
 	isSignedIn?(bin: string, env: Record<string, string>): Promise<boolean | undefined>;
 }
 
+// Muse's built-in reminder observers (goal, verify, todo, skill) read each prompt and can push the
+// session to carry out the work it describes. The explanation prompt quotes the user's coding task, so
+// with them on, the explainer tries to do that task (its writes are refused) and its turn never ends.
+// They also add roughly a third to each turn's tokens.
+const REMINDERS = ['goal-reminder', 'verify-reminder', 'todo-reminder', 'skill-reminder'];
+// The explainer only reads: it gets Muse's file reading and search tools and nothing else (no shell,
+// writes, web, memory, goals, schedules or todos), so agent features can't pull it into doing work.
+const EXPLANATION_TOOLS = ['read_file', 'search'];
+const EXPLANATION_SERVE_ARGS = [
+	'-c', `runtime_capabilities=${JSON.stringify(Object.fromEntries(REMINDERS.map(id => [`plugin:tbh-reminders:reminder:${id}`, { enabled: false }])))}`,
+	'-c', `run.toolset=${JSON.stringify(EXPLANATION_TOOLS)}`,
+];
+
 const MUSE_INSTALLER_SH = 'https://dev.meta.ai/install.sh';
 const MUSE_INSTALLER_PS1 = 'https://dev.meta.ai/install.ps1';
 
@@ -89,8 +102,8 @@ export class MuseProvider implements AgentProvider {
 	readonly apiKeyEnvVar = 'META_API_KEY';
 	readonly apiKeyHelpUrl = 'https://dev.meta.ai/docs/muse-code/auth';
 	readonly signInMethods: readonly SignInMethodSpec[] = [
-		{ id: 'subscription', label: 'Muse subscription', description: 'Sign in with your browser using your Muse Code plan.' },
-		{ id: 'apiKey', label: 'Meta API key', description: 'Paste a key from the Meta developer console. It stays in your system keychain.' },
+		{ id: 'subscription', label: 'Muse subscription', description: 'Sign in with your browser.' },
+		{ id: 'apiKey', label: 'Meta API key', description: 'Pay as you go. Stored in your keychain.' },
 	];
 
 	locate(configuredPath: string | undefined): string | undefined {
@@ -121,7 +134,7 @@ export class MuseProvider implements AgentProvider {
 	readonly browserSignIn: BrowserSignInSpec = { mode: 'command', args: ['login'] };
 
 	startHost(bin: string, options: HostOptions): Promise<AgentHost> {
-		return MuseHost.spawn(bin, options.cwd, options.log, options.env);
+		return MuseHost.spawn(bin, options.cwd, options.log, options.env, options.role === 'explanation' ? EXPLANATION_SERVE_ARGS : []);
 	}
 
 	isAuthFailure(errorKind: string | undefined, message: string | undefined): boolean {

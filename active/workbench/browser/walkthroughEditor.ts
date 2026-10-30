@@ -35,11 +35,13 @@ import { WalkthroughInput } from './activeInputs.js';
 import { ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughPlayer } from './walkthroughPlayer.js';
-import { renderVisual, visualKindLabel } from './walkthroughVisuals.js';
+import { isRedundantDiff, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
 
 const $ = dom.$;
 const SMALL_FILE_LINES = 45;
 const CONTEXT_PADDING = 3;
+/** Focus ranges closer than this share one visible piece; farther apart, the lines between fold away. */
+const MERGE_GAP_LINES = 6;
 const SYMBOL_PATTERN = /^\s*(?:export\s+)?(?:default\s+)?(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+)*(?:async\s+)?(?:function\*?\s+|class\s+|interface\s+|def\s+|fn\s+|func\s+|type\s+|enum\s+)?(?<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*(?:\(|=\s*(?:async\s*)?\(|extends\b|implements\b|\{|:)/;
 const DECLARATION_PATTERN = /^\s*(?:export\s+)?(?:default\s+)?(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+)*(?:async\s+)?(?:function\*?|class|interface|def|fn|func|type|enum)\s+(?<name>[A-Za-z_$][\w$]*)/;
 const CONTROL_WORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'else', 'do', 'try', 'case', 'await', 'new', 'throw', 'const', 'let', 'var']);
@@ -115,9 +117,17 @@ export class WalkthroughEditor extends EditorPane {
 	private decorations: string[] = [];
 	private zoneIds: string[] = [];
 	private explanationZone: { id: string; zone: IViewZone; card: HTMLElement } | undefined;
+	private scenePieces: Array<{ start: number; end: number }> = [];
+	/** What changed in the shown version of the scene's file (none when showing the version before the change). */
+	private sceneChanges: LineChanges | undefined;
+	private sceneNewFile = false;
 	private renderedScene = -1;
 	private renderedSegment = -1;
 	private relayoutVisual: (() => void) | undefined;
+	/** The current scene's card is built once and then updated in place, so its transitions can play. */
+	private cardVisual: RenderedVisual | undefined;
+	private cardBuilt = false;
+	private feedbackAnswered = false;
 	private focusKey!: IContextKey<boolean>;
 	private player: WalkthroughPlayer | undefined;
 	private revealedRanges = new Set<string>();
@@ -229,6 +239,8 @@ export class WalkthroughEditor extends EditorPane {
 		this.renderedSegment = -1;
 		this.revealedRanges.clear();
 		this.disposeModels();
+		// Each walkthrough has its own tab; switching tabs switches which one plays.
+		this.activeService.selectWalkthrough(input.walkthrough);
 		this.bindPlayer();
 		this.inputStore.add(this.activeService.onDidChangePlayer(() => this.bindPlayer()));
 		this.inputStore.add(this.activeService.onDidChangeNarration(() => this.renderControls()));
@@ -257,7 +269,8 @@ export class WalkthroughEditor extends EditorPane {
 		};
 		const earlier = this.activeService.history.filter(turn => turn.walkthroughId).length;
 		action(Codicon.history, earlier > 1 ? localize('historyCount', "History ({0})", earlier) : localize('history', "History"), localize('historyTitle', "Replay an earlier walkthrough"), () => this.activeService.pickFromHistory());
-		action(Codicon.goToFile, localize('openFile', "Open File"), this.withKeybinding(localize('openFileTitle', "Pause and open the editable file at these lines"), WalkthroughCommandIds.OpenFile), () => this.activeService.openCurrentFile());
+		action(Codicon.goToFile, localize('openFile', "Open File"), this.withKeybinding(localize('openFileTitle', "Pause and open this file at these lines"), WalkthroughCommandIds.OpenFile), () => this.activeService.openCurrentFile());
+		action(Codicon.settingsGear, localize('settings', "Settings"), localize('settingsTitle', "Active Settings: models, effort, voice"), () => this.activeService.openSettings());
 	}
 
 	private readonly playerListener = this._register(new MutableDisposable());
@@ -280,6 +293,7 @@ export class WalkthroughEditor extends EditorPane {
 	}
 
 	override clearInput(): void {
+		this.activeService.setControlsHeight(0);
 		this.player?.pause();
 		this.activeService.stopSpeaking();
 		this.hideFeedback();
@@ -313,6 +327,9 @@ export class WalkthroughEditor extends EditorPane {
 		const chrome = this.header.offsetHeight + this.footer.offsetHeight;
 		this.codeEditor.layout({ width: dimension.width, height: Math.max(100, dimension.height - chrome) });
 		this.relayoutVisual?.();
+		if (this.isVisible()) {
+			this.activeService.setControlsHeight(this.footer.offsetHeight);
+		}
 	}
 
 	private disposeModels(): void {
@@ -365,27 +382,69 @@ export class WalkthroughEditor extends EditorPane {
 		this.zoneIds = [];
 		this.explanationZone = undefined;
 		this.relayoutVisual = undefined;
+		this.cardVisual = undefined;
+		this.cardBuilt = false;
 		this.decorations = this.codeEditor.deltaDecorations(this.decorations, []);
 		this.codeEditor.setHiddenAreas([], this);
 		this.sceneStore.clear();
 	}
 
-	private visibleRange(scene: Scene, model: ITextModel): { start: number; end: number } {
+	/**
+	 * The parts of the file a scene shows: each focus range with a little context. Distant ranges stay
+	 * separate (the lines between them fold away), so the card is never far from the code it's about.
+	 */
+	private visiblePieces(scene: Scene, model: ITextModel): Array<{ start: number; end: number }> {
 		const lineCount = model.getLineCount();
-		if (lineCount <= SMALL_FILE_LINES) {
-			return { start: 1, end: lineCount };
+		if (lineCount <= SMALL_FILE_LINES || this.revealedRanges.has(scene.id)) {
+			return [{ start: 1, end: lineCount }];
 		}
-		const key = `${scene.id}`;
-		if (this.revealedRanges.has(key)) {
-			return { start: 1, end: lineCount };
+		const ranges = (scene.focus.length ? scene.focus : [{ startLine: scene.anchorLine || 1, endLine: scene.anchorLine || 1 }])
+			.map(range => ({ start: Math.max(1, range.startLine - CONTEXT_PADDING), end: Math.min(lineCount, range.endLine + CONTEXT_PADDING) }))
+			.sort((a, b) => a.start - b.start);
+		const pieces: Array<{ start: number; end: number }> = [];
+		for (const range of ranges) {
+			const last = pieces[pieces.length - 1];
+			if (last && range.start - last.end <= MERGE_GAP_LINES + 1) {
+				last.end = Math.max(last.end, range.end);
+			} else {
+				pieces.push({ ...range });
+			}
 		}
-		const starts = scene.focus.map(range => range.startLine);
-		const ends = scene.focus.map(range => range.endLine);
-		let start = scene.context?.startLine ?? Math.min(...starts, scene.anchorLine || lineCount) - CONTEXT_PADDING;
-		let end = scene.context?.endLine ?? Math.max(...ends, scene.anchorLine) + CONTEXT_PADDING;
-		start = Math.max(1, Math.min(start, ...starts));
-		end = Math.min(lineCount, Math.max(end, ...ends, scene.anchorLine));
-		return { start, end };
+		// The planner's context may widen the outer edges a little, but never bridges a gap.
+		if (scene.context) {
+			pieces[0].start = Math.max(1, Math.min(pieces[0].start, Math.max(scene.context.startLine, pieces[0].start - MERGE_GAP_LINES)));
+			const last = pieces[pieces.length - 1];
+			last.end = Math.min(lineCount, Math.max(last.end, Math.min(scene.context.endLine, last.end + MERGE_GAP_LINES)));
+		}
+		return pieces;
+	}
+
+	/** The card follows the piece holding the focus being narrated (the first one by default). */
+	private cardLineFor(scene: Scene, focusIndex: number | undefined): number {
+		const pieces = this.scenePieces;
+		const focus = scene.focus[focusIndex ?? 0];
+		const line = focus ? focus.endLine : scene.anchorLine;
+		const piece = pieces.find(candidate => line >= candidate.start && line <= candidate.end) ?? pieces[pieces.length - 1];
+		return piece ? piece.end : line;
+	}
+
+	/** Moves the card when the narration moves to a focus in another part of the file. */
+	private placeCard(scene: Scene, focusIndex: number | undefined): void {
+		const zone = this.explanationZone;
+		if (!zone) {
+			return;
+		}
+		const line = this.cardLineFor(scene, focusIndex);
+		if (zone.zone.afterLineNumber === line) {
+			return;
+		}
+		this.codeEditor.changeViewZones(accessor => {
+			accessor.removeZone(zone.id);
+			this.zoneIds = this.zoneIds.filter(id => id !== zone.id);
+			zone.zone.afterLineNumber = line;
+			zone.id = accessor.addZone(zone.zone);
+			this.zoneIds.push(zone.id);
+		});
 	}
 
 	private renderScene(walkthrough: Walkthrough, sceneIndex: number): void {
@@ -405,16 +464,19 @@ export class WalkthroughEditor extends EditorPane {
 		this.sceneStore.value = store;
 
 		const lineCount = model.getLineCount();
-		const visible = this.visibleRange(scene, model);
+		const pieces = this.scenePieces = this.visiblePieces(scene, model);
+		// A brand-new file is all new: say so once instead of marking every line.
+		this.sceneNewFile = scene.version === 'final' && file.baseline === null;
+		this.sceneChanges = scene.version === 'final' && !this.sceneNewFile ? lineChanges(file) : undefined;
 		const hidden: IRange[] = [];
 		const placeholders: Array<{ after: number; start: number; end: number }> = [];
-		if (visible.start > 1) {
-			hidden.push(new Range(1, 1, visible.start - 1, 1));
-			placeholders.push({ after: 0, start: 1, end: visible.start - 1 });
-		}
-		if (visible.end < lineCount) {
-			hidden.push(new Range(visible.end + 1, 1, lineCount, 1));
-			placeholders.push({ after: visible.end, start: visible.end + 1, end: lineCount });
+		let next = 1;
+		for (const piece of [...pieces, { start: lineCount + 1, end: lineCount + 1 }]) {
+			if (piece.start > next) {
+				hidden.push(new Range(next, 1, piece.start - 1, 1));
+				placeholders.push({ after: next - 1, start: next, end: piece.start - 1 });
+			}
+			next = piece.end + 1;
 		}
 		this.codeEditor.setHiddenAreas(hidden, this);
 
@@ -432,17 +494,21 @@ export class WalkthroughEditor extends EditorPane {
 					this.renderedScene = -1;
 					this.render();
 				}));
-				const zone: IViewZone = { afterLineNumber: placeholder.after, heightInLines: 1.6, domNode: node, ordinal: placeholder.after === 0 ? 0 : 10_000, suppressMouseDown: false };
+				// Monaco hides a zone when the line after it is hidden; these sit right next to hidden ranges.
+				const zone: IViewZone = { afterLineNumber: placeholder.after, heightInLines: 1.6, domNode: node, ordinal: placeholder.after === 0 ? 0 : 10_000, suppressMouseDown: false, showInHiddenAreas: true };
 				this.zoneIds.push(accessor.addZone(zone));
 			}
 			const card = $('.active-explain-card');
 			const wrapper = $('.active-explain-zone');
 			wrapper.appendChild(card);
-			const zone: IViewZone = { afterLineNumber: Math.min(Math.max(scene.anchorLine, visible.start - 1), visible.end), heightInPx: 260, domNode: wrapper, ordinal: 5_000, suppressMouseDown: false };
+			const zone: IViewZone = { afterLineNumber: this.cardLineFor(scene, undefined), heightInPx: 260, domNode: wrapper, ordinal: 5_000, suppressMouseDown: false, showInHiddenAreas: true };
 			const id = accessor.addZone(zone);
 			this.zoneIds.push(id);
 			this.explanationZone = { id, zone, card };
 		});
+		// The card grows after it's laid out (highlighted code, KaTeX, streamed detail): keep its zone the same height.
+		const observer = store.add(new dom.DisposableResizeObserver('activeExplainCard', () => this.fitZoneToCard(), dom.getWindow(this.root)));
+		store.add(observer.observe(this.explanationZone!.card));
 
 		this.renderHeader(walkthrough, scene, model);
 	}
@@ -509,6 +575,27 @@ export class WalkthroughEditor extends EditorPane {
 				options: { description: 'active-focus', isWholeLine: true, className: current ? 'active-focus-line' : 'active-focus-line-secondary', stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges },
 			});
 		});
+		// Thin gutter marks, like source control's: new lines, changed lines, and where lines were removed.
+		const changes = this.sceneChanges;
+		if (changes) {
+			const mark = (line: number, className: string, hover: string) => decorations.push({
+				range: new Range(line, 1, line, 1),
+				options: { description: 'active-change', linesDecorationsClassName: className, linesDecorationsTooltip: hover },
+			});
+			for (const line of changes.added) {
+				if (line <= lineCount) {
+					mark(line, 'active-line-added', localize('lineAdded', "New in this change"));
+				}
+			}
+			for (const line of changes.modified) {
+				if (line <= lineCount) {
+					mark(line, 'active-line-modified', localize('lineModified', "Changed in this change"));
+				}
+			}
+			for (const line of changes.removedAfter) {
+				mark(Math.min(Math.max(line, 1), lineCount), line === 0 ? 'active-line-removed-above' : 'active-line-removed-below', localize('lineRemoved', "Lines removed here"));
+			}
+		}
 		if (focusLines.size) {
 			for (let line = 1; line <= lineCount; line++) {
 				if (!focusLines.has(line) && model.getLineLength(line) > 0) {
@@ -518,29 +605,52 @@ export class WalkthroughEditor extends EditorPane {
 		}
 		this.decorations = this.codeEditor.deltaDecorations(this.decorations, decorations);
 		this.renderCard(player.walkthrough, scene, state.nodes, state.reveal);
+		this.placeCard(scene, state.focus);
 		this.revealFocus(scene, state.focus);
 	}
 
 	private renderCard(walkthrough: Walkthrough, scene: Scene, nodes: readonly string[], reveal: number | undefined): void {
 		const zone = this.explanationZone!;
 		const card = zone.card;
+		if (this.cardBuilt) {
+			// Same scene, next narration segment: move highlights and text in place.
+			if (scene.visual && !this.cardVisual?.update && !isRedundantDiff(scene.visual, walkthrough.files)) {
+				// eslint-disable-next-line no-restricted-syntax
+				const host = card.querySelector<HTMLElement>('.visual');
+				if (host) {
+					dom.clearNode(host);
+					this.cardVisual = renderVisual(host, scene.visual, walkthrough.files, { nodes, reveal }, this.languageService);
+					this.relayoutVisual = this.cardVisual.layout;
+					void this.cardVisual.ready.then(() => this.layoutExplanationZone());
+				}
+			} else {
+				this.cardVisual?.update?.({ nodes, reveal });
+			}
+			this.updateNarrationText();
+			this.layoutExplanationZone();
+			return;
+		}
+		this.cardBuilt = true;
 		dom.clearNode(card);
 		const store = this.sceneStore.value!;
 		const head = dom.append(card, $('.card-head'));
-		dom.append(head, $('.eyebrow')).textContent = scene.label;
+		const eyebrow = dom.append(head, $('.eyebrow'));
+		dom.append(eyebrow, $('span')).textContent = scene.label;
+		this.renderChangeSummary(eyebrow, scene);
 		const moreDetail = dom.append(head, $('button.more-detail')) as HTMLButtonElement;
 		this.moreDetailButton = moreDetail;
 		store.add(dom.addDisposableListener(moreDetail, dom.EventType.CLICK, () => this.toggleDeeper(walkthrough, scene)));
 		dom.append(card, $('h2.title')).textContent = scene.title;
-		const kind = visualKindLabel(scene.visual);
+		const kind = isRedundantDiff(scene.visual, walkthrough.files) ? '' : visualKindLabel(scene.visual);
 		if (kind) {
 			const term = walkthrough.terms.find(candidate => scene.title.toLowerCase().includes(candidate.name.toLowerCase()) || scene.narration.some(segment => segment.text.toLowerCase().includes(candidate.name.toLowerCase())));
 			dom.append(card, $('.subtitle')).textContent = term ? `${term.name} · ${kind}` : kind;
 		}
 		this.relayoutVisual = undefined;
-		if (scene.visual) {
+		if (scene.visual && !isRedundantDiff(scene.visual, walkthrough.files)) {
 			const visualHost = dom.append(card, $('.visual'));
 			const rendered = renderVisual(visualHost, scene.visual, walkthrough.files, { nodes, reveal }, this.languageService);
+			this.cardVisual = rendered;
 			this.relayoutVisual = rendered.layout;
 			void rendered.ready.then(() => this.layoutExplanationZone());
 			if (scene.visual.caption) {
@@ -555,6 +665,38 @@ export class WalkthroughEditor extends EditorPane {
 		this.renderDeeper();
 		this.renderPending();
 		this.layoutExplanationZone();
+	}
+
+	/** "12 new · 3 changed" for the highlighted lines, keyed to the gutter marks. */
+	private renderChangeSummary(parent: HTMLElement, scene: Scene): void {
+		if (this.sceneNewFile) {
+			dom.append(dom.append(parent, $('span.change-summary')), $('span.change-chip.added')).textContent = localize('newFile', "New file");
+			return;
+		}
+		const changes = this.sceneChanges;
+		if (!changes) {
+			return;
+		}
+		let added = 0;
+		let modified = 0;
+		for (const range of scene.focus) {
+			for (let line = range.startLine; line <= range.endLine; line++) {
+				added += changes.added.has(line) ? 1 : 0;
+				modified += changes.modified.has(line) ? 1 : 0;
+			}
+		}
+		if (!added && !modified) {
+			dom.append(parent, $('span.change-summary.unchanged')).textContent = localize('unchangedLines', "Existing code");
+			return;
+		}
+		const summary = dom.append(parent, $('span.change-summary'));
+		if (added) {
+			dom.append(summary, $('span.change-chip.added')).textContent = localize('addedLines', "{0} new", added);
+		}
+		if (modified) {
+			dom.append(summary, $('span.change-chip.modified')).textContent = localize('modifiedLines', "{0} changed", modified);
+		}
+		summary.title = localize('changeSummaryTitle', "Lines in the highlighted code that this change added or modified. The same colors mark them in the gutter.");
 	}
 
 	/** Checks that hadn't finished when the walkthrough was made; they update live as the tasks report back. */
@@ -621,7 +763,7 @@ export class WalkthroughEditor extends EditorPane {
 			dom.clearNode(this.moreDetailButton);
 			dom.append(this.moreDetailButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(open ? Codicon.chevronUp : Codicon.listTree));
 			dom.append(this.moreDetailButton, $('span')).textContent = open ? localize('lessDetail', "Less detail") : localize('moreDetail', "More detail");
-			this.moreDetailButton.title = open ? localize('lessDetailTitle', "Hide the deeper explanation") : localize('moreDetailTitle', "Pause and re-explain this part in greater depth");
+			this.moreDetailButton.title = open ? localize('lessDetailTitle', "Hide the deeper explanation") : localize('moreDetailTitle', "Pause and explain this part in more depth");
 		}
 		host.classList.toggle('hidden', !open);
 		if (!open || !elaboration) {
@@ -673,9 +815,13 @@ export class WalkthroughEditor extends EditorPane {
 
 	// ------------------------------------------------------------------ detail feedback
 
-	/** Occasionally asks, at the end of a walkthrough, whether the level of detail suited the learner. */
+	/** Occasionally asks, at the end of a walkthrough, whether the level of detail suited them. */
 	private maybeAskForFeedback(): void {
 		const player = this.player;
+		if (player && player.state !== 'ended' && this.feedback && !this.feedbackAnswered) {
+			// They went back into the walkthrough: the question can wait.
+			this.hideFeedback();
+		}
 		if (!player || player.state !== 'ended' || this.feedbackFor === player.walkthrough.id) {
 			return;
 		}
@@ -687,9 +833,10 @@ export class WalkthroughEditor extends EditorPane {
 
 	private showFeedback(walkthrough: Walkthrough): void {
 		this.hideFeedback();
+		this.feedbackAnswered = false;
 		const panel = dom.append(this.root, $('.detail-feedback'));
 		this.feedback = panel;
-		dom.append(panel, $('.feedback-question')).textContent = localize('feedbackQuestion', "How was the level of detail in this walkthrough?");
+		dom.append(panel, $('.feedback-question')).textContent = localize('feedbackQuestion', "How was the level of detail?");
 		const options = dom.append(panel, $('.feedback-options'));
 		const choices: Array<[DetailFeedback, string]> = [
 			['tooMuch', localize('feedbackTooMuch', "Too much")],
@@ -700,19 +847,20 @@ export class WalkthroughEditor extends EditorPane {
 			const choice = dom.append(options, $('button.secondary')) as HTMLButtonElement;
 			choice.textContent = label;
 			this.feedbackStore.add(dom.addDisposableListener(choice, dom.EventType.CLICK, async () => {
+				this.feedbackAnswered = true;
 				await this.activeService.recordDetailFeedback(walkthrough, value);
 				const topics = walkthrough.terms.map(term => term.name).slice(0, 2);
 				dom.clearNode(panel);
 				dom.append(panel, $('.feedback-thanks')).textContent = value === 'right'
-					? localize('feedbackThanksRight', "Thanks. Active will keep explaining at this level.")
+					? localize('feedbackThanksRight', "Thanks. Active will keep this level.")
 					: value === 'tooMuch'
-						? (topics.length ? localize('feedbackThanksLessTopic', "Thanks. Future walkthroughs will go a little lighter, especially on {0}.", topics.join(' and ')) : localize('feedbackThanksLess', "Thanks. Future walkthroughs will go a little lighter."))
-						: (topics.length ? localize('feedbackThanksMoreTopic', "Thanks. Future walkthroughs will go a little deeper, especially on {0}.", topics.join(' and ')) : localize('feedbackThanksMore', "Thanks. Future walkthroughs will go a little deeper."));
+						? (topics.length ? localize('feedbackThanksLessTopic', "Thanks. Future walkthroughs will be a bit lighter, especially on {0}.", topics.join(' and ')) : localize('feedbackThanksLess', "Thanks. Future walkthroughs will be a bit lighter."))
+						: (topics.length ? localize('feedbackThanksMoreTopic', "Thanks. Future walkthroughs will go a bit deeper, especially on {0}.", topics.join(' and ')) : localize('feedbackThanksMore', "Thanks. Future walkthroughs will go a bit deeper."));
 				setTimeout(() => this.hideFeedback(), 3500);
 			}));
 		}
 		const dismiss = dom.append(panel, $('button.feedback-dismiss')) as HTMLButtonElement;
-		dismiss.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		dom.append(dismiss, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
 		dismiss.title = localize('feedbackDismiss', "Not now");
 		this.feedbackStore.add(dom.addDisposableListener(dismiss, dom.EventType.CLICK, () => this.hideFeedback()));
 	}
@@ -730,12 +878,19 @@ export class WalkthroughEditor extends EditorPane {
 		if (!player || !narration) {
 			return;
 		}
-		dom.clearNode(narration);
 		const scene = player.walkthrough.scenes[player.position.scene];
-		scene.narration.forEach((segment, index) => {
-			const span = dom.append(narration, $('span.segment'));
-			span.textContent = `${segment.text} `;
-			span.classList.add(index < player.position.segment ? 'spoken' : index === player.position.segment ? 'current' : 'upcoming');
+		const existing = narration.children;
+		if (existing.length !== scene.narration.length) {
+			dom.clearNode(narration);
+			for (const segment of scene.narration) {
+				dom.append(narration, $('span.segment')).textContent = `${segment.text} `;
+			}
+		}
+		// Only classes change from segment to segment, so the text eases between states.
+		[...narration.children].forEach((span, index) => {
+			span.classList.toggle('spoken', index < player.position.segment);
+			span.classList.toggle('current', index === player.position.segment);
+			span.classList.toggle('upcoming', index > player.position.segment);
 		});
 	}
 
@@ -745,16 +900,25 @@ export class WalkthroughEditor extends EditorPane {
 			return;
 		}
 		const layoutInfo = this.codeEditor.getLayoutInfo();
-		zone.card.style.width = `${Math.max(320, layoutInfo.contentWidth - 36)}px`;
+		zone.card.style.width = `${Math.max(220, layoutInfo.contentWidth - 36)}px`;
 		dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => {
 			this.relayoutVisual?.();
-			const height = zone.card.offsetHeight + 28;
-			if (height > 28 && Math.abs((zone.zone.heightInPx ?? 0) - height) > 1) {
-				zone.zone.heightInPx = height;
-				this.codeEditor.changeViewZones(accessor => accessor.layoutZone(zone.id));
-				dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => this.relayoutVisual?.());
-			}
+			this.fitZoneToCard();
 		});
+	}
+
+	/** Sizes the card's view zone to the card, so it never overlaps the code below or gets cut off. */
+	private fitZoneToCard(): void {
+		const zone = this.explanationZone;
+		if (!zone) {
+			return;
+		}
+		const height = zone.card.offsetHeight + 28;
+		if (height > 28 && Math.abs((zone.zone.heightInPx ?? 0) - height) > 1) {
+			zone.zone.heightInPx = height;
+			this.codeEditor.changeViewZones(accessor => accessor.layoutZone(zone.id));
+			dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => this.relayoutVisual?.());
+		}
 	}
 
 	private revealFocus(scene: Scene, focusIndex: number | undefined): void {
@@ -800,7 +964,7 @@ export class WalkthroughEditor extends EditorPane {
 		const rewind = button(localize('rewind', "← Rewind"), WalkthroughCommandIds.Rewind, localize('rewindTitle', "Back to the previous narration step"), () => player?.rewind());
 		rewind.disabled = !player || (player.position.scene === 0 && player.position.segment === 0);
 		const playLabel = !player ? localize('play', "▶ Play") : player.state === 'ended' ? localize('replay', "↺ Replay") : player.playing ? localize('pause', "⏸ Pause") : localize('resume', "▶ Resume");
-		const primary = button(playLabel, WalkthroughCommandIds.TogglePlayback, localize('toggleTitle', "Pause or resume the walkthrough (the coding agent keeps working)"), () => player?.toggle(), '.primary');
+		const primary = button(playLabel, WalkthroughCommandIds.TogglePlayback, localize('toggleTitle', "Pause or resume (the coding agent keeps working)"), () => player?.toggle(), '.primary');
 		primary.disabled = !player;
 		const next = button(localize('next', "Next →"), WalkthroughCommandIds.Advance, localize('nextTitle', "Skip to the next idea"), () => player?.advance());
 		next.disabled = !player || player.state === 'ended';
@@ -822,6 +986,10 @@ export class WalkthroughEditor extends EditorPane {
 
 	/** Header and footer heights depend on their content; keep the code editor sized to what remains. */
 	private relayoutChrome(): void {
+		// Floating buttons sit just above the playback controls, however many rows they wrap to.
+		if (this.isVisible()) {
+			this.activeService.setControlsHeight(this.footer.offsetHeight);
+		}
 		if (this.dimension) {
 			const chrome = this.header.offsetHeight + this.footer.offsetHeight;
 			const height = Math.max(100, this.dimension.height - chrome);

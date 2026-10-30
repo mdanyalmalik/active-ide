@@ -73,7 +73,7 @@ export class ActiveHistoryView extends ViewPane {
 		dom.clearNode(this.list);
 		const history = this.activeService.history;
 		if (!history.length) {
-			dom.append(this.list, $('.empty')).textContent = localize('noHistory', "No turns yet. Every coding turn is saved here, with or without a walkthrough.");
+			dom.append(this.list, $('.empty')).textContent = localize('noHistory', "No turns yet. Every coding turn is saved here.");
 			this.scrollable.scanDomNode();
 			return;
 		}
@@ -110,7 +110,7 @@ export class ActiveHistoryView extends ViewPane {
 		if (turn.walkthroughId) {
 			const replay = dom.append(actions, $('button.primary'));
 			replay.textContent = localize('replay', "Replay");
-			replay.title = localize('replayTitle', "Replay from the saved script; narration audio is regenerated");
+			replay.title = localize('replayTitle', "Replay from the saved script");
 			this.listStore.add(dom.addDisposableListener(replay, dom.EventType.CLICK, async () => {
 				const detail = await this.activeService.getHistory(turn.turnId);
 				if (detail?.walkthrough) {
@@ -137,7 +137,7 @@ export class ActiveHistoryView extends ViewPane {
 		const remove = dom.append(actions, $('button.secondary'));
 		remove.textContent = localize('delete', "Delete");
 		this.listStore.add(dom.addDisposableListener(remove, dom.EventType.CLICK, async () => {
-			const { confirmed } = await this.dialogService.confirm({ message: localize('confirmDeleteTurn', "Delete the saved history for turn {0}?", turn.index), detail: localize('confirmDeleteDetail', "Project files are not affected."), primaryButton: localize('deleteButton', "Delete") });
+			const { confirmed } = await this.dialogService.confirm({ message: localize('confirmDeleteTurn', "Delete history for turn {0}?", turn.index), detail: localize('confirmDeleteDetail', "Project files are not affected."), primaryButton: localize('deleteButton', "Delete") });
 			if (confirmed) {
 				await this.activeService.deleteHistory(turn.turnId);
 			}

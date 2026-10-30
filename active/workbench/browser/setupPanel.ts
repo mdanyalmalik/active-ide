@@ -62,8 +62,8 @@ export function renderSetupPanel(container: HTMLElement, setup: SetupState, prov
 		? localize('setupTitleInstall', "Set up {0}", provider.name)
 		: localize('setupTitleSignIn', "Sign in to {0}", provider.name);
 	dom.append(titles, $('p')).textContent = setup.reason
-		? localize('setupReason', "{0} needs you to sign in before it can keep working.", provider.name)
-		: localize('setupLead', "Active works alongside {0}: it writes the code, then Active walks you through what changed.", provider.name);
+		? localize('setupReason', "{0} needs you to sign in again.", provider.name)
+		: localize('setupLead', "{0} writes the code. Active walks you through what changed.", provider.name);
 
 	// Stepper
 	const steps: Array<{ id: SetupState['step']; label: string }> = [
@@ -106,9 +106,9 @@ export function renderSetupPanel(container: HTMLElement, setup: SetupState, prov
 		} else if (install.status === 'failed') {
 			const status = dom.append(body, $('.setup-status.error'));
 			icon(status, Codicon.error);
-			dom.append(status, $('span')).textContent = install.error ?? localize('installFailed', "The installer stopped before finishing.");
+			dom.append(status, $('span')).textContent = install.error ?? localize('installFailed', "The installer didn't finish.");
 		} else {
-			dom.append(body, $('p.setup-text')).textContent = localize('installExplain', "Active will run {0}'s official installer. It adds the command-line app for your user account only.", provider.name);
+			dom.append(body, $('p.setup-text')).textContent = localize('installExplain', "Runs {0}'s official installer for your user account.", provider.name);
 			const command = dom.append(body, $('.setup-command'));
 			icon(command, Codicon.terminal);
 			dom.append(command, $('code')).textContent = install.command ?? '';
@@ -162,7 +162,7 @@ export function renderSetupPanel(container: HTMLElement, setup: SetupState, prov
 	}
 
 	if (setup.method === 'apiKey') {
-		dom.append(body, $('p.setup-text')).textContent = localize('apiKeyExplain', "Paste your key. Active stores it in your system keychain and gives it to {0} only when it starts.", provider.name);
+		dom.append(body, $('p.setup-text')).textContent = localize('apiKeyExplain', "Stored in your system keychain.", provider.name);
 		const row = dom.append(body, $('.setup-key-row'));
 		const input = dom.append(row, $('input.setup-key')) as HTMLInputElement;
 		input.type = 'password';
@@ -191,7 +191,7 @@ export function renderSetupPanel(container: HTMLElement, setup: SetupState, prov
 
 	// Subscription: browser sign-in driven in the background.
 	if (signIn.status === 'idle') {
-		dom.append(body, $('p.setup-text')).textContent = localize('browserExplain', "Active will open {0}'s sign-in page in your browser. Approve it there, then come back here. No terminal needed.", provider.name);
+		dom.append(body, $('p.setup-text')).textContent = localize('browserExplain', "Opens {0}'s sign-in page in your browser.", provider.name);
 		button(dom.append(body, $('.setup-actions')), localize('signInBrowser', "Sign In with Browser"), 'primary', () => activeService.setupSignIn());
 	} else if (signIn.status === 'failed') {
 		const status = dom.append(body, $('.setup-status.error'));
@@ -207,7 +207,7 @@ export function renderSetupPanel(container: HTMLElement, setup: SetupState, prov
 		const status = dom.append(body, $('.setup-status'));
 		icon(status, waiting ? Codicon.globe : Codicon.loading, !waiting);
 		dom.append(status, $('span')).textContent = waiting
-			? localize('approveInBrowser', "Approve the sign-in in your browser, then come back here.")
+			? localize('approveInBrowser', "Approve in your browser, then come back here.")
 			: signIn.message ?? localize('startingSignIn', "Starting sign-in…");
 		if (signIn.code) {
 			const code = dom.append(body, $('.setup-code'));

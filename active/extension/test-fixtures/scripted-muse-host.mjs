@@ -119,7 +119,7 @@ async function runExplanation(session, turnId, prompt) {
 	let reply;
 	if (prompt.startsWith('You are answering')) {
 		const question = prompt.split('QUESTION\n')[1] ?? '';
-		const scene = /THE LEARNER PAUSED ON: "([^"]+)"/.exec(prompt)?.[1];
+		const scene = /THE DEVELOPER PAUSED ON: "([^"]+)"/.exec(prompt)?.[1];
 		const template = scenario.answers?.find(answer => question.toLowerCase().includes(answer.match));
 		if (question.startsWith('MORE DETAIL:')) {
 			// A deeper pass over the scene, assembled from what the prompt shows (this is a test double).
@@ -271,14 +271,26 @@ input.on('line', line => {
 		case 'initialized':
 			break;
 		case 'session/start': {
-			const readOnly = params.approvalMode === 'denyUnmatched';
-			if (params.permissionProfile && params.permissionProfile !== 'read-only') {
+			const readOnly = params.permissionProfile === ':read-only';
+			// Like real Muse Code, only catalog ids are accepted (`:read-only` is the built-in read-only profile).
+			if (params.permissionProfile && (params.permissionProfile !== ':read-only' || process.env.ACTIVE_SCRIPTED_NO_READ_ONLY)) {
 				send({ id, error: { code: -32030, message: 'permission_profile_unknown', data: { kind: 'commandRejected', retryable: false } } });
 				break;
 			}
 			const session = { id: randomUUID(), workspaceRoot: params.workspaceRoot, readOnly, tasks: new Map(), cancelled: new Set() };
 			sessions.set(session.id, session);
 			reply({ session: { sessionId: session.id, status: 'idle', workspaceRoot: params.workspaceRoot }, viewCursor: nextCursor() });
+			break;
+		}
+		case 'session/resume': {
+			// Sessions here live in memory; a resume after a restart reattaches to the id as if it were stored.
+			if (String(params.sessionId).startsWith('missing-')) {
+				send({ id, error: { code: -32010, message: `session ${params.sessionId} not found`, data: { kind: 'sessionNotFound', retryable: false } } });
+				break;
+			}
+			const session = sessions.get(params.sessionId) ?? { id: params.sessionId, workspaceRoot: process.cwd(), readOnly: false, tasks: new Map(), cancelled: new Set() };
+			sessions.set(session.id, session);
+			reply({ session: { sessionId: session.id, status: 'idle', workspaceRoot: session.workspaceRoot }, history: { mode: 'none', items: [] }, pendingRequests: [], viewCursor: nextCursor() });
 			break;
 		}
 		case 'turn/start': {
