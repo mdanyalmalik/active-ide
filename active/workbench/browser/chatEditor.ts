@@ -53,6 +53,10 @@ export class ActiveChatEditor extends EditorPane {
 	private intro!: HTMLElement;
 	private notices!: HTMLElement;
 	private transcript!: HTMLElement;
+	private working!: HTMLElement;
+	private workingLabel!: HTMLElement;
+	private workingTimer: ReturnType<typeof setInterval> | undefined;
+	private runningSince: number | undefined;
 	private stageLine!: HTMLElement;
 	private composerContext!: HTMLElement;
 	private textarea!: HTMLTextAreaElement;
@@ -101,6 +105,12 @@ export class ActiveChatEditor extends EditorPane {
 		this.introLead = dom.append(this.intro, $('p.lead'));
 		this.notices = dom.append(column, $('.active-chat-notices'));
 		this.transcript = dom.append(column, $('.active-chat-transcript'));
+		// Shown while a reply is on its way and nothing else on screen says so.
+		this.working = dom.append(column, $('.active-chat-working.hidden'));
+		this.working.setAttribute('role', 'status');
+		appendDots(this.working);
+		this.workingLabel = dom.append(this.working, $('span.working-label'));
+		this._register(toDisposable(() => this.stopWorkingTimer()));
 
 		// The dock stays put below the scrolling transcript: walkthrough status, composer, actions.
 		const dock = dom.append(dom.append(this.root, $('.active-chat-dock')), $('.active-chat-dock-column'));
@@ -141,8 +151,18 @@ export class ActiveChatEditor extends EditorPane {
 		this.footerRow = dom.append(dock, $('.active-chat-footer'));
 		dom.append(this.intro, $('p.active-chat-tagline')).textContent = localize('tagline', "Code, visuals and narration, right in the editor.");
 
-		this._register(this.activeService.onDidChangeChat(entry => entry ? this.renderEntry(entry, true) : this.renderTranscript()));
-		this._register(this.activeService.onDidChangeAgent(() => this.renderChrome()));
+		this._register(this.activeService.onDidChangeChat(entry => {
+			if (entry) {
+				this.renderEntry(entry, true);
+			} else {
+				this.renderTranscript();
+			}
+			this.renderWorking();
+		}));
+		this._register(this.activeService.onDidChangeAgent(() => {
+			this.renderChrome();
+			this.renderWorking();
+		}));
 		this._register(this.activeService.onDidChangeProfile(() => this.renderNotices()));
 		this._register(this.activeService.onDidChangeBriefing(() => this.renderNotices()));
 		this._register(this.activeService.onDidChangeWalkthroughStatus(() => this.renderStage()));
@@ -162,6 +182,7 @@ export class ActiveChatEditor extends EditorPane {
 		this.root.classList.add('entering');
 		this.renderTranscript();
 		this.renderChrome();
+		this.renderWorking();
 		this.renderHandoff();
 	}
 
@@ -606,7 +627,7 @@ export class ActiveChatEditor extends EditorPane {
 					const rendered = slot.store.add(this.markdownRenderer.render(new MarkdownString(escapeIdentifierUnderscores(entry.text))));
 					body.appendChild(rendered.element);
 				} else if (entry.status === 'streaming') {
-					body.textContent = '…';
+					appendDots(body);
 				}
 				if (entry.role === 'explainer' && entry.id.startsWith('note') && entry.text) {
 					this.renderNoteActions(node, entry, slot.store);
@@ -616,7 +637,7 @@ export class ActiveChatEditor extends EditorPane {
 			case 'tool': {
 				const icon = dom.append(node, $('span.tool-icon'));
 				const done = entry.status === 'completed';
-				const failed = entry.status && ['failed', 'rejected', 'timedOut', 'cancelled'].includes(entry.status);
+				const failed = entry.status && TOOL_FAILED.includes(entry.status);
 				icon.classList.add(...ThemeIcon.asClassNameArray(done ? Codicon.check : failed ? Codicon.error : entry.status === 'background' ? Codicon.clock : Codicon.loading));
 				if (!done && !failed && entry.status !== 'background') {
 					icon.classList.add('codicon-modifier-spin');
@@ -682,12 +703,73 @@ export class ActiveChatEditor extends EditorPane {
 		}
 	}
 
+	/**
+	 * The waiting indicator: while the agent is working, unless something on screen already shows progress
+	 * (text arriving, a tool's spinner) or the agent is waiting on the developer (an approval).
+	 */
+	private renderWorking(): void {
+		const agent = this.activeService.agent;
+		const running = agent.status === 'running';
+		if (!running) {
+			this.runningSince = undefined;
+		} else if (this.runningSince === undefined) {
+			this.runningSince = Date.now();
+		}
+		const last = this.activeService.chat.at(-1);
+		const shownElsewhere = !!last && (
+			(last.role === 'approval' && !last.approval?.resolved)
+			|| ((last.role === 'agent' || last.role === 'explainer') && last.status === 'streaming')
+			|| (last.role === 'tool' && !TOOL_SETTLED.includes(last.status ?? ''))
+		);
+		const visible = running && !shownElsewhere;
+		const wasVisible = !this.working.classList.contains('hidden');
+		this.working.classList.toggle('hidden', !visible);
+		if (!visible) {
+			this.stopWorkingTimer();
+			return;
+		}
+		this.updateWorkingLabel();
+		this.workingTimer ??= setInterval(() => this.updateWorkingLabel(), 1000);
+		if (!wasVisible) {
+			this.revealBottom();
+		}
+	}
+
+	private updateWorkingLabel(): void {
+		const seconds = Math.floor((Date.now() - (this.runningSince ?? Date.now())) / 1000);
+		const name = this.activeService.agent.provider.shortName;
+		// The time only appears once the wait is long enough to wonder about.
+		this.workingLabel.textContent = seconds < 10
+			? localize('agentWorking', "{0} is working", name)
+			: localize('agentWorkingFor', "{0} is working · {1}", name, `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`);
+	}
+
+	private stopWorkingTimer(): void {
+		if (this.workingTimer !== undefined) {
+			clearInterval(this.workingTimer);
+			this.workingTimer = undefined;
+		}
+	}
+
 	private revealBottom(): void {
 		this.scrollable.scanDomNode();
 		dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => {
 			this.scrollable.scanDomNode();
 			this.scrollable.setScrollPosition({ scrollTop: this.content.scrollHeight });
 		});
+	}
+}
+
+const TOOL_FAILED = ['failed', 'rejected', 'timedOut', 'cancelled'];
+/** Tool states without a spinner beside them. */
+const TOOL_SETTLED = ['completed', 'background', ...TOOL_FAILED];
+
+/** Three dots that pulse in turn: a reply is on its way. */
+function appendDots(parent: HTMLElement): void {
+	const dots = dom.append(parent, $('span.active-typing-dots'));
+	dots.setAttribute('aria-hidden', 'true');
+	for (let index = 0; index < 3; index++) {
+		dom.append(dots, $('span'));
 	}
 }
 

@@ -5,7 +5,6 @@
 
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Emitter } from '../../../../base/common/event.js';
-import { basename } from '../../../../base/common/path.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
@@ -46,6 +45,8 @@ export class WalkthroughInput extends EditorInput {
 	static readonly ID = 'workbench.input.activeWalkthrough';
 
 	private readonly _onDidChangeFile = this._register(new Emitter<void>());
+	/** The captured file on screen changed (Explorer outlines it). */
+	readonly onDidChangeFile = this._onDidChangeFile.event;
 	private currentFile: string;
 
 	constructor(readonly walkthrough: Walkthrough) {
@@ -65,7 +66,12 @@ export class WalkthroughInput extends EditorInput {
 		return EditorInputCapabilities.Readonly | EditorInputCapabilities.Singleton;
 	}
 
-	/** The tab shows the captured file currently on screen. */
+	/** The workspace-relative path of the captured file currently on screen. */
+	get file(): string {
+		return this.currentFile;
+	}
+
+	/** The tab's tooltip names the captured file currently on screen. */
 	setCurrentFile(file: string): void {
 		if (file !== this.currentFile) {
 			this.currentFile = file;
@@ -74,16 +80,18 @@ export class WalkthroughInput extends EditorInput {
 		}
 	}
 
+	// The file is already in the walkthrough's own file strip, so the tab just says what it is.
 	override getName(): string {
-		return this.currentFile ? basename(this.currentFile) : localize('walkthrough', "Walkthrough");
+		return localize('walkthrough', "Walkthrough");
 	}
 
+	/** Told apart by the task when two walkthroughs are open. */
 	override getDescription(): string {
-		return localize('activeWalkthrough', "Active walkthrough");
+		return this.walkthrough.title;
 	}
 
 	override getTitle(): string {
-		return localize('walkthroughTitle', "{0} — Active walkthrough", this.getName());
+		return this.currentFile ? localize('walkthroughTitle', "Walkthrough — {0}", this.currentFile) : this.getName();
 	}
 
 	override getIcon(): ThemeIcon {

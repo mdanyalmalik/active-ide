@@ -26,7 +26,6 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
-import { IExplorerService } from '../../files/browser/files.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
 import { ActiveEvent, ActiveSetting, Briefing, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
@@ -307,7 +306,6 @@ export class ActiveService extends Disposable implements IActiveService {
 		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspaceTrustManagementService private readonly trustService: IWorkspaceTrustManagementService,
-		@IExplorerService private readonly explorerService: IExplorerService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
@@ -916,7 +914,6 @@ export class ActiveService extends Disposable implements IActiveService {
 				await this.paneCompositeService.openPaneComposite(EXPLORER_VIEWLET_ID, ViewContainerLocation.Sidebar, false);
 			}
 		});
-		this.revealChangedFiles(walkthrough);
 		const player = this.player;
 		if (playDelayMs > 0) {
 			// Let the walkthrough settle on screen before narration starts.
@@ -925,20 +922,6 @@ export class ActiveService extends Disposable implements IActiveService {
 		if (player && player === this.player) {
 			player.play();
 		}
-	}
-
-	/** Expands Explorer to the files this walkthrough covers so their change counts are visible. */
-	private revealChangedFiles(walkthrough: Walkthrough): void {
-		const folder = this.workspaceService.getWorkspace().folders[0];
-		if (!folder) {
-			return;
-		}
-		const files = Object.keys(walkthrough.files).filter(path => walkthrough.files[path].final !== null);
-		void (async () => {
-			for (const path of files.reverse()) {
-				await this.explorerService.select(folder.toResource(path), true).catch(() => undefined);
-			}
-		})();
 	}
 
 	async resumeWalkthrough(): Promise<void> {

@@ -437,6 +437,67 @@
 	border-left-color: var(--active-accent);
 }
 
+/* Waiting for a reply: three dots that pulse in turn, with how long it's been. */
+.monaco-workbench .active-chat-working {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 14px;
+	padding: 6px 0 6px 22px;
+	border-left: 2px solid var(--active-border);
+	color: var(--active-muted);
+	font-size: 13px;
+	animation: active-working-in 220ms ease-out;
+}
+
+.monaco-workbench .active-chat-working.hidden {
+	display: none;
+}
+
+.monaco-workbench .active-typing-dots {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 1em;
+}
+
+.monaco-workbench .active-typing-dots span {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--active-accent);
+	opacity: 0.3;
+	animation: active-typing-dot 1.2s ease-in-out infinite;
+}
+
+.monaco-workbench .active-typing-dots span:nth-child(2) {
+	animation-delay: 0.15s;
+}
+
+.monaco-workbench .active-typing-dots span:nth-child(3) {
+	animation-delay: 0.3s;
+}
+
+@keyframes active-typing-dot {
+	0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+	30% { opacity: 1; transform: translateY(-3px); }
+}
+
+@keyframes active-working-in {
+	from { opacity: 0; transform: translateY(4px); }
+	to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench .active-chat-working {
+		animation: none;
+	}
+	.monaco-workbench .active-typing-dots span {
+		animation-duration: 2.4s;
+		transform: none !important;
+	}
+}
+
 .monaco-workbench .active-chat-transcript .note-actions {
 	display: flex;
 	gap: 14px;
@@ -2716,8 +2777,10 @@
 /* ------------------------------------------------------------------ explorer: which change counts */
 
 /* A header-only view: no twisty (there's nothing to expand), the switch sits in the header. */
-.monaco-workbench .pane.active-change-counts-pane > .pane-header .twisty-container {
-	display: none;
+.monaco-workbench .pane.active-change-counts-pane > .pane-header .twisty-container,
+/* The pane has no actions; its (empty) toolbar appearing on hover would split the space and shift the switch. */
+.monaco-workbench .pane.active-change-counts-pane > .pane-header > .actions {
+	display: none !important;
 }
 
 .monaco-workbench .pane.active-change-counts-pane > .pane-header {
@@ -2761,4 +2824,51 @@
 .monaco-workbench .active-change-counts-bar .counts-option:disabled {
 	opacity: 0.5;
 	cursor: default;
+}
+
+/* Explorer: the outline on the file the walkthrough is showing. It sits on the row (not a highlight, which
+   would read as Explorer's own selection) and slides from file to file. */
+.monaco-workbench .monaco-list-rows > .active-explorer-outline {
+	position: absolute;
+	top: 0;
+	left: 2px;
+	right: 2px;
+	box-sizing: border-box;
+	border: 1px solid var(--vscode-foreground);
+	border-radius: 4px;
+	pointer-events: none;
+	z-index: 1;
+	opacity: 0;
+	scale: 0.97;
+	transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 200ms ease-out, scale 200ms ease-out;
+}
+
+.vs-dark .monaco-workbench .monaco-list-rows > .active-explorer-outline,
+.monaco-workbench.vs-dark .monaco-list-rows > .active-explorer-outline,
+.hc-black .monaco-workbench .monaco-list-rows > .active-explorer-outline,
+.monaco-workbench.hc-black .monaco-list-rows > .active-explorer-outline {
+	border-color: rgba(255, 255, 255, 0.9);
+}
+
+.monaco-workbench .monaco-list-rows > .active-explorer-outline.visible {
+	opacity: 1;
+	scale: 1;
+}
+
+.monaco-workbench .monaco-list-rows > .active-explorer-outline.placing {
+	transition: none;
+}
+
+/* Copies of a closed folder's rows, fading out under the rows that slide up. */
+.monaco-workbench .monaco-list-rows > .active-tree-ghost {
+	pointer-events: none;
+}
+
+/* A folder's arrow turns while it opens or closes. */
+.monaco-workbench .monaco-list-rows.active-tree-animating .monaco-tl-twistie::before {
+	transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.monaco-workbench.monaco-reduce-motion .monaco-list-rows > .active-explorer-outline {
+	transition: opacity 120ms linear;
 }

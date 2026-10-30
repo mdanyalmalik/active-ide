@@ -104,6 +104,21 @@ patch(
     "registerDecorationsFilter(): IDisposable { return Disposable.None; }",
 )
 
+# 7. Active's walkthrough guides the Explorer: it outlines the file being explained and opens the folders
+#    on the way to it (closing them again afterwards). It needs the Explorer's tree and where a row sits.
+patch(
+    "src/vs/base/browser/ui/tree/asyncDataTree.ts",
+    "\tgetRelativeTop(element: T): number | null {\n\t\treturn this.tree.getRelativeTop(this.getDataNode(element));\n\t}\n",
+    "\tgetRelativeTop(element: T): number | null {\n\t\treturn this.tree.getRelativeTop(this.getDataNode(element));\n\t}\n\n\t/** The element's top in the tree's content, or `undefined` when it isn't shown (Active). */\n\tgetElementTop(element: T): number | undefined {\n\t\treturn this.nodes.has(element) ? this.tree.getElementTop(this.getDataNode(element)) : undefined;\n\t}\n",
+    "getElementTop(element: T): number | undefined {",
+)
+patch(
+    "src/vs/workbench/contrib/files/browser/views/explorerView.ts",
+    "\thasFocus(): boolean {\n",
+    "\t/** The files tree, for Active's walkthrough guide (an outline on the file being explained). */\n\tget activeTree(): WorkbenchCompressibleAsyncDataTree<ExplorerItem | ExplorerItem[], ExplorerItem, FuzzyScore> {\n\t\treturn this.tree;\n\t}\n\n\thasFocus(): boolean {\n",
+    "get activeTree(): WorkbenchCompressibleAsyncDataTree",
+)
+
 # 4. Branding.
 product_path = root / "product.json"
 product = json.loads(product_path.read_text())

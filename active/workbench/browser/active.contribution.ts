@@ -47,6 +47,7 @@ import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, Acti
 import { ActiveChatEditor } from './chatEditor.js';
 import { ACTIVE_CHANGE_COUNTS_VIEW_ID, ChangeCountsBar, explorerChangeCountsDescriptor } from './explorerStats.js';
 import { AgentDecorations, AgentQuickDiff } from './agentChanges.js';
+import { ExplorerGuide } from './explorerGuide.js';
 import { VIEW_CONTAINER as EXPLORER_VIEW_CONTAINER } from '../../files/browser/explorerViewlet.js';
 import { ActiveHistoryView } from './historyView.js';
 import { KnowledgeProfileEditor } from './profileEditor.js';
@@ -668,3 +669,4 @@ registerWorkbenchContribution2(ActiveWelcomeDialog.ID, ActiveWelcomeDialog, Work
 registerWorkbenchContribution2(ActiveStatusBar.ID, ActiveStatusBar, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentQuickDiff.ID, AgentQuickDiff, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentDecorations.ID, AgentDecorations, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(ExplorerGuide.ID, ExplorerGuide, WorkbenchPhase.AfterRestored);
