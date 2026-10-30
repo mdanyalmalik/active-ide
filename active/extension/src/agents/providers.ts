@@ -81,13 +81,27 @@ export interface AgentProvider {
 // Muse's built-in reminder observers (goal, verify, todo, skill) read each prompt and can push the
 // session to carry out the work it describes. The explanation prompt quotes the user's coding task, so
 // with them on, the explainer tries to do that task (its writes are refused) and its turn never ends.
-// They also add roughly a third to each turn's tokens.
-const REMINDERS = ['goal-reminder', 'verify-reminder', 'todo-reminder', 'skill-reminder'];
+// They also add roughly a third to each turn's tokens. The memory reminder (on by default for the
+// muse-spark models) would feed it the coding agent's Muse memory; the explainer has its own, kept by
+// Active. The scope reminder is another helper model the explainer doesn't need.
+// Muse knows each reminder by three aliases (its bundled-plugin id, where the memory reminder is
+// `memory`, and its own plugin name) and accepts any of them; all are set, so whichever one this
+// Muse version checks is off. Unknown ids are ignored, not refused (checked offline with `--provider echo`).
+const REMINDERS: Record<string, string> = {
+	'goal-reminder': 'goal-reminder',
+	'verify-reminder': 'verify-reminder',
+	'todo-reminder': 'todo-reminder',
+	'skill-reminder': 'skill-reminder',
+	'memory-reminder': 'memory',
+	'scope-reminder': 'scope-reminder',
+};
+const REMINDERS_OFF = Object.fromEntries(Object.entries(REMINDERS).flatMap(([name, bundled]) =>
+	[`plugin:tbh-reminders:reminder:${bundled}`, `plugin:tbh-reminders:${bundled}`, `plugin:${name}:reminder:${name}`].map(key => [key, { enabled: false }])));
 // The explainer only reads: it gets Muse's file reading and search tools and nothing else (no shell,
 // writes, web, memory, goals, schedules or todos), so agent features can't pull it into doing work.
 const EXPLANATION_TOOLS = ['read_file', 'search'];
 const EXPLANATION_SERVE_ARGS = [
-	'-c', `runtime_capabilities=${JSON.stringify(Object.fromEntries(REMINDERS.map(id => [`plugin:tbh-reminders:reminder:${id}`, { enabled: false }])))}`,
+	'-c', `runtime_capabilities=${JSON.stringify(REMINDERS_OFF)}`,
 	'-c', `run.toolset=${JSON.stringify(EXPLANATION_TOOLS)}`,
 ];
 

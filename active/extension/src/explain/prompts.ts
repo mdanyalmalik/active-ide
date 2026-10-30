@@ -22,6 +22,8 @@ export interface PlanningContext {
 	readonly preferNotes: boolean;
 	/** Set when the turn is explained in chapters: this one's number and the chapters already shown. */
 	readonly chapter?: { readonly index: number; readonly earlier: ReadonlyArray<{ readonly title: string; readonly summary: string }> };
+	/** The explainer's memory (`ExplainerMemory.describe`), if any. */
+	readonly memory?: string;
 }
 
 const MAX_FILE_CHARS = 24000;
@@ -91,9 +93,11 @@ export function describeProfile(profile: KnowledgeProfile): string {
 }
 
 const SCHEMA = `{
-  "format": "walkthrough"|"note"|"skip", // see LENGTH; "note" and "skip" need only "note"/"reason"
+  "format": "walkthrough"|"note"|"skip", // see LENGTH; "skip" needs only "reason"; "note" needs "note", "title" and "at"
   "reason"?: string,               // one line: why this format and length suit this developer
-  "note"?: string,                 // format "note": one or two plain sentences shown in chat
+  "note"?: string,                 // format "note": one or two plain sentences, shown in chat, read aloud and shown beside the code
+  "at"?: { "file": string, "focus": [{ "startLine": n, "endLine": n }], "anchorLine": n }, // format "note": the lines the note is about
+  "remember"?: [{ "scope": "personal"|"project", "note": string, "replaces"?: memoryId }], // any format: see MEMORY
   "title": string,                 // short headline for the whole walkthrough
   "summary": string,               // 1-2 sentences
   "terms": [{ "name": string, "meaning": string, "codeSymbol"?: string }],
@@ -154,6 +158,7 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 		`Produce a walkthrough of this turn's code change for the developer below as a single JSON object matching this schema (reply with only the JSON in one \`\`\`json block):\n${SCHEMA}`,
 		EXPLAINING,
 		`DEVELOPER PROFILE\n${describeProfile(context.profile)}\nAdapt what you cover, detail, vocabulary and pacing to this profile: skim what they want skimmed, spend scenes on what they follow closely, and don't explain what they already know well. ${context.profile.math === 'avoid' ? 'Avoid equations.' : ''}`,
+		memorySection(context.memory, true),
 		lengthGuidance(context),
 		`TASK (turn ${context.turnIndex})\n${context.task}`,
 		`AGENT MESSAGES\n${context.agentMessages.join('\n---\n') || '(none)'}`,
@@ -174,12 +179,39 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 	return sections.filter(Boolean).join('\n\n');
 }
 
+/**
+ * The explainer's memory in a prompt, and the rule that goes with it: what memory says was explained or is
+ * known isn't explained again. `canRemember`: the reply format has a `remember` field.
+ */
+export function memorySection(memory: string | undefined, canRemember: boolean): string {
+	const use = canRemember
+		? `Use it to avoid repeating yourself: don't explain again what these notes say you already explained or the developer already knows or asked about. At most refer back to it in a clause ("the same retry budget as before") and spend the time on what's new. If this change contradicts a note, say so.`
+		// A question always gets its answer, even about something covered before.
+		: `Use it for context: answer what they ask even if it was covered before, but connect to what they already know instead of re-teaching it, and don't repeat background these notes show they have.`;
+	const save = canRemember
+		? `\nAdd to it with "remember" (at most 3 short notes, only what will matter in later explanations): a concept you explained to them, so it isn't explained again; what they showed they know or don't ("personal"); a lasting fact about this project's design ("project"). Never save something these notes already say; to update a note, give its id in "replaces". Leave "remember" out when there's nothing new.`
+		: '';
+	return memory
+		? `MEMORY (notes from earlier explanations, oldest first; ids in brackets)\n${memory}\n${use}${save}`
+		: canRemember ? `MEMORY\n(empty)${save}` : '';
+}
+
+/** Asks the explainer to condense its memory once it has grown too long to keep passing in full. */
+export function buildMemoryCondensePrompt(memory: string, size: number, target: number): string {
+	return [
+		`MEMORY CONDENSING. Your memory of this developer and project (below) is ${size} characters, too long to keep passing to every explanation. Rewrite it as fewer, shorter notes, under ${target} characters in total.`,
+		`Keep everything that will change how you explain things later: what you've already explained to them (so it isn't explained again), what they know, don't know or keep asking about, how they like explanations, and lasting facts about the project's design. Merge duplicates and related notes, fold their individual questions into what they show about the developer, and drop notes that were superseded or no longer matter. Don't invent anything that isn't in the notes. Keep each note's scope: "personal" is about the developer across projects, "project" is about this codebase.`,
+		`Reply with only JSON: {"notes": [{"scope": "personal"|"project", "note": string}]}`,
+		`MEMORY (oldest first)\n${memory}`,
+	].join('\n\n');
+}
+
 /** LENGTH: the explainer decides whether and how much to explain, from the profile and the change. */
 function lengthGuidance(context: PlanningContext): string {
 	return `LENGTH (your decision)
 Decide how much this change deserves for this developer, from their profile, the size and kind of change, and how they asked:
 - "skip": nothing here is worth their attention (mechanical, or entirely in areas they skim or know well). Give a one-line "reason".
-- "note": one or two sentences in chat are enough (a small, self-explanatory change). Put them in "note". The note appears right under the coding agent's own final message, so it must add something that message doesn't say for this developer (why it matters, a caveat, what to check). If it would only restate the agent's summary, choose "skip" with the reason "the agent's summary covers it".
+- "note": one or two sentences are enough (a small, self-explanatory change). Put them in "note", a short "title", and in "at" the lines of the final version they're about (the note is also shown beside those lines). Write it to be read aloud: plain sentences, no markdown. The note appears right under the coding agent's own final message, so it must add something that message doesn't say for this developer (why it matters, a caveat, what to check). If it would only restate the agent's summary, choose "skip" with the reason "the agent's summary covers it".
 - "walkthrough": as many scenes as the change needs for them, no more: one scene is fine for a focused change; a large or subtle change in an area they follow closely can take many. Never pad to reach a count, and don't give tests or routine follow-ups their own scenes unless they matter to this developer.
 ${context.preferNotes ? 'Lean toward "note" for small changes and short, specific requests: when the request names one specific change (for example "change the default to 8") and the diff does exactly that, plus tests or docs that confirm it, choose "note" unless something in it is surprising or touches what they follow closely. Tests that just confirm the change are worth a clause in the note, not a scene.' : ''}`.trim();
 }
@@ -265,14 +297,23 @@ export function buildRepairPrompt(errors: readonly string[]): string {
 }
 
 /** Asks the read-only explanation session to re-explain one scene in greater depth. */
-export function buildElaborationPrompt(walkthrough: Walkthrough, sceneId: string, profile: KnowledgeProfile): string {
+export function buildElaborationPrompt(walkthrough: Walkthrough, sceneId: string, profile: KnowledgeProfile, memory?: string): string {
 	const scene = walkthrough.scenes.find(candidate => candidate.id === sceneId);
 	const question = `MORE DETAIL: Re-explain "${scene?.title ?? 'this part'}" in greater depth than the walkthrough did. Go a level deeper: how the focused lines work step by step, why they are written this way, edge cases and what would break if they were different. Assume they understood the short version. Use 2-4 short paragraphs of plain spoken prose (it will be read aloud), no headings or bullet lists, and refer to code by name rather than pasting it.`;
-	return buildQuestionPrompt(question, walkthrough, sceneId, profile);
+	return buildQuestionPrompt(question, walkthrough, sceneId, profile, memory);
 }
 
-export function buildQuestionPrompt(question: string, walkthrough: Walkthrough | undefined, sceneId: string | undefined, profile: KnowledgeProfile): string {
+/** A question asked from a walkthrough card: answered beside the scene and read aloud, so it's spoken prose. */
+export function buildSpokenQuestionPrompt(question: string, walkthrough: Walkthrough, sceneId: string, profile: KnowledgeProfile, memory?: string): string {
+	return buildQuestionPrompt(`${question}\n\n(Answer in 1-3 short paragraphs of plain spoken prose; it will be read aloud. No headings, bullet lists or pasted code: refer to code by name.)`, walkthrough, sceneId, profile, memory);
+}
+
+export function buildQuestionPrompt(question: string, walkthrough: Walkthrough | undefined, sceneId: string | undefined, profile: KnowledgeProfile, memory?: string): string {
 	const parts = [`You are answering a developer's question inside Active. You only read; never modify files. Answer conversationally and concisely in plain text (short code snippets are fine). Ground claims in the captured code; say so when something is not observed. You run in the live project, which may have changed since a walkthrough was captured: when they differ, the captured code below is what the walkthrough explained.`, `DEVELOPER PROFILE\n${describeProfile(profile)}`];
+	const remembered = memorySection(memory, false);
+	if (remembered) {
+		parts.push(remembered);
+	}
 	if (walkthrough) {
 		const scene = walkthrough.scenes.find(candidate => candidate.id === sceneId);
 		parts.push(`CURRENT WALKTHROUGH: ${walkthrough.title} — ${walkthrough.summary}\nTask: ${walkthrough.task}\nScenes: ${walkthrough.scenes.map((candidate, index) => `${index + 1}. ${candidate.title}`).join('; ')}`);

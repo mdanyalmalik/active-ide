@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
+import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
 import { ActiveEvent, ActiveSetting, AgentRunSettings, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
@@ -166,6 +167,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		checkpointMs: () => Math.max(1, config<number>('explain.checkpointMinutes', 5)) * 60_000,
 		chapterMs: () => Math.max(1, config<number>('explain.chapterMinutes', 10)) * 60_000,
 		preferNotes: () => config<boolean>('explain.preferNotesForSmallChanges', true),
+		// The explainer's own memory: personal notes follow the developer across folders, project notes stay with this one.
+		memory: new ExplainerMemory({ personal: path.join(storage, 'explainer-memory.json'), project: path.join(storage, 'explainer-memory', `${workspaceKey}.json`) }),
 		explanationsEnabled: () => config<string>('explain.mode', 'auto') !== 'off',
 		profile: () => profile,
 		emit,
@@ -226,6 +229,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	register(ExtensionCommand.Brief, (request: BriefingRequest) => active.brief(request));
 	register(ExtensionCommand.ResumeSession, (sessionId: string) => active.resumeSession(sessionId));
 	register(ExtensionCommand.Elaborate, (request: ElaborateRequest) => active.elaborate(request));
+	register(ExtensionCommand.GitChanges, () => active.gitChanges());
+	register(ExtensionCommand.AgentBaseline, (path: string) => active.agentBaseline(path));
+	register(ExtensionCommand.MemoryGet, () => active.memoryNotes());
+	register(ExtensionCommand.MemoryDelete, (id?: string) => active.forget(id));
 	register(ExtensionCommand.SetupRestart, () => {
 		setup.restart();
 		active.refreshAgentState();

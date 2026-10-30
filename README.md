@@ -61,7 +61,7 @@ Starts Active as a brand-new install: no settings, history, knowledge profile or
 scripts/run-scripted-demo.sh
 ```
 
-This runs Active against `active/extension/test-fixtures/scripted-muse-host.mjs`. It is a **test double, not Muse Code**: a scripted MSP host that makes real edits and runs real commands in a fresh copy of `demo/ledger-api`, then answers explanation requests with the walkthrough templates in `demo/scenarios/ledger.json`. The chat header shows `scripted-muse-host (test double)`. Try these tasks:
+This runs Active against `active/extension/test-fixtures/scripted-muse-host.mjs`. It is a **test double, not Muse Code**: a scripted MSP host that makes real edits and runs real commands in a fresh copy of `demo/ledger-api`, then answers explanation requests with the walkthrough templates in `demo/scenarios/ledger.json`. The chat header shows `scripted-muse-host (test double)`. It uses its own profile in `.active-dev/scripted-user-data`, because the Muse binary path is a machine setting that workspace settings can't override. Try these tasks:
 
 | Task | Exercises |
 | --- | --- |
@@ -136,12 +136,18 @@ demo/                           sample project + scripted scenarios for the test
   - load the contribution
   - allow `blob:` media for in-memory narration audio
   - set `autoplayPolicy` so narration can start on handoff
+  - put Active's settings first in the Settings editor
+  - add a filter to the file decorations service (`registerDecorationsFilter`), so the Explorer's "Agent" mode can hide git's change decorations in the Explorer, tabs and breadcrumbs
   - branding
 
 ## Tests
 
 ```sh
-cd active/extension && npm test       # 34 tests
+cd active/extension && npm test       # 76 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, flows)
+scripts/sync.sh && (cd vscode && npm run build-fast -- --client-only && \
+  VSCODE_SKIP_PRELAUNCH=1 ./scripts/test.sh --run src/vs/workbench/contrib/active/test/browser/walkthroughPlayer.test.ts \
+  --run src/vs/workbench/contrib/active/test/browser/decorationsFilter.test.ts)
+                                      # 19 tests (walkthrough player and read-aloud clips with fake audio; the decorations filter)
 ```
 
 These include unit tests for diffing, worthiness (including no accumulation across turns), walkthrough validation, change capture (shell edits, user attribution, pre-existing changes, freezing), history save/replay/delete, and personalization of prompts. An end-to-end test drives the controller through the real `@muse-code/sdk` against the scripted host. It covers the simple, tiny, and multi-file turns, the background timeout, pending checks, immutable captures, and read-only Q&A.

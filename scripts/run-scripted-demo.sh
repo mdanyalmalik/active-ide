@@ -12,8 +12,14 @@ cp -R "$ACTIVE_ROOT/demo/ledger-api/." "$WORK/"
 HOST="$ACTIVE_ROOT/active/extension/test-fixtures/scripted-muse-host.mjs"
 chmod +x "$HOST"
 mkdir -p "$WORK/.vscode"
-printf '{\n\t"active.muse.binaryPath": "%s",\n\t"active.walkthrough.backgroundTimeoutSeconds": 8\n}\n' "$HOST" > "$WORK/.vscode/settings.json"
+printf '{\n\t"active.walkthrough.backgroundTimeoutSeconds": 8\n}\n' > "$WORK/.vscode/settings.json"
+# active.muse.binaryPath is machine-scoped (ignored in workspace settings), so the test host is set in a
+# separate user-data folder: the real Muse CLI is never started and your usual profile is left alone.
+USER_DATA="$ACTIVE_ROOT/.active-dev/scripted-user-data"
+mkdir -p "$USER_DATA/User"
+printf '{\n\t"security.workspace.trust.enabled": false,\n\t"active.muse.binaryPath": "%s"\n}\n' "$HOST" > "$USER_DATA/User/settings.json"
 ( cd "$WORK" && git add -A && git -c user.email=demo@active -c user.name=demo commit -qm "demo settings" )
 export ACTIVE_SCRIPTED_SCENARIO="$ACTIVE_ROOT/demo/scenarios/ledger.json"
 export ACTIVE_SCRIPTED_SPEED="${ACTIVE_SCRIPTED_SPEED:-1}"
+export ACTIVE_USER_DATA="$USER_DATA"
 exec "$ACTIVE_ROOT/scripts/run.sh" "$WORK" "$@"

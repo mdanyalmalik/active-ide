@@ -8,6 +8,8 @@ EXT="$VSCODE_DIR/extensions/active-agent"
 
 mkdir -p "$CONTRIB/common" "$CONTRIB/browser" "$EXT"
 rsync -a --delete "$ACTIVE_ROOT/active/workbench/browser/" "$CONTRIB/browser/"
+mkdir -p "$CONTRIB/test"
+rsync -a --delete "$ACTIVE_ROOT/active/workbench/test/" "$CONTRIB/test/"
 cp "$ACTIVE_ROOT/active/shared/activeProtocol.ts" "$CONTRIB/common/activeProtocol.ts"
 mkdir -p "$ACTIVE_ROOT/active/extension/src/shared"
 cp "$ACTIVE_ROOT/active/shared/activeProtocol.ts" "$ACTIVE_ROOT/active/extension/src/shared/activeProtocol.ts"

@@ -134,6 +134,11 @@ async function runExplanation(session, turnId, prompt) {
 		} else {
 			reply = template?.text ?? `About ${scene ? `"${scene}"` : 'this change'}: ${scenario.defaultAnswer ?? 'the captured code shows how the change works.'}`;
 		}
+	} else if (prompt.startsWith('MEMORY CONDENSING')) {
+		// A deterministic stand-in: one note per scope saying how many notes it merged.
+		const notes = [...prompt.matchAll(/^- \[m\d+\] \((personal|project)[^)]*\) /gm)].map(match => match[1]);
+		const scopes = [...new Set(notes)];
+		reply = JSON.stringify({ notes: scopes.map(scope => ({ scope, note: `Condensed ${notes.filter(entry => entry === scope).length} ${scope} notes.` })) });
 	} else if (prompt.startsWith('RETURN BRIEFING')) {
 		const tasks = [...prompt.matchAll(/^\d+\. TASK: (.+)$/gm)].map(match => match[1]);
 		reply = JSON.stringify({ headline: `${tasks.length} tasks finished while you were away`, done: tasks.map(task => `Done: ${task}`), attention: [], problems: [], next: 'Start with the latest walkthrough.' });

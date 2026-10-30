@@ -76,8 +76,8 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 			this.render();
 			return;
 		}
-		// Wait until the agent's state is known (an untrusted folder never starts it).
-		if (this.shown || (!this.activeService.needsTrust && agent.status === 'starting')) {
+		// Wait until the agent's state and the saved profile are known (an untrusted folder never starts it).
+		if (this.shown || (!this.activeService.needsTrust && (agent.status === 'starting' || !this.activeService.stateLoaded))) {
 			return;
 		}
 		if (!this.activeService.needsTrust && this.agentReady && this.activeService.profile.configured) {

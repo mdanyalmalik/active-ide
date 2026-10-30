@@ -59,7 +59,7 @@ export class ChangeTracker {
 	/** What earlier agent turns left in each file, so their uncommitted output isn't mistaken for the user's. */
 	private readonly agentAuthored = new Map<string, string | null>();
 
-	constructor(private readonly files: WorkspaceFiles, private readonly now: () => number = Date.now) { }
+	constructor(readonly files: WorkspaceFiles, private readonly now: () => number = Date.now) { }
 
 	get currentTurnId(): string | undefined {
 		return this.turn?.turnId;
@@ -199,7 +199,7 @@ export class ChangeTracker {
 	}
 
 	currentStats(): FileChangeStat[] {
-		return this.turn ? this.turn.netChanges().filter(change => !change.userOnly).map(change => ({ path: change.path, added: change.added, removed: change.removed })) : [];
+		return this.turn ? this.turn.netChanges().filter(change => !change.userOnly).map(change => ({ path: change.path, added: change.added, removed: change.removed, ...(change.baseline === null ? { created: true } : {}) })) : [];
 	}
 
 	currentNetChanges(): readonly NetFileChange[] {

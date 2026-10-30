@@ -44,6 +44,12 @@ export function visualStateAt(walkthrough: Walkthrough, position: PlaybackPositi
 }
 
 const SCENE_GAP_MS = 650;
+
+/** Seams for tests: how narration audio is played and how long the pause between scenes lasts. */
+export interface PlayerOptions {
+	readonly createAudio?: (src: string) => HTMLAudioElement;
+	readonly sceneGapMs?: number;
+}
 /** Pressing Next this soon after a scene appears (and before half of it is narrated) counts as an early skip. */
 const QUICK_SKIP_MS = 6000;
 
@@ -70,12 +76,19 @@ export class WalkthroughPlayer extends Disposable {
 	private audioUrl: string | undefined;
 	private audioPosition: PlaybackPosition | undefined;
 	private timer: ReturnType<typeof setTimeout> | undefined;
+	/** Set by `pauseAfterSegment`: stop when the sentence being read ends instead of cutting it off. */
+	private stopAtSegmentEnd = false;
+	/** Where `play` resumes after stopping at the end of a scene's last sentence (the scene stays on screen). */
+	private continueAt: PlaybackPosition | undefined;
+	/** The next scene while the short pause between scenes runs. */
+	private gapNext: PlaybackPosition | undefined;
 
 	constructor(
 		readonly walkthrough: Walkthrough,
 		start: PlaybackPosition,
 		private readonly narration: NarrationSource,
 		private readonly rate: () => number,
+		private readonly options: PlayerOptions = {},
 	) {
 		super();
 		this._position = start;
@@ -109,10 +122,22 @@ export class WalkthroughPlayer extends Disposable {
 		if (this._state === 'ended') {
 			this._position = { scene: 0, segment: 0 };
 		}
+		this.stopAtSegmentEnd = false;
+		if (this.continueAt) {
+			this._position = this.continueAt;
+			this.continueAt = undefined;
+			this.sceneShownAt = Date.now();
+			this.dropAudio();
+		}
 		const run = ++this.run;
 		if (this.audio && this.audioPosition && this.samePosition(this.audioPosition, this._position) && !this.audio.ended) {
+			// Resume the paused sentence, and hand its end to this run (the old run's handlers are ignored).
+			const audio = this.audio;
+			const segment = this.segmentAt(this._position)!;
+			audio.onended = () => this.onSegmentDone(run);
+			audio.onerror = () => this.fallbackTimer(run, segment, 'audio playback failed');
 			this.setState('speaking');
-			void this.audio.play().catch(() => this.speak(run));
+			void audio.play().catch(() => this.speak(run));
 			return;
 		}
 		void this.speak(run);
@@ -120,10 +145,28 @@ export class WalkthroughPlayer extends Disposable {
 
 	pause(): void {
 		this.run++;
+		this.stopAtSegmentEnd = false;
 		this.clearTimer();
 		this.audio?.pause();
 		if (this._state !== 'ended') {
 			this.setState('paused');
+		}
+	}
+
+	/**
+	 * Pauses once the sentence being read finishes (right away if nothing is being read), staying on this
+	 * scene. `play` then carries on from the next sentence.
+	 */
+	pauseAfterSegment(): void {
+		if (this.gapNext) {
+			// The scene's last sentence has just ended.
+			const next = this.gapNext;
+			this.pause();
+			this.continueAt = next;
+		} else if (this._state === 'speaking') {
+			this.stopAtSegmentEnd = true;
+		} else if (this.playing) {
+			this.pause();
 		}
 	}
 
@@ -166,6 +209,8 @@ export class WalkthroughPlayer extends Disposable {
 	seek(position: PlaybackPosition): void {
 		const wasPlaying = this.playing;
 		this.run++;
+		this.stopAtSegmentEnd = false;
+		this.continueAt = undefined;
 		this.clearTimer();
 		this.dropAudio();
 		const scene = Math.max(0, Math.min(position.scene, this.walkthrough.scenes.length - 1));
@@ -223,7 +268,7 @@ export class WalkthroughPlayer extends Disposable {
 			this._narrationIssue = undefined;
 			const blob = new Blob([new Uint8Array(decodeBase64(result.wav).buffer)], { type: 'audio/wav' });
 			this.audioUrl = URL.createObjectURL(blob);
-			const audio = mainWindow.document.createElement('audio');
+			const audio = this.options.createAudio?.(this.audioUrl) ?? mainWindow.document.createElement('audio');
 			audio.src = this.audioUrl;
 			audio.preservesPitch = true;
 			audio.playbackRate = this.rate();
@@ -261,14 +306,28 @@ export class WalkthroughPlayer extends Disposable {
 		const next = this.next(this._position);
 		if (!next) {
 			this.dropAudio();
+			this.stopAtSegmentEnd = false;
 			this.setState('ended');
 			return;
 		}
 		const sceneChange = next.scene !== this._position.scene;
+		if (this.stopAtSegmentEnd) {
+			this.stopAtSegmentEnd = false;
+			this.run++;
+			this.dropAudio();
+			if (sceneChange) {
+				this.continueAt = next;
+			} else {
+				this._position = next;
+			}
+			this.setState('paused');
+			return;
+		}
 		const advance = () => {
 			if (run !== this.run) {
 				return;
 			}
+			this.gapNext = undefined;
 			this.dropAudio();
 			if (next.scene !== this._position.scene) {
 				this.sceneShownAt = Date.now();
@@ -279,7 +338,8 @@ export class WalkthroughPlayer extends Disposable {
 		};
 		if (sceneChange) {
 			this.clearTimer();
-			this.timer = setTimeout(advance, SCENE_GAP_MS);
+			this.gapNext = next;
+			this.timer = setTimeout(advance, this.options.sceneGapMs ?? SCENE_GAP_MS);
 		} else {
 			advance();
 		}
@@ -298,6 +358,7 @@ export class WalkthroughPlayer extends Disposable {
 	}
 
 	private clearTimer(): void {
+		this.gapNext = undefined;
 		if (this.timer !== undefined) {
 			clearTimeout(this.timer);
 			this.timer = undefined;

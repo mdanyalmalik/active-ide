@@ -10,8 +10,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
 import type { AgentSession } from '../agents/agentTypes';
-import { ExplanationAgent, WalkthroughPlanner } from '../explain/planner';
-import { buildBriefingPrompt, buildCheckpointPrompt, buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
+import { condensedOf, ExplainerMemory, rememberOf } from '../explain/memory';
+import { ExplanationAgent, noteDraft, WalkthroughPlanner } from '../explain/planner';
+import { buildBriefingPrompt, buildCheckpointPrompt, buildElaborationPrompt, buildMemoryCondensePrompt, buildPlanningPrompt, buildQuestionPrompt } from '../explain/prompts';
 import { assessWorthiness } from '../explain/worthiness';
 import { HistoryStore } from '../history/historyStore';
 import { applyDetailFeedback, applySkipSignal, CapturedFile, DEFAULT_PROFILE, extractJsonObject, KnowledgeProfile, validateWalkthrough, Walkthrough } from '../shared/activeProtocol';
@@ -157,6 +158,56 @@ describe('change tracking', () => {
 	});
 });
 
+describe('git change counts', () => {
+	const git = (cwd: string, command: string) => execSync(`git -c user.email=t@t -c user.name=t ${command}`, { cwd, stdio: 'pipe' });
+
+	test('tracked changes against HEAD plus untracked files; binary and ignored files have no counts', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-git-'));
+		await fs.writeFile(path.join(root, 'a.js'), 'one\ntwo\nthree\n');
+		await fs.writeFile(path.join(root, 'gone.js'), 'x\n');
+		git(root, 'init -q');
+		git(root, 'add -A');
+		git(root, 'commit -qm init');
+		await fs.writeFile(path.join(root, 'a.js'), 'one\nTWO\nthree\nfour\n');
+		await fs.rm(path.join(root, 'gone.js'));
+		await fs.writeFile(path.join(root, 'new.js'), 'a\nb\n');
+		await fs.writeFile(path.join(root, 'image.bin'), Buffer.from([0, 1, 2, 0]));
+		await fs.mkdir(path.join(root, 'node_modules'));
+		await fs.writeFile(path.join(root, 'node_modules', 'dep.js'), 'x\n');
+		const stats = await new WorkspaceFiles(root).gitStats();
+		assert.deepStrictEqual(stats?.sort((a, b) => a.path.localeCompare(b.path)), [
+			{ path: 'a.js', added: 2, removed: 1 },
+			{ path: 'gone.js', added: 0, removed: 1 },
+			{ path: 'new.js', added: 2, removed: 0 },
+		]);
+	});
+
+	test('before the first commit every file counts as added', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-git-'));
+		git(root, 'init -q');
+		await fs.writeFile(path.join(root, 'staged.js'), 'a\nb\nc\n');
+		git(root, 'add staged.js');
+		await fs.writeFile(path.join(root, 'loose.js'), 'a\n');
+		const stats = await new WorkspaceFiles(root).gitStats();
+		assert.deepStrictEqual(stats?.sort((a, b) => a.path.localeCompare(b.path)), [{ path: 'loose.js', added: 1, removed: 0 }, { path: 'staged.js', added: 3, removed: 0 }]);
+	});
+
+	test('a workspace inside a larger repository only counts its own files, relative to itself', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-git-'));
+		await fs.mkdir(path.join(root, 'app'));
+		git(root, 'init -q');
+		await fs.writeFile(path.join(root, 'outside.js'), 'x\n');
+		await fs.writeFile(path.join(root, 'app', 'inside.js'), 'y\n');
+		assert.deepStrictEqual(await new WorkspaceFiles(path.join(root, 'app')).gitStats(), [{ path: 'inside.js', added: 1, removed: 0 }]);
+	});
+
+	test('outside a git repository there are no git counts', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-nogit-'));
+		await fs.writeFile(path.join(root, 'a.js'), 'x\n');
+		assert.equal(await new WorkspaceFiles(root).gitStats(), undefined);
+	});
+});
+
 describe('history store', () => {
 	test('saves, rehydrates and deletes history without touching project files', async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-history-'));
@@ -293,7 +344,278 @@ describe('personalization', () => {
 	});
 });
 
+describe('notes shown beside the code', () => {
+	const lines = (count: number, prefix: string) => Array.from({ length: count }, (_, index) => `${prefix}${index + 1}`).join('\n') + '\n';
+	const file = (path: string, baseline: string | null, final: string | null): CapturedFile => ({ path, baseline, final, ...diffStats(baseline, final) });
+	const src = file('src/limit.js', lines(30, 'a'), lines(30, 'a').replace('a10\n', 'b10\nb11\nb12\n'));
+	const tests = file('test/limit.test.js', lines(5, 't'), lines(5, 't') + lines(20, 'n'));
+	const files = { [src.path]: src, [tests.path]: tests };
+	const note = { format: 'note' as const, note: 'The limit is now 8. Existing callers keep 1 until they opt in.' };
+
+	test('the explainer\'s location is used when it exists in the captured files', () => {
+		const draft = noteDraft({ ...note, title: 'Limit raised', at: { file: 'src/limit.js', focus: [{ startLine: 10, endLine: 12 }], anchorLine: 12 } }, files);
+		assert.deepStrictEqual(
+			[draft?.title, draft?.scenes.length, draft?.scenes[0].file, draft?.scenes[0].focus, draft?.scenes[0].anchorLine, draft?.scenes[0].narration.map(segment => segment.text)],
+			['Limit raised', 1, 'src/limit.js', [{ startLine: 10, endLine: 12 }], 12, ['The limit is now 8. Existing callers keep 1 until they opt in.']],
+		);
+	});
+
+	test('a missing, unknown or out-of-range location falls back to the largest non-test change', () => {
+		for (const at of [undefined, { file: 'nope.js', focus: [{ startLine: 1, endLine: 1 }] }, { file: 'src/limit.js', focus: [{ startLine: 90, endLine: 95 }] }]) {
+			const draft = noteDraft({ ...note, at }, files);
+			assert.deepStrictEqual([draft?.scenes[0].file, draft?.scenes[0].focus], ['src/limit.js', [{ startLine: 10, endLine: 12 }]], JSON.stringify(at));
+		}
+	});
+
+	test('without a title, it is named after the file rather than repeating the note', () => {
+		assert.equal(noteDraft(note, files)?.title, 'Note on limit.js');
+	});
+
+	test('when only tests changed, the largest test change is used, capped to 15 lines', () => {
+		const draft = noteDraft(note, { [tests.path]: tests });
+		assert.deepStrictEqual([draft?.scenes[0].file, draft?.scenes[0].focus], ['test/limit.test.js', [{ startLine: 6, endLine: 20 }]]);
+	});
+
+	test('a new file is shown from its first line', () => {
+		const created = file('src/new.js', null, lines(4, 'x'));
+		assert.deepStrictEqual(noteDraft(note, { [created.path]: created })?.scenes[0].focus, [{ startLine: 1, endLine: 4 }]);
+	});
+
+	test('a turn that only deleted files has nowhere to show the note: chat only', () => {
+		const deleted = file('src/old.js', lines(4, 'x'), null);
+		assert.equal(noteDraft(note, { [deleted.path]: deleted }), undefined);
+	});
+
+	test('skips and empty notes have no inline version', () => {
+		assert.deepStrictEqual([noteDraft({ format: 'skip', reason: 'x' }, files), noteDraft({ format: 'note' }, files)], [undefined, undefined]);
+	});
+
+	test('the explainer\'s location is read from its reply, and malformed ranges are ignored', async () => {
+		const replies = [
+			'{"format":"note","note":"n.","title":"T","at":{"file":"a.js","focus":[{"startLine":1,"endLine":1},{"startLine":"x"}],"anchorLine":1}}',
+			'{"format":"note","note":"n.","at":{"file":"a.js","focus":[]}}',
+		];
+		const planner = new WalkthroughPlanner({ ask: async () => replies.shift()! } as unknown as ExplanationAgent, () => undefined);
+		const context = { task: 't', turnIndex: 1, files: {}, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, preferNotes: true, profile: DEFAULT_PROFILE };
+		assert.deepStrictEqual(
+			[(await planner.plan(context)).brief, (await planner.plan(context)).brief],
+			[{ format: 'note', note: 'n.', reason: undefined, title: 'T', at: { file: 'a.js', focus: [{ startLine: 1, endLine: 1 }], anchorLine: 1 } }, { format: 'note', note: 'n.', reason: undefined }],
+		);
+	});
+});
+
+describe('explainer memory', () => {
+	let clock = 1000;
+	async function store(): Promise<{ memory: ExplainerMemory; files: Record<'personal' | 'project', string> }> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'active-memory-'));
+		const files = { personal: path.join(dir, 'personal.json'), project: path.join(dir, 'nested', 'project.json') };
+		return { memory: new ExplainerMemory(files, () => clock++), files };
+	}
+
+	test('notes are kept per scope, in separate files, and survive a restart', async () => {
+		const { memory, files } = await store();
+		assert.equal(await memory.add([{ scope: 'personal', note: 'Knows async/await well.' }, { scope: 'project', note: 'Retries use a shared budget.' }], 'Retry budget'), true);
+		const reloaded = new ExplainerMemory(files);
+		assert.deepStrictEqual((await reloaded.list()).map(note => [note.scope, note.text, note.context, note.source]), [['personal', 'Knows async/await well.', 'Retry budget', 'explainer'], ['project', 'Retries use a shared budget.', 'Retry budget', 'explainer']]);
+		assert.equal(JSON.parse(await fs.readFile(files.personal, 'utf8')).length, 1);
+		assert.equal(JSON.parse(await fs.readFile(files.project, 'utf8')).length, 1);
+	});
+
+	test('repeats are dropped (ignoring case, spacing and punctuation), and "replaces" updates a note in place', async () => {
+		const { memory } = await store();
+		await memory.add([{ scope: 'project', note: 'Retries use a shared budget.' }]);
+		const [first] = await memory.list();
+		assert.equal(await memory.add([{ scope: 'project', note: '  retries USE a shared budget ' }]), false);
+		await memory.add([{ scope: 'project', note: 'Retries use a per-host budget.', replaces: first.id }]);
+		assert.deepStrictEqual((await memory.list()).map(note => [note.id, note.text]), [[first.id, 'Retries use a per-host budget.']]);
+		// An unknown id is just a new note.
+		await memory.add([{ scope: 'project', note: 'Timeouts are 30s.', replaces: 'm999' }]);
+		assert.equal((await memory.list()).length, 2);
+	});
+
+	test('questions are recorded by Active, once each, and kept like any other note', async () => {
+		const { memory } = await store();
+		for (let index = 1; index <= 20; index++) {
+			await memory.recordQuestion(`question ${index}?`, 'Retry budget');
+		}
+		await memory.recordQuestion('question 20?', 'Retry budget');
+		const questions = (await memory.list()).filter(note => note.source === 'question');
+		assert.deepStrictEqual([questions.length, questions[0].text, questions[0].scope], [20, 'Asked about "Retry budget": question 1?', 'project']);
+	});
+
+	test('nothing is dropped by count: memory only shrinks when it is condensed', async () => {
+		const { memory } = await store();
+		await memory.add(Array.from({ length: 120 }, (_, index) => ({ scope: 'personal' as const, note: `fact ${index}` })));
+		assert.equal((await memory.list()).length, 120);
+	});
+
+	test('forgetting one note, or everything', async () => {
+		const { memory } = await store();
+		await memory.add([{ scope: 'personal', note: 'a' }, { scope: 'project', note: 'b' }]);
+		const [first] = await memory.list();
+		await memory.delete(first.id);
+		assert.deepStrictEqual((await memory.list()).map(note => note.text), ['b']);
+		await memory.delete();
+		assert.deepStrictEqual(await memory.list(), []);
+	});
+
+	test('the prompt carries every note, oldest first, with ids, scopes and questions marked', async () => {
+		const { memory } = await store();
+		await memory.add([{ scope: 'personal', note: 'Knows SQL.' }]);
+		await memory.recordQuestion('why a mutex?', 'Locking');
+		assert.deepStrictEqual((await memory.describe()).split('\n'), ['- [m1] (personal) Knows SQL.', '- [m2] (project, their question) Asked about "Locking": why a mutex?']);
+	});
+
+	test('it needs condensing past 6,000 characters; past 12,000 the prompt keeps the newest notes as a safety net', async () => {
+		const { memory } = await store();
+		const long = (index: number) => ({ scope: 'project' as const, note: `${index} ${'x'.repeat(280)}` });
+		await memory.add(Array.from({ length: 15 }, (_, index) => long(index)));
+		assert.equal(await memory.needsCondensing(), false);
+		await memory.add(Array.from({ length: 10 }, (_, index) => long(100 + index)));
+		assert.equal(await memory.needsCondensing(), true);
+		await memory.add(Array.from({ length: 30 }, (_, index) => long(200 + index)));
+		const described = await memory.describe();
+		assert.ok(described.length <= 12000);
+		assert.match(described.split('\n').at(-1)!, /^- \[m55\] \(project\) 229 /);
+	});
+
+	test('condensing replaces only the notes it was given; a note added meanwhile is kept', async () => {
+		const { memory } = await store();
+		await memory.add([{ scope: 'personal', note: 'a' }, { scope: 'project', note: 'b' }]);
+		const condensedIds = new Set((await memory.list()).map(note => note.id));
+		await memory.recordQuestion('added while condensing?');
+		await memory.condense(condensedIds, [{ scope: 'project', note: 'a and b, merged' }, { scope: 'project', note: '  a AND b merged ' }], 'condensed');
+		assert.deepStrictEqual((await memory.list()).map(note => [note.text, note.source, note.context]).sort(), [['Asked: added while condensing?', 'question', undefined], ['a and b, merged', 'explainer', 'condensed']]);
+	});
+
+	test('a condensed reply is read as notes; anything unusable leaves memory alone', () => {
+		assert.deepStrictEqual(condensedOf({ notes: [{ scope: 'personal', note: 'a' }, { note: 'b' }, { note: '' }, 7] }), [{ scope: 'personal', note: 'a' }, { scope: 'project', note: 'b' }]);
+		assert.deepStrictEqual([condensedOf(undefined), condensedOf({ notes: [] }), condensedOf({ notes: 'x' })], [undefined, undefined, undefined]);
+	});
+
+	test('the condensing prompt gives the size, the target and what must survive', () => {
+		const prompt = buildMemoryCondensePrompt('- [m1] (project) a', 6400, 3000);
+		assert.deepStrictEqual(
+			[prompt.startsWith('MEMORY CONDENSING'), prompt.includes('6400 characters'), prompt.includes('under 3000 characters'), /what you've already explained to them/.test(prompt), prompt.includes('- [m1] (project) a'), prompt.includes('{"notes"')],
+			[true, true, true, true, true, true],
+		);
+	});
+
+	test('"remember" is read from a reply; malformed entries are ignored and at most 5 are taken', () => {
+		assert.deepStrictEqual(rememberOf({ remember: [{ scope: 'personal', note: 'a' }, { note: 'b' }, { scope: 'x', note: 'c', replaces: 'm1' }, { note: '' }, 'junk', { note: 'd' }, { note: 'e' }] }), [
+			{ scope: 'personal', note: 'a' }, { scope: 'project', note: 'b' }, { scope: 'project', note: 'c', replaces: 'm1' },
+		]);
+		assert.deepStrictEqual([rememberOf(undefined), rememberOf({ remember: 'no' })], [[], []]);
+	});
+
+	test('plans carry "remember" for every format, and a repaired reply keeps the first one\'s notes', async () => {
+		const files = { 'a.js': { path: 'a.js', baseline: 'x\n', final: 'y\n', added: 1, removed: 1 } };
+		const context = { task: 't', turnIndex: 1, files, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, preferNotes: true, profile: DEFAULT_PROFILE };
+		const scene = { id: 's', role: 'implementation', label: 'L', title: 'T', file: 'a.js', version: 'final', focus: [{ startLine: 1, endLine: 1 }], anchorLine: 1, narration: [{ text: 'It changed.' }] };
+		const replies = [
+			'{"format":"skip","reason":"r","remember":[{"scope":"personal","note":"skip note"}]}',
+			JSON.stringify({ format: 'walkthrough', title: 'T', summary: 'S', terms: [], scenes: [{ ...scene, file: 'missing.js' }], remember: [{ scope: 'project', note: 'kept' }] }),
+			JSON.stringify({ format: 'walkthrough', title: 'T', summary: 'S', terms: [], scenes: [scene] }),
+		];
+		const planner = new WalkthroughPlanner({ ask: async () => replies.shift()! } as unknown as ExplanationAgent, () => undefined);
+		assert.deepStrictEqual((await planner.plan(context)).remember, [{ scope: 'personal', note: 'skip note' }]);
+		const repaired = await planner.plan(context);
+		assert.ok(repaired.draft);
+		assert.deepStrictEqual(repaired.remember, [{ scope: 'project', note: 'kept' }]);
+	});
+
+	test('prompts: plans get memory, the no-repeat rule and "remember"; questions get memory but are always answered', () => {
+		const context = { task: 't', turnIndex: 1, files: {}, agentMessages: [], reasoningSummaries: [], tools: [], pending: [], history: [], userNotes: [], final: true, preferNotes: true, profile: DEFAULT_PROFILE };
+		const plan = buildPlanningPrompt({ ...context, memory: '- [m1] (project) Retries use a shared budget.' });
+		const empty = buildPlanningPrompt(context);
+		const question = buildQuestionPrompt('why?', undefined, undefined, DEFAULT_PROFILE, '- [m1] (project) Retries use a shared budget.');
+		assert.deepStrictEqual(
+			[plan.includes('- [m1] (project) Retries use a shared budget.'), /don't explain again what these notes say/.test(plan), plan.includes('"remember"'), plan.includes('"replaces"')],
+			[true, true, true, true],
+		);
+		assert.deepStrictEqual([empty.includes('MEMORY\n(empty)'), /Add to it with "remember"/.test(empty)], [true, true]);
+		assert.deepStrictEqual([question.includes('Retries use a shared budget.'), /answer what they ask even if it was covered before/.test(question), /Add to it with "remember"/.test(question)], [true, true, false]);
+		assert.equal(buildQuestionPrompt('why?', undefined, undefined, DEFAULT_PROFILE).includes('MEMORY'), false);
+	});
+});
+
 describe('explanation agent', () => {
+	/** A session whose turns finish only when the test says so, recording the order prompts were started in. */
+	function manualSession() {
+		const started: string[] = [];
+		const finish: Array<(reply: string) => void> = [];
+		let agent!: ExplanationAgent;
+		const session = {
+			sessionId: 's',
+			startTurn: async (prompt: string) => {
+				const turnId = `t${started.length + 1}`;
+				started.push(prompt);
+				finish.push(reply => {
+					agent.onItem({ id: `m${turnId}`, turnId, kind: 'agentMessage', status: 'completed', text: reply }, true);
+					agent.onTurnCompleted(turnId, 'completed');
+				});
+				return turnId;
+			},
+		} as unknown as AgentSession;
+		agent = new ExplanationAgent(async () => session);
+		return { agent, started, finish: (index: number, reply: string) => finish[index](reply) };
+	}
+	const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+	test('requests run one at a time, in order', async () => {
+		const { agent, started, finish } = manualSession();
+		const first = agent.ask('plan');
+		const second = agent.ask('check');
+		await tick();
+		assert.deepStrictEqual(started, ['plan']);
+		finish(0, 'one');
+		assert.equal(await first, 'one');
+		await tick();
+		assert.deepStrictEqual(started, ['plan', 'check']);
+		finish(1, 'two');
+		assert.equal(await second, 'two');
+	});
+
+	test('the developer\'s questions go ahead of queued background work, but never interrupt the running turn', async () => {
+		const { agent, started, finish } = manualSession();
+		const replies = [agent.ask('plan'), agent.ask('chapter check'), agent.ask('briefing'), agent.ask('more detail', undefined, true), agent.ask('question', undefined, true)];
+		await tick();
+		assert.deepStrictEqual(started, ['plan'], 'the running turn is not interrupted');
+		for (let index = 0; index < 5; index++) {
+			finish(index, `r${index}`);
+			await tick();
+			await tick();
+		}
+		assert.deepStrictEqual(started, ['plan', 'more detail', 'question', 'chapter check', 'briefing'], 'urgent requests keep their own order');
+		assert.deepStrictEqual(await Promise.all(replies), ['r0', 'r3', 'r4', 'r1', 'r2']);
+	});
+
+	test('a request that fails doesn\'t block the next', async () => {
+		let agent!: ExplanationAgent;
+		let turns = 0;
+		const session = {
+			sessionId: 's',
+			startTurn: async () => {
+				const turnId = `t${++turns}`;
+				setTimeout(() => {
+					if (turnId === 't1') {
+						agent.onTurnCompleted(turnId, 'failed', 'boom');
+					} else {
+						agent.onItem({ id: 'm', turnId, kind: 'agentMessage', status: 'completed', text: 'ok' }, true);
+						agent.onTurnCompleted(turnId, 'completed');
+					}
+				}, 1);
+				return turnId;
+			},
+		} as unknown as AgentSession;
+		agent = new ExplanationAgent(async () => session);
+		const failed = agent.ask('first');
+		const next = agent.ask('second');
+		await assert.rejects(failed, /boom/);
+		assert.equal(await next, 'ok');
+	});
+
+
 	test('a turn that never finishes is interrupted and the next request still runs', async () => {
 		const interrupted: string[] = [];
 		let turns = 0;

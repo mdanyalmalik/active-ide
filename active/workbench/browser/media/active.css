@@ -404,6 +404,20 @@
 	gap: 14px;
 }
 
+/* The workbench turns text selection off; chat text should be selectable and copyable. */
+.monaco-workbench .active-chat-transcript .entry,
+.monaco-workbench .active-chat-notices .notice,
+.monaco-workbench .active-chat .active-briefing {
+	user-select: text;
+	-webkit-user-select: text;
+}
+
+.monaco-workbench .active-chat-transcript .entry button,
+.monaco-workbench .active-chat-notices .notice button {
+	user-select: none;
+	-webkit-user-select: none;
+}
+
 .monaco-workbench .active-chat-transcript .entry {
 	font-size: 14px;
 	line-height: 1.55;
@@ -421,6 +435,22 @@
 
 .monaco-workbench .active-chat-transcript .entry.explainer {
 	border-left-color: var(--active-accent);
+}
+
+.monaco-workbench .active-chat-transcript .note-actions {
+	display: flex;
+	gap: 14px;
+	margin-top: 6px;
+}
+
+.monaco-workbench .active-chat-transcript .note-actions button.link {
+	padding: 0;
+	font-size: 12px;
+	color: var(--vscode-textLink-foreground);
+}
+
+.monaco-workbench .active-chat-transcript .note-actions button.link:hover {
+	text-decoration: underline;
 }
 
 .monaco-workbench .active-chat-transcript .entry .markdown p:first-child {
@@ -982,8 +1012,16 @@
 	border-radius: 3px;
 }
 
-.monaco-editor .active-explain-card .more-detail:hover {
+.monaco-editor .active-explain-card .more-detail:hover,
+.monaco-editor .active-explain-card .more-detail.active {
 	border-color: var(--active-accent);
+}
+
+.monaco-editor .active-explain-card .card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
 }
 
 .monaco-editor .active-explain-card h2.title {
@@ -1121,6 +1159,66 @@
 
 .monaco-editor .active-explain-card .deeper-actions button.primary:hover {
 	background: var(--vscode-button-hoverBackground);
+}
+
+/* A question asked from the card, and the box to ask it */
+.monaco-editor .active-explain-card .deeper-question {
+	font-size: 14px;
+	line-height: 1.5;
+	margin-top: 8px;
+	font-style: italic;
+	color: var(--vscode-foreground);
+}
+
+.monaco-editor .active-explain-card .deeper-note {
+	font-size: 12px;
+	margin-top: 10px;
+	color: var(--vscode-errorForeground);
+}
+
+.monaco-editor .active-explain-card .ask-box {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.monaco-editor .active-explain-card .deeper-head ~ .ask-box,
+.monaco-editor .active-explain-card .deeper-actions ~ .ask-box {
+	margin-top: 14px;
+}
+
+.monaco-editor .active-explain-card .ask-input {
+	flex: 1;
+	min-width: 0;
+	font-family: inherit;
+	font-size: 13px;
+	padding: 5px 8px;
+	border-radius: 3px;
+	border: 1px solid var(--vscode-input-border, var(--active-border));
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	outline: none;
+}
+
+.monaco-editor .active-explain-card .ask-input:focus {
+	border-color: var(--vscode-focusBorder);
+}
+
+.monaco-editor .active-explain-card .ask-box button {
+	font-family: inherit;
+	font-size: 12px;
+	padding: 5px 12px;
+	border-radius: 3px;
+	cursor: pointer;
+	border: 1px solid var(--active-border);
+	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+}
+
+.monaco-editor .active-explain-card .ask-box button.primary {
+	border-color: transparent;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
 }
 
 /* ------------------------------------------------------------------ card and visual motion
@@ -1656,6 +1754,64 @@
 
 .monaco-workbench .active-profile-form section {
 	margin-top: 28px;
+}
+
+/* What Active remembers: below the form, separated from it */
+.monaco-workbench .active-profile-form.memory {
+	padding-top: 0;
+}
+
+.monaco-workbench .active-profile-form.memory > section {
+	margin-top: 0;
+	padding-top: 28px;
+	border-top: 1px solid var(--active-border);
+}
+
+.monaco-workbench .active-profile-form.memory h3 {
+	font-size: 12px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--active-muted);
+	margin: 18px 0 6px;
+}
+
+.monaco-workbench .active-profile-form.memory .empty {
+	font-size: 13px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-profile-form .memory-list {
+	list-style: none;
+	margin: 0 0 16px;
+	padding: 0;
+}
+
+.monaco-workbench .active-profile-form .memory-list li {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 2px 12px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--active-border);
+}
+
+.monaco-workbench .active-profile-form .memory-text {
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.monaco-workbench .active-profile-form .memory-meta {
+	grid-column: 1;
+	font-size: 11px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-profile-form .memory-list button.forget {
+	grid-column: 2;
+	grid-row: 1 / span 2;
+	align-self: center;
+	font-size: 12px;
+	padding: 3px 10px;
 }
 
 .monaco-workbench .active-profile-form h2 {
@@ -2207,6 +2363,7 @@
 /* ------------------------------------------------------------------ floating buttons */
 
 .monaco-workbench .active-fab-stack {
+	--active-fab-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 	position: absolute;
 	right: 20px;
 	bottom: 20px;
@@ -2214,55 +2371,115 @@
 	display: flex;
 	flex-direction: column;
 	align-items: flex-end;
-	gap: 8px;
 	pointer-events: none;
-	transition: bottom 200ms ease;
+	transition: bottom 240ms var(--active-fab-ease);
 }
 
-/* Narrow editors: icon-only buttons. */
-.monaco-workbench .active-fab-stack.compact .active-fab .label {
+.monaco-workbench .active-fab-stack.hidden {
 	display: none;
 }
 
-.monaco-workbench .active-fab-stack.compact .active-fab {
-	padding: 9px;
+/* The circle */
+.monaco-workbench .active-fab-main {
+	pointer-events: auto;
+	width: 44px;
+	height: 44px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border-radius: 50%;
+	border: none;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	box-shadow: 0 4px 14px var(--vscode-widget-shadow);
+	transition: transform 260ms var(--active-fab-ease), box-shadow 260ms var(--active-fab-ease), background-color 200ms ease;
+	animation: active-fab-in 240ms var(--active-fab-ease);
 }
 
-.monaco-workbench .active-fab {
+.monaco-workbench .active-fab-main .icon {
+	font-size: 20px;
+	color: inherit;
+	transition: transform 300ms var(--active-fab-ease);
+}
+
+.monaco-workbench .active-fab-stack:hover .active-fab-main,
+.monaco-workbench .active-fab-stack:focus-within .active-fab-main,
+.monaco-workbench .active-fab-stack.open .active-fab-main {
+	transform: scale(1.06);
+	background: var(--vscode-button-hoverBackground);
+	box-shadow: 0 8px 22px var(--vscode-widget-shadow);
+}
+
+.monaco-workbench .active-fab-main:active {
+	transform: scale(0.97);
+	transition-duration: 90ms;
+}
+
+.monaco-workbench .active-fab-main:focus-visible {
+	outline: 2px solid var(--vscode-focusBorder);
+	outline-offset: 2px;
+}
+
+/* The menu that opens upwards. It covers the gaps between items, so moving to one doesn't close it. */
+.monaco-workbench .active-fab-menu {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 8px;
+	padding-bottom: 10px;
+	pointer-events: none;
+}
+
+.monaco-workbench .active-fab-stack:hover .active-fab-menu,
+.monaco-workbench .active-fab-stack:focus-within .active-fab-menu,
+.monaco-workbench .active-fab-stack.open .active-fab-menu {
 	pointer-events: auto;
+}
+
+.monaco-workbench .active-fab-item {
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
-	padding: 8px 14px 8px 12px;
-	border-radius: 20px;
+	padding: 7px 12px 7px 14px;
+	border-radius: 18px;
 	border: 1px solid var(--active-border);
-	background: var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background));
-	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-foreground);
 	font-family: inherit;
 	font-size: 13px;
+	white-space: nowrap;
 	cursor: pointer;
-	box-shadow: 0 4px 16px var(--vscode-widget-shadow);
-	transition: transform 120ms ease, background 120ms ease, opacity 160ms ease;
-	animation: active-fab-in 200ms ease-out;
+	box-shadow: 0 4px 14px var(--vscode-widget-shadow);
+	opacity: 0;
+	transform: translateY(10px) scale(0.94);
+	transform-origin: bottom right;
+	/* Closing: all together, after a short grace period so crossing a gap doesn't flicker. */
+	transition: opacity 160ms ease 80ms, transform 200ms var(--active-fab-ease) 80ms, background-color 160ms ease;
 }
 
-.monaco-workbench .active-fab:hover {
-	transform: translateY(-1px);
-	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
-}
-
-.monaco-workbench .active-fab.primary {
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
-	border-color: transparent;
-}
-
-.monaco-workbench .active-fab.primary:hover {
-	background: var(--vscode-button-hoverBackground);
-}
-
-.monaco-workbench .active-fab.hidden {
+.monaco-workbench .active-fab-item.hidden {
 	display: none;
+}
+
+.monaco-workbench .active-fab-stack:hover .active-fab-item,
+.monaco-workbench .active-fab-stack:focus-within .active-fab-item,
+.monaco-workbench .active-fab-stack.open .active-fab-item {
+	opacity: 1;
+	transform: none;
+	/* Opening: a short cascade upwards from the circle. */
+	transition: opacity 200ms ease calc(var(--active-fab-index, 0) * 45ms), transform 280ms var(--active-fab-ease) calc(var(--active-fab-index, 0) * 45ms), background-color 160ms ease;
+}
+
+.monaco-workbench .active-fab-item:hover,
+.monaco-workbench .active-fab-item:focus-visible {
+	background: var(--vscode-list-hoverBackground);
+	outline: none;
+}
+
+.monaco-workbench .active-fab-item .icon {
+	font-size: 15px;
 }
 
 @keyframes active-fab-in {
@@ -2270,10 +2487,18 @@
 	to { opacity: 1; transform: none; }
 }
 
-.monaco-reduce-motion .active-fab,
+.monaco-reduce-motion .active-fab-main,
 .monaco-reduce-motion .active-walkthrough .detail-feedback,
 .monaco-reduce-motion .active-explain-card .deeper {
 	animation: none;
+}
+
+/* Reduced motion: the menu appears without movement. */
+.monaco-reduce-motion .active-fab-item,
+.monaco-reduce-motion .active-fab-main,
+.monaco-reduce-motion .active-fab-main .icon {
+	transform: none !important;
+	transition-property: opacity, background-color !important;
 }
 
 /* ------------------------------------------------------------------ knowledge profile */
@@ -2486,4 +2711,54 @@
 	background: transparent;
 	color: var(--vscode-textLink-foreground);
 	cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ explorer: which change counts */
+
+/* A header-only view: no twisty (there's nothing to expand), the switch sits in the header. */
+.monaco-workbench .pane.active-change-counts-pane > .pane-header .twisty-container {
+	display: none;
+}
+
+.monaco-workbench .pane.active-change-counts-pane > .pane-header {
+	cursor: default;
+}
+
+.monaco-workbench .active-change-counts-bar {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-left: auto;
+	margin-right: 8px;
+	padding: 1px;
+	border-radius: 4px;
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.monaco-workbench .active-change-counts-bar .counts-option {
+	font-family: inherit;
+	font-size: 11px;
+	line-height: 16px;
+	padding: 0 8px;
+	border: none;
+	border-radius: 3px;
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	background: transparent;
+	text-transform: none;
+}
+
+.monaco-workbench .active-change-counts-bar .counts-option:hover:not(:disabled) {
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .active-change-counts-bar .counts-option.selected {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+}
+
+.monaco-workbench .active-change-counts-bar .counts-option:disabled {
+	opacity: 0.5;
+	cursor: default;
 }

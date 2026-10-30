@@ -183,11 +183,21 @@ const general: IConfigurationNode = {
 			default: true,
 			description: localize('preferNotes', "For small changes (and short requests), lean toward a brief note in chat instead of a full walkthrough."),
 		},
+		'active.explorer.changeCounts': {
+			type: 'string',
+			enum: ['agent', 'git'],
+			enumDescriptions: [
+				localize('countsAgent', "What the agent changed in the last prompt that changed files."),
+				localize('countsGit', "Everything not yet committed, as git sees it (including new, untracked files)."),
+			],
+			default: 'agent',
+			description: localize('explorerCounts', "Which changes are shown: the line counts (+added −removed) next to files in the Explorer, and the change bars in the editor's gutter. Switch with the buttons at the top of the Explorer."),
+		},
 		'active.startWithChat': {
 			type: 'boolean',
 			default: true,
 			scope: ConfigurationScope.APPLICATION,
-			description: localize('startWithChat', "Open Active chat across the work area on startup."),
+			description: localize('startWithChat', "Open Active chat on startup. The first time a folder opens, chat fills the work area; after that your layout is kept."),
 		},
 	},
 };

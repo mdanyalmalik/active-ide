@@ -32,7 +32,7 @@ import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import type { CapturedFile, DetailFeedback, PendingCheck, Scene, Walkthrough } from '../common/activeProtocol.js';
 import { WalkthroughInput } from './activeInputs.js';
-import { ActiveWalkthroughFocus, IActiveService } from './activeService.js';
+import { ActiveWalkthroughFocus, Elaboration, IActiveService } from './activeService.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughPlayer } from './walkthroughPlayer.js';
 import { isRedundantVisual, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
@@ -138,11 +138,18 @@ export class WalkthroughEditor extends EditorPane {
 	private pendingHost: HTMLElement | undefined;
 	private deeperHost: HTMLElement | undefined;
 	private moreDetailButton: HTMLButtonElement | undefined;
+	private askButton: HTMLButtonElement | undefined;
 	private readonly deeperStore = this._register(new DisposableStore());
 	/** Scenes whose deeper explanation is collapsed again after being shown. */
 	private readonly collapsedDeeper = new Set<string>();
-	/** Deeper explanations already read aloud once, by request id. */
+	/** Deeper explanations and answers already read aloud once, by request id. */
 	private readonly spokenDeeper = new Set<string>();
+	/** Requests made while narration was playing: the walkthrough carries on once they've been read aloud. */
+	private readonly resumeAfterDeeper = new Set<string>();
+	/** Why an answer couldn't be read aloud, by request id. */
+	private readonly speechErrors = new Map<string, string>();
+	/** The scene whose question box is open, and whether narration was playing when it opened. */
+	private asking: { readonly key: string; readonly resume: boolean; draft: string } | undefined;
 	private feedbackFor: string | undefined;
 	private feedback: HTMLElement | undefined;
 	private readonly feedbackStore = this._register(new DisposableStore());
@@ -250,7 +257,12 @@ export class WalkthroughEditor extends EditorPane {
 		this.inputStore.add(this.activeService.onDidChangeNarration(() => this.renderControls()));
 		this.inputStore.add(this.activeService.onDidChangeAgent(() => this.renderControls()));
 		this.inputStore.add(this.activeService.onDidChangeChecks(walkthroughId => walkthroughId === this.player?.walkthrough.id && this.renderPending()));
-		this.inputStore.add(this.activeService.onDidChangeElaboration(elaboration => elaboration.walkthroughId === this.player?.walkthrough.id && this.renderDeeper()));
+		this.inputStore.add(this.activeService.onDidChangeElaboration(elaboration => {
+			if (elaboration.walkthroughId === this.player?.walkthrough.id) {
+				this.renderDeeper();
+				this.maybeSpeakDeeper();
+			}
+		}));
 		this.inputStore.add(this.activeService.onDidChangeSpeaking(() => this.renderDeeper()));
 		this.inputStore.add(this.activeService.onDidChangeHistory(() => this.renderHeaderActions()));
 		this.hideFeedback();
@@ -291,7 +303,11 @@ export class WalkthroughEditor extends EditorPane {
 		if (this.player !== player) {
 			this.player = player;
 			this.renderedScene = -1;
-			this.playerListener.value = player.onDidChange(() => this.render());
+			this.playerListener.value = player.onDidChange(() => {
+				this.render();
+				// A deeper explanation waits for the sentence being read to finish.
+				this.maybeSpeakDeeper();
+			});
 		}
 		this.render();
 	}
@@ -525,8 +541,11 @@ export class WalkthroughEditor extends EditorPane {
 			const tab = dom.append(this.fileStrip, $('button.walkthrough-file-tab'));
 			tab.classList.toggle('active', path === scene.file);
 			dom.append(tab, $('span.name')).textContent = path.split('/').pop() ?? path;
-			if (captured) {
+			// A zero count is implied, so only non-zero counts are shown.
+			if (captured?.added) {
 				dom.append(tab, $('span.added')).textContent = `+${captured.added}`;
+			}
+			if (captured?.removed) {
 				dom.append(tab, $('span.removed')).textContent = `−${captured.removed}`;
 			}
 			tab.title = path;
@@ -643,7 +662,11 @@ export class WalkthroughEditor extends EditorPane {
 		const eyebrow = dom.append(head, $('.eyebrow'));
 		dom.append(eyebrow, $('span')).textContent = scene.label;
 		this.renderChangeSummary(eyebrow, scene);
-		const moreDetail = dom.append(head, $('button.more-detail')) as HTMLButtonElement;
+		const headActions = dom.append(head, $('.card-actions'));
+		const ask = dom.append(headActions, $('button.more-detail.ask')) as HTMLButtonElement;
+		this.askButton = ask;
+		store.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => this.openAsk(walkthrough, scene)));
+		const moreDetail = dom.append(headActions, $('button.more-detail')) as HTMLButtonElement;
 		this.moreDetailButton = moreDetail;
 		store.add(dom.addDisposableListener(moreDetail, dom.EventType.CLICK, () => this.toggleDeeper(walkthrough, scene)));
 		dom.append(card, $('h2.title')).textContent = scene.title;
@@ -742,18 +765,85 @@ export class WalkthroughEditor extends EditorPane {
 	private toggleDeeper(walkthrough: Walkthrough, scene: Scene): void {
 		const key = `${walkthrough.id}/${scene.id}`;
 		const existing = this.activeService.elaboration(walkthrough.id, scene.id);
-		if (existing && existing.status !== 'error' && !this.collapsedDeeper.has(key)) {
+		if (existing && !existing.question && existing.status !== 'error' && !this.collapsedDeeper.has(key)) {
 			this.collapsedDeeper.add(key);
+			this.resumeAfterDeeper.delete(existing.requestId);
 			this.activeService.stopSpeaking();
 		} else {
-			this.collapsedDeeper.delete(key);
-			this.player?.pause();
-			this.activeService.elaborate(walkthrough.id, scene.id);
+			this.request(walkthrough, scene, undefined, !!this.player?.playing);
 		}
 		this.renderDeeper();
 	}
 
-	/** The deeper re-explanation of the current scene, streamed in and then read aloud. */
+	/**
+	 * Asks for "More detail" (no question) or answers a question about the scene. Narration that is playing
+	 * finishes its sentence first; the answer is then read aloud and, if narration was playing, the walkthrough
+	 * carries on after it.
+	 */
+	private request(walkthrough: Walkthrough, scene: Scene, question: string | undefined, resume: boolean): void {
+		this.collapsedDeeper.delete(`${walkthrough.id}/${scene.id}`);
+		this.player?.pauseAfterSegment();
+		const elaboration = this.activeService.elaborate(walkthrough.id, scene.id, question);
+		if (resume) {
+			this.resumeAfterDeeper.add(elaboration.requestId);
+		}
+		this.maybeSpeakDeeper();
+	}
+
+	private openAsk(walkthrough: Walkthrough, scene: Scene): void {
+		const key = `${walkthrough.id}/${scene.id}`;
+		if (this.asking?.key === key) {
+			this.closeAsk(true);
+			return;
+		}
+		// Hold the narration (after this sentence) while they type.
+		const resume = !!this.player?.playing || (!!this.asking?.resume);
+		this.player?.pauseAfterSegment();
+		this.activeService.stopSpeaking();
+		this.asking = { key, resume, draft: '' };
+		this.renderDeeper();
+	}
+
+	private closeAsk(resumeIfHeld: boolean): void {
+		const asking = this.asking;
+		this.asking = undefined;
+		if (resumeIfHeld && asking?.resume) {
+			this.player?.play();
+		}
+		this.renderDeeper();
+	}
+
+	/** Reads a finished deeper explanation or answer aloud, once narration has stopped. */
+	private maybeSpeakDeeper(): void {
+		const player = this.player;
+		if (!player || player.playing) {
+			return;
+		}
+		const scene = player.walkthrough.scenes[player.position.scene];
+		const key = `${player.walkthrough.id}/${scene.id}`;
+		const elaboration = this.activeService.elaboration(player.walkthrough.id, scene.id);
+		if (!elaboration || elaboration.status !== 'done' || this.collapsedDeeper.has(key) || this.spokenDeeper.has(elaboration.requestId) || this.asking?.key === key) {
+			return;
+		}
+		this.spokenDeeper.add(elaboration.requestId);
+		void this.activeService.speak(elaboration.text).then(outcome => {
+			if (outcome.kind === 'failed') {
+				this.speechErrors.set(elaboration.requestId, outcome.error);
+				this.renderDeeper();
+				return;
+			}
+			const resume = this.resumeAfterDeeper.delete(elaboration.requestId);
+			const current = this.player;
+			const stillHere = current === player && current.walkthrough.scenes[current.position.scene]?.id === scene.id && !current.playing && current.state !== 'ended';
+			if (outcome.kind === 'ended' && resume && stillHere && !this.collapsedDeeper.has(key) && this.asking === undefined) {
+				this.collapsedDeeper.add(key);
+				current.play();
+				this.renderDeeper();
+			}
+		});
+	}
+
+	/** The deeper re-explanation or answer for the current scene, streamed in and then read aloud; and the question box. */
 	private renderDeeper(): void {
 		const player = this.player;
 		const host = this.deeperHost;
@@ -762,33 +852,57 @@ export class WalkthroughEditor extends EditorPane {
 		}
 		this.deeperStore.clear();
 		dom.clearNode(host);
-		const scene = player.walkthrough.scenes[player.position.scene];
-		const key = `${player.walkthrough.id}/${scene.id}`;
-		const elaboration = this.activeService.elaboration(player.walkthrough.id, scene.id);
+		const walkthrough = player.walkthrough;
+		const scene = walkthrough.scenes[player.position.scene];
+		const key = `${walkthrough.id}/${scene.id}`;
+		const elaboration = this.activeService.elaboration(walkthrough.id, scene.id);
 		const open = !!elaboration && !this.collapsedDeeper.has(key);
+		const deeperOpen = open && !elaboration.question;
+		const askOpen = this.asking?.key === key;
 		if (this.moreDetailButton) {
 			dom.clearNode(this.moreDetailButton);
-			dom.append(this.moreDetailButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(open ? Codicon.chevronUp : Codicon.listTree));
-			dom.append(this.moreDetailButton, $('span')).textContent = open ? localize('lessDetail', "Less detail") : localize('moreDetail', "More detail");
-			this.moreDetailButton.title = open ? localize('lessDetailTitle', "Hide the deeper explanation") : localize('moreDetailTitle', "Pause and explain this part in more depth");
+			dom.append(this.moreDetailButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(deeperOpen ? Codicon.chevronUp : Codicon.listTree));
+			dom.append(this.moreDetailButton, $('span')).textContent = deeperOpen ? localize('lessDetail', "Less detail") : localize('moreDetail', "More detail");
+			this.moreDetailButton.title = deeperOpen ? localize('lessDetailTitle', "Hide the deeper explanation") : localize('moreDetailTitle', "Explain this part in more depth (after the current sentence)");
 		}
-		host.classList.toggle('hidden', !open);
-		if (!open || !elaboration) {
-			this.layoutExplanationZone();
-			return;
+		if (this.askButton) {
+			dom.clearNode(this.askButton);
+			dom.append(this.askButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.question));
+			dom.append(this.askButton, $('span')).textContent = open ? localize('askAnother', "Ask another question") : localize('askQuestion', "Ask a question");
+			this.askButton.title = localize('askTitle', "Ask about this part; the answer appears here and is read aloud");
+			this.askButton.classList.toggle('active', askOpen);
 		}
+		host.classList.toggle('hidden', !open && !askOpen);
+		if (open && elaboration) {
+			this.renderAnswer(host, walkthrough, scene, key, elaboration);
+		}
+		if (askOpen) {
+			this.renderAskBox(host, walkthrough, scene);
+		}
+		this.layoutExplanationZone();
+	}
+
+	private renderAnswer(host: HTMLElement, walkthrough: Walkthrough, scene: Scene, key: string, elaboration: Elaboration): void {
+		const player = this.player!;
 		const head = dom.append(host, $('.deeper-head'));
 		const icon = dom.append(head, $('span'));
-		icon.classList.add(...ThemeIcon.asClassNameArray(elaboration.status === 'streaming' ? Codicon.loading : elaboration.status === 'error' ? Codicon.error : Codicon.lightbulb));
+		icon.classList.add(...ThemeIcon.asClassNameArray(elaboration.status === 'streaming' ? Codicon.loading : elaboration.status === 'error' ? Codicon.error : elaboration.question ? Codicon.commentDiscussion : Codicon.lightbulb));
 		if (elaboration.status === 'streaming') {
 			icon.classList.add('codicon-modifier-spin');
 		}
 		dom.append(head, $('span')).textContent = elaboration.status === 'streaming' && !elaboration.text
-			? localize('deeperLoading', "Working out a deeper explanation…")
-			: localize('deeperTitle', "In more depth");
+			? (elaboration.question ? localize('answerLoading', "Thinking about your question…") : localize('deeperLoading', "Working out a deeper explanation…"))
+			: (elaboration.question ? localize('answerTitle', "Your question") : localize('deeperTitle', "In more depth"));
+		if (elaboration.question) {
+			dom.append(host, $('.deeper-question')).textContent = elaboration.question;
+		}
 		const body = dom.append(host, $('.deeper-body'));
 		for (const paragraph of elaboration.text.split(/\n\s*\n/).map(part => part.trim()).filter(Boolean)) {
 			dom.append(body, $('p')).textContent = paragraph;
+		}
+		const speechError = this.speechErrors.get(elaboration.requestId);
+		if (speechError) {
+			dom.append(host, $('.deeper-note')).textContent = localize('speechFailed', "Couldn't read this aloud: {0}", speechError);
 		}
 		const actions = dom.append(host, $('.deeper-actions'));
 		const button = (label: string, run: () => void, primary = false) => {
@@ -797,27 +911,78 @@ export class WalkthroughEditor extends EditorPane {
 			this.deeperStore.add(dom.addDisposableListener(element, dom.EventType.CLICK, () => run()));
 		};
 		if (elaboration.status === 'error') {
-			button(localize('deeperRetry', "Try Again"), () => this.toggleDeeper(player.walkthrough, scene));
+			button(localize('deeperRetry', "Try Again"), () => this.request(walkthrough, scene, elaboration.question, this.resumeAfterDeeper.has(elaboration.requestId)));
 		} else if (elaboration.status === 'done') {
-			if (this.activeService.narration.available) {
-				if (this.activeService.speaking) {
-					button(localize('deeperStop', "Stop Reading"), () => this.activeService.stopSpeaking());
-				} else {
-					button(localize('deeperListen', "Read Aloud"), () => void this.activeService.speak(elaboration.text));
-				}
-				if (!this.spokenDeeper.has(elaboration.requestId)) {
-					this.spokenDeeper.add(elaboration.requestId);
-					void this.activeService.speak(elaboration.text);
-				}
+			if (this.activeService.speaking) {
+				button(localize('deeperStop', "Stop Reading"), () => this.activeService.stopSpeaking());
+			} else {
+				button(localize('deeperListen', "Read Aloud"), () => {
+					this.speechErrors.delete(elaboration.requestId);
+					void this.activeService.speak(elaboration.text).then(outcome => {
+						if (outcome.kind === 'failed') {
+							this.speechErrors.set(elaboration.requestId, outcome.error);
+							this.renderDeeper();
+						}
+					});
+				});
 			}
-			button(localize('deeperContinue', "Continue Walkthrough"), () => {
-				this.activeService.stopSpeaking();
-				this.collapsedDeeper.add(key);
-				player.play();
-				this.renderDeeper();
-			}, true);
 		}
-		this.layoutExplanationZone();
+		if (elaboration.status !== 'streaming') {
+			button(localize('askAnotherButton', "Ask Another Question"), () => this.openAsk(walkthrough, scene));
+		}
+		button(localize('deeperContinue', "Continue Walkthrough"), () => {
+			this.activeService.stopSpeaking();
+			this.resumeAfterDeeper.delete(elaboration.requestId);
+			this.collapsedDeeper.add(key);
+			this.asking = undefined;
+			player.play();
+			this.renderDeeper();
+		}, true);
+	}
+
+	private renderAskBox(host: HTMLElement, walkthrough: Walkthrough, scene: Scene): void {
+		const box = dom.append(host, $('.ask-box'));
+		const input = dom.append(box, $('input.ask-input')) as HTMLInputElement;
+		input.type = 'text';
+		input.placeholder = localize('askPlaceholder', "Ask about \"{0}\"…", scene.title);
+		input.setAttribute('aria-label', localize('askLabel', "Question about this part of the walkthrough"));
+		// The card re-renders while an earlier answer streams in: keep what they've typed.
+		input.value = this.asking?.draft ?? '';
+		this.deeperStore.add(dom.addDisposableListener(input, dom.EventType.INPUT, () => {
+			if (this.asking) {
+				this.asking.draft = input.value;
+			}
+		}));
+		const submit = () => {
+			const question = input.value.trim();
+			if (!question) {
+				return;
+			}
+			const resume = this.asking?.resume ?? false;
+			this.asking = undefined;
+			this.activeService.stopSpeaking();
+			this.request(walkthrough, scene, question, resume);
+			this.renderDeeper();
+		};
+		const askButton = dom.append(box, $('button.primary')) as HTMLButtonElement;
+		askButton.textContent = localize('askSubmit', "Ask");
+		const cancel = dom.append(box, $('button.secondary')) as HTMLButtonElement;
+		cancel.textContent = localize('askCancel', "Cancel");
+		// Typing here must not trigger the walkthrough's single-key shortcuts (Space, J/K/L, C, O).
+		this.deeperStore.add(dom.addDisposableListener(input, dom.EventType.KEY_DOWN, (event: KeyboardEvent) => {
+			event.stopPropagation();
+			if (event.key === 'Enter' && !event.isComposing) {
+				event.preventDefault();
+				submit();
+			} else if (event.key === 'Escape') {
+				event.preventDefault();
+				this.closeAsk(true);
+			}
+		}));
+		this.deeperStore.add(dom.addDisposableListener(input, dom.EventType.MOUSE_DOWN, (event: MouseEvent) => event.stopPropagation()));
+		this.deeperStore.add(dom.addDisposableListener(askButton, dom.EventType.CLICK, submit));
+		this.deeperStore.add(dom.addDisposableListener(cancel, dom.EventType.CLICK, () => this.closeAsk(true)));
+		dom.scheduleAtNextAnimationFrame(dom.getWindow(input), () => input.focus());
 	}
 
 	// ------------------------------------------------------------------ detail feedback

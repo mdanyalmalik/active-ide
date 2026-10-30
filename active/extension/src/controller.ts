@@ -5,12 +5,13 @@
 
 import { createHash } from 'node:crypto';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
-import { ExplanationAgent, PlanResult, WalkthroughPlanner } from './explain/planner';
-import { buildBriefingPrompt, buildElaborationPrompt, buildQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
+import { CONDENSE_TARGET_CHARS, condensedOf, ExplainerMemory, MemoryInput } from './explain/memory';
+import { ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner } from './explain/planner';
+import { buildBriefingPrompt, buildElaborationPrompt, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import { HistoryStore } from './history/historyStore';
 import { extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
-import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, KnowledgeProfile, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
+import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 import { diffStats } from './tracking/lineDiff';
 
@@ -23,6 +24,8 @@ export interface ControllerOptions {
 	readonly chapterMs: () => number;
 	/** Lean toward a short note for small changes and short requests. */
 	readonly preferNotes: () => boolean;
+	/** The explainer's own memory (independent of the coding agent's). */
+	readonly memory?: ExplainerMemory;
 	/** False in the "off" explanation mode: the explanation model isn't asked during or after turns. */
 	readonly explanationsEnabled?: () => boolean;
 	readonly profile: () => KnowledgeProfile;
@@ -383,13 +386,52 @@ export class ActiveController implements AgentSessionListener {
 		this.options.emit({ type: 'walkthroughStatus', status: { turnId: turn.id, stage, detail } });
 	}
 
+	/** What the agent's last prompt that changed anything changed (the Explorer's "Agent" counts). */
+	private agentChanges: FileChangeStat[] | undefined;
+	/** Each of those files as it was before that prompt (`null`: it didn't exist), for the editor's "Agent" gutter. */
+	private agentBaselines: Map<string, string | null> | undefined;
+
+	private async lastAgentChanges(): Promise<FileChangeStat[]> {
+		const live = this.tracker.currentStats();
+		if (live.length) {
+			return live;
+		}
+		if (!this.agentChanges) {
+			// After a reload: the newest saved turn (not a chapter record) that changed files.
+			const turn = (await this.history.list()).find(summary => summary.outcome !== 'chapter' && summary.files.length);
+			const captured = turn ? (await this.history.get(turn.turnId))?.files ?? [] : [];
+			const created = new Set(captured.filter(file => file.baseline === null).map(file => file.path));
+			this.agentChanges = turn?.files.map(file => ({ ...file, ...(created.has(file.path) ? { created: true } : {}) })) ?? [];
+			this.agentBaselines = new Map(captured.map(file => [file.path, file.baseline]));
+		}
+		return this.agentChanges;
+	}
+
+	/**
+	 * A file as it was before the agent's last prompt that changed it, so the editor can mark what that prompt
+	 * changed. `undefined` when that prompt didn't touch the file.
+	 */
+	async agentBaseline(path: string): Promise<{ readonly baseline: string | null } | undefined> {
+		const live = this.tracker.currentNetChanges().find(change => change.path === path && !change.userOnly);
+		if (live) {
+			return { baseline: live.baseline };
+		}
+		await this.lastAgentChanges();
+		return this.agentBaselines?.has(path) ? { baseline: this.agentBaselines.get(path)! } : undefined;
+	}
+
+	/** Uncommitted changes as git sees them (the Explorer's "Git" counts); `undefined` outside a repository. */
+	gitChanges(): Promise<FileChangeStat[] | undefined> {
+		return this.tracker.files.gitStats();
+	}
+
 	async initialState(): Promise<InitialState> {
 		return {
 			agent: this.agentState(),
 			chat: this.chat,
 			profile: this.options.profile(),
 			history: await this.history.list(),
-			turnChanges: this.tracker.currentStats(),
+			turnChanges: await this.lastAgentChanges(),
 			narration: { available: false, detail: '' },
 			pendingWalkthrough: this.pendingWalkthrough,
 		};
@@ -492,8 +534,8 @@ export class ActiveController implements AgentSessionListener {
 		if (!agentInitiated) {
 			this.upsertChat({ id: entryId('user'), turnId: turn.id, role: 'user', text: task, at: Date.now() });
 		}
+		// The Explorer keeps the last prompt's counts until this one changes something.
 		await this.tracker.beginTurn(turn.id);
-		this.options.emit({ type: 'turnChanges', turnId: turn.id, files: [] });
 		this.setStage(turn, 'collecting', 'Watching changes');
 		this.setStatus('running');
 		if (!agentInitiated) {
@@ -518,32 +560,54 @@ export class ActiveController implements AgentSessionListener {
 		const answerId = entryId('explainer');
 		const update = (text: string, status: string) => this.upsertChat({ id: answerId, role: 'explainer', text, status, at: Date.now() });
 		update('', 'streaming');
+		const memory = await this.options.memory?.describe();
+		void this.recordQuestion(request.question, walkthrough?.scenes.find(scene => scene.id === request.sceneId)?.title ?? walkthrough?.title);
 		try {
-			const reply = await this.explainer.ask(buildQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile()), text => update(text, 'streaming'));
+			const reply = await this.explainer.ask(buildQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile(), memory), text => update(text, 'streaming'), true);
 			update(reply, 'done');
 		} catch (error) {
 			update(`The explanation session could not answer: ${error instanceof Error ? error.message : String(error)}`, 'error');
 		}
 	}
 
-	/** Re-explains one scene in more depth through the read-only explanation session, streaming the text back. */
+	/**
+	 * Re-explains one scene in more depth, or answers a question asked from its card, through the read-only
+	 * explanation session, streaming the text back. Goes ahead of queued background work.
+	 */
 	async elaborate(request: ElaborateRequest): Promise<void> {
 		const emit = (text: string, status: 'streaming' | 'done' | 'error') => this.options.emit({ type: 'elaboration', requestId: request.requestId, text, status });
+		const kind = request.question ? 'card question' : 'more detail';
+		const started = Date.now();
 		try {
 			const walkthrough = this.walkthroughs.get(request.walkthroughId) ?? (await this.loadWalkthrough(request.walkthroughId));
 			if (!walkthrough) {
 				throw new Error('that walkthrough is no longer in history');
 			}
-			const reply = await this.explainer.ask(buildElaborationPrompt(walkthrough, request.sceneId, this.options.profile()), text => emit(text, 'streaming'));
+			const memory = await this.options.memory?.describe();
+			const sceneTitle = walkthrough.scenes.find(scene => scene.id === request.sceneId)?.title;
+			void this.recordQuestion(request.question ?? 'wanted more detail', sceneTitle);
+			const prompt = request.question
+				? buildSpokenQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile(), memory)
+				: buildElaborationPrompt(walkthrough, request.sceneId, this.options.profile(), memory);
+			const reply = await this.explainer.ask(prompt, text => emit(text, 'streaming'), true);
+			this.options.log(`${kind} for ${request.walkthroughId}/${request.sceneId}: ${reply.length} chars in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 			emit(reply, 'done');
 		} catch (error) {
-			emit(`Couldn't get a deeper explanation: ${error instanceof Error ? error.message : String(error)}`, 'error');
+			const message = error instanceof Error ? error.message : String(error);
+			this.options.log(`${kind} for ${request.walkthroughId}/${request.sceneId} failed after ${((Date.now() - started) / 1000).toFixed(1)}s: ${message}`);
+			emit(request.question ? `Couldn't answer that: ${message}` : `Couldn't get a deeper explanation: ${message}`, 'error');
 		}
 	}
 
 	private async loadWalkthrough(walkthroughId: string): Promise<Walkthrough | undefined> {
-		const turnId = walkthroughId.replace(/^wt-/, '');
-		return (await this.history.get(turnId))?.walkthrough;
+		const recordId = walkthroughId.replace(/^wt-/, '');
+		const saved = (await this.history.get(recordId))?.walkthrough;
+		if (saved) {
+			return saved;
+		}
+		// The last chapter of a turn is saved with the turn itself, not as its own chapter record.
+		const turnRecord = (await this.history.get(recordId.replace(/-c\d+$/, '')))?.walkthrough;
+		return turnRecord?.id === walkthroughId ? turnRecord : undefined;
 	}
 
 	// ---------------------------------------------------------------- change tracking
@@ -564,7 +628,12 @@ export class ActiveController implements AgentSessionListener {
 		if (!turn || turn.codingDone || !edits.length) {
 			return;
 		}
-		this.options.emit({ type: 'turnChanges', turnId: turn.id, files: this.tracker.currentStats() });
+		const stats = this.tracker.currentStats();
+		if (stats.length) {
+			this.agentChanges = stats;
+			this.agentBaselines = new Map(this.tracker.currentNetChanges().filter(change => !change.userOnly).map(change => [change.path, change.baseline]));
+			this.options.emit({ type: 'turnChanges', turnId: turn.id, files: stats });
+		}
 		// Only the cheap filter runs on edits; the explanation model is asked at checkpoints and at the end.
 		const verdict = assessWorthiness(this.unexplainedChanges(turn));
 		turn.verdict = verdict;
@@ -659,6 +728,9 @@ export class ActiveController implements AgentSessionListener {
 		const files = this.capture(changes);
 		this.setStage(turn, 'drafting', `Writing chapter ${index} while ${this.options.provider.name} works`);
 		const result = await this.planner.plan(await this.planningContext(turn, changes, [], false, index));
+		if (result.draft || result.brief) {
+			await this.keepMemory(result.remember, result.draft?.title ?? result.brief?.title ?? turn.task);
+		}
 		const markExplained = () => {
 			for (const change of changes) {
 				turn.explained.set(change.path, change.final);
@@ -669,8 +741,14 @@ export class ActiveController implements AgentSessionListener {
 		};
 		if (result.brief?.format === 'note') {
 			markExplained();
-			this.explainerNote(turn, result.brief.note!);
-			turn.worthinessLog.push(`chapter ${index}: note`);
+			const inline = this.noteWalkthrough(turn, result.brief, files, index);
+			if (inline) {
+				turn.chapters.push(inline);
+				await this.saveChapter(turn, inline, files);
+				this.walkthroughs.set(inline.id, inline);
+			}
+			this.explainerNote(turn, result.brief.note!, inline && `${turn.id}-c${index}`);
+			turn.worthinessLog.push(`chapter ${index}: note${inline ? ' (with inline version)' : ''}`);
 		} else if (result.draft) {
 			markExplained();
 			const walkthrough = this.toWalkthrough(turn, result.draft, files, [], index);
@@ -688,9 +766,15 @@ export class ActiveController implements AgentSessionListener {
 		}
 	}
 
-	/** A short explanation in chat instead of a walkthrough. */
-	private explainerNote(turn: LogicalTurn, text: string): void {
-		this.upsertChat({ id: entryId('note'), turnId: turn.id, role: 'explainer', text, at: Date.now() });
+	/** A short explanation in chat instead of a walkthrough; `recordId` is the history record of its inline version. */
+	private explainerNote(turn: LogicalTurn, text: string, recordId?: string): void {
+		this.upsertChat({ id: entryId('note'), turnId: turn.id, role: 'explainer', text, at: Date.now(), recordId });
+	}
+
+	/** The note as a one-scene walkthrough at the change, for history and "Show in Code". */
+	private noteWalkthrough(turn: LogicalTurn, brief: NoteBrief, files: Record<string, CapturedFile>, chapter: number | undefined): Walkthrough | undefined {
+		const draft = noteDraft(brief, files);
+		return draft && { ...this.toWalkthrough(turn, draft, files, [], chapter), note: true };
 	}
 
 	private toWalkthrough(turn: LogicalTurn, draft: WalkthroughDraft, files: Record<string, CapturedFile>, pending: readonly PendingCheck[], chapter: number | undefined): Walkthrough {
@@ -724,7 +808,8 @@ export class ActiveController implements AgentSessionListener {
 				outcome: 'chapter',
 				walkthroughId: walkthrough.id,
 				walkthroughTitle: walkthrough.title,
-				explanationNote: `Chapter ${walkthrough.chapter}: ${walkthrough.title}`,
+				walkthroughIsNote: walkthrough.note,
+				explanationNote: `${walkthrough.note ? 'Note' : `Chapter ${walkthrough.chapter}`}: ${walkthrough.title}`,
 				files: Object.values(files).map(file => ({ path: file.path, added: file.added, removed: file.removed })),
 			},
 			chat: [],
@@ -821,7 +906,80 @@ export class ActiveController implements AgentSessionListener {
 			final,
 			preferNotes: this.options.preferNotes(),
 			chapter: chapter ? { index: chapter, earlier: turn.chapters.map(entry => ({ title: entry.title, summary: entry.summary })) } : undefined,
+			memory: await this.options.memory?.describe(),
 		};
+	}
+
+	// ---------------------------------------------------------------- explainer memory
+
+	/** Saves what the explainer asked to remember, once its explanation is actually used. */
+	private async keepMemory(inputs: readonly MemoryInput[] | undefined, context: string): Promise<void> {
+		if (!inputs?.length || !this.options.memory) {
+			return;
+		}
+		try {
+			if (await this.options.memory.add(inputs, context)) {
+				this.options.emit({ type: 'memory', notes: await this.options.memory.list() });
+				void this.condenseMemory();
+			}
+		} catch (error) {
+			this.options.log(`couldn't save explainer memory: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private condensing: Promise<void> | undefined;
+
+	/**
+	 * Once memory is too long to keep passing in full, the explainer rewrites it as fewer, shorter notes.
+	 * Runs in the background behind other explanation work, one at a time, and never when explanations are off.
+	 */
+	condenseMemory(): Promise<void> {
+		this.condensing ??= this.runCondense().finally(() => this.condensing = undefined);
+		return this.condensing;
+	}
+
+	private async runCondense(): Promise<void> {
+		const memory = this.options.memory;
+		if (!memory || this.options.explanationsEnabled?.() === false || !await memory.needsCondensing()) {
+			return;
+		}
+		const notes = await memory.list();
+		const size = await memory.size();
+		try {
+			const reply = await this.explainer.ask(buildMemoryCondensePrompt(await memory.describe(), size, CONDENSE_TARGET_CHARS));
+			const condensed = condensedOf(extractJsonObject(reply));
+			if (!condensed) {
+				this.options.log('memory condensing returned no usable notes; memory left as it was');
+				return;
+			}
+			await memory.condense(new Set(notes.map(note => note.id)), condensed, 'condensed');
+			this.options.log(`memory condensed: ${notes.length} notes (${size} chars) → ${condensed.length} notes (${await memory.size()} chars now)`);
+			this.options.emit({ type: 'memory', notes: await memory.list() });
+		} catch (error) {
+			this.options.log(`memory condensing failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async recordQuestion(question: string, about: string | undefined): Promise<void> {
+		if (!this.options.memory) {
+			return;
+		}
+		try {
+			await this.options.memory.recordQuestion(question, about);
+			this.options.emit({ type: 'memory', notes: await this.options.memory.list() });
+			void this.condenseMemory();
+		} catch (error) {
+			this.options.log(`couldn't save explainer memory: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	async memoryNotes(): Promise<readonly MemoryNote[]> {
+		return this.options.memory?.list() ?? [];
+	}
+
+	async forget(id?: string): Promise<void> {
+		await this.options.memory?.delete(id);
+		this.options.emit({ type: 'memory', notes: await this.memoryNotes() });
 	}
 
 	// ---------------------------------------------------------------- coding session listener
@@ -990,7 +1148,12 @@ export class ActiveController implements AgentSessionListener {
 		const captured = await this.tracker.endTurn();
 		const changes = captured?.changes ?? [];
 		const edits = captured?.edits ?? [];
-		this.options.emit({ type: 'turnChanges', turnId: turn.id, files: changes.filter(change => !change.userOnly).map(change => ({ path: change.path, added: change.added, removed: change.removed })) });
+		const agentFiles = changes.filter(change => !change.userOnly).map(change => ({ path: change.path, added: change.added, removed: change.removed, ...(change.baseline === null ? { created: true } : {}) }));
+		if (agentFiles.length) {
+			this.agentChanges = agentFiles;
+			this.agentBaselines = new Map(changes.filter(change => !change.userOnly).map(change => [change.path, change.baseline]));
+			this.options.emit({ type: 'turnChanges', turnId: turn.id, files: agentFiles });
+		}
 		this.setStatus('idle');
 
 		const next = this.queuedTasks.shift();
@@ -1004,6 +1167,7 @@ export class ActiveController implements AgentSessionListener {
 		const chapters = turn.chapters.length;
 
 		let walkthrough: Walkthrough | undefined;
+		let noteInline: Walkthrough | undefined;
 		let note: string;
 		let startedNext = false;
 		if (terminal !== 'completed' && Object.keys(files).length === 0) {
@@ -1028,13 +1192,16 @@ export class ActiveController implements AgentSessionListener {
 			this.setStage(turn, 'finalizing', 'Finishing the explanation');
 			let stage: WalkthroughStage = 'failed';
 			try {
-				const outcome = await this.finalizeWalkthrough(turn, this.capture(remaining), remaining, pending);
+				const remainingFiles = this.capture(remaining);
+				const outcome = await this.finalizeWalkthrough(turn, remainingFiles, remaining, pending);
 				walkthrough = outcome.walkthrough;
 				if (walkthrough) {
 					note = `${walkthrough.chapter ? `Chapter ${walkthrough.chapter}` : 'Walkthrough'}: ${walkthrough.title}`;
 					stage = 'ready';
 				} else if (outcome.brief?.format === 'note') {
-					this.explainerNote(turn, outcome.brief.note!);
+					// Saved like a walkthrough (History, Replay, questions) but shown as a note: it never pops up.
+					noteInline = this.noteWalkthrough(turn, outcome.brief, remainingFiles, chapters ? chapters + 1 : undefined);
+					this.explainerNote(turn, outcome.brief.note!, noteInline && turn.id);
 					note = 'Explained in a short note.';
 					stage = 'notExplained';
 				} else if (outcome.brief) {
@@ -1057,8 +1224,9 @@ export class ActiveController implements AgentSessionListener {
 			startedAt: turn.startedAt,
 			endedAt: Date.now(),
 			outcome: terminal,
-			walkthroughId: walkthrough?.id,
-			walkthroughTitle: walkthrough?.title,
+			walkthroughId: (walkthrough ?? noteInline)?.id,
+			walkthroughTitle: (walkthrough ?? noteInline)?.title,
+			walkthroughIsNote: !walkthrough && !!noteInline || undefined,
 			explanationNote: note,
 			files: Object.values(files).map(file => ({ path: file.path, added: file.added, removed: file.removed })),
 		};
@@ -1069,11 +1237,14 @@ export class ActiveController implements AgentSessionListener {
 			tools: [...turn.tools.values()],
 			edits: edits.map(edit => ({ seq: edit.seq, path: edit.path, source: edit.source, added: edit.added, removed: edit.removed, at: edit.at, toolItemId: edit.toolItemId, before: edit.before, after: edit.after })),
 			files: Object.values(files),
-			walkthrough,
+			walkthrough: walkthrough ?? noteInline,
 			worthiness: turn.worthinessLog,
 		}).catch(error => this.options.log(`history save failed: ${error}`));
 		this.options.emit({ type: 'history', history: await this.history.list() });
 
+		if (noteInline) {
+			this.walkthroughs.set(noteInline.id, noteInline);
+		}
 		if (walkthrough) {
 			this.walkthroughs.set(walkthrough.id, walkthrough);
 			this.pendingWalkthrough = walkthrough;
@@ -1172,10 +1343,13 @@ export class ActiveController implements AgentSessionListener {
 		if (early?.brief) {
 			result = early;
 		} else if (early?.draft) {
-			result = this.planner.reconcile(early.draft, files, evidence);
+			result = { ...this.planner.reconcile(early.draft, files, evidence), remember: early.remember };
 		}
 		if (!result?.draft && !result?.brief) {
 			result = await this.planner.plan(await this.planningContext(turn, changes, pending, true, chapter), turn.draft?.result.draft);
+		}
+		if (result.draft || result.brief) {
+			await this.keepMemory(result.remember, result.draft?.title ?? result.brief?.title ?? turn.task);
 		}
 		if (result.brief) {
 			turn.worthinessLog.push(`explainer chose ${result.brief.format}${result.brief.reason ? `: ${result.brief.reason}` : ''}`);

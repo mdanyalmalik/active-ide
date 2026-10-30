@@ -183,6 +183,17 @@ function snapshot() {
 	if (dialog) {
 		out.push('', `DIALOG: ${text(dialog).replace(/\n/g, ' / ')}`);
 	}
+	// The round button at the bottom right; hovering it opens these choices upwards.
+	const fab = q('.active-fab-stack');
+	if (fab && !fab.classList.contains('hidden')) {
+		const choices = qa('.active-fab-item', fab).filter(item => !item.classList.contains('hidden')).map(text);
+		out.push('', `FLOATING BUTTON (bottom right, hover for a menu): ${choices.join(' | ')}`);
+	}
+	// Active's welcome dialog covers the window until "Later" or "Get Started".
+	const welcome = q('.active-welcome');
+	if (welcome) {
+		out.push('', `WELCOME DIALOG (blocks clicks): ${text(welcome).replace(/\n+/g, ' / ')}`);
+	}
 	const notifications = qa('.notifications-toasts .notification-list-item-message').map(text);
 	if (notifications.length) {
 		out.push('', `NOTIFICATIONS: ${notifications.join(' / ')}`);
@@ -200,6 +211,15 @@ async function showHistory() {
 		await page.click(".activitybar [aria-label^='History']");
 		await sleep(800);
 	}
+}
+
+/** The round button at the bottom right: hover it, then pick from the menu that opens upwards. */
+async function openFromFloatingMenu(label) {
+	// A real pointer move: the menu opens on :hover.
+	const box = await page.locator('.active-fab-stack .active-fab-main').boundingBox();
+	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+	await sleep(350);
+	await page.locator('.active-fab-stack .active-fab-item', { hasText: label }).first().click();
 }
 
 async function openChat() {
@@ -246,7 +266,7 @@ switch (command) {
 	}
 	case 'ask': {
 		if (await page.locator('.active-walkthrough').isVisible().catch(() => false)) {
-			await page.locator('.active-fab-stack .active-fab', { hasText: 'Chat' }).first().click();
+			await openFromFloatingMenu('Chat');
 			await sleep(800);
 		} else {
 			await openChat();
@@ -275,7 +295,7 @@ switch (command) {
 			await openChat();
 			await page.click('text=Return to Walkthrough').catch(() => page.click('text=Play Walkthrough'));
 		} else if (action === 'open-chat') {
-			await page.locator('.active-fab-stack .active-fab', { hasText: 'Chat' }).first().click();
+			await openFromFloatingMenu('Chat');
 		} else if (action === 'open-file') {
 			await page.click('.active-explain-card .open-file');
 		} else {

@@ -5,6 +5,7 @@
 
 import * as dom from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { fromNow } from '../../../../base/common/date.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -15,7 +16,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import type { ExplanationDepth, Familiarity, KnowledgeProfile, MathComfort, VisualKind } from '../common/activeProtocol.js';
+import type { ExplanationDepth, Familiarity, KnowledgeProfile, MathComfort, MemoryNote, VisualKind } from '../common/activeProtocol.js';
 import { KnowledgeProfileInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
 
@@ -46,6 +47,8 @@ export class KnowledgeProfileEditor extends EditorPane {
 	private form!: HTMLElement;
 	private draft!: Mutable<KnowledgeProfile>;
 	private readonly formStore = this._register(new DisposableStore());
+	private memoryHost!: HTMLElement;
+	private readonly memoryStore = this._register(new DisposableStore());
 
 	constructor(
 		group: IEditorGroup,
@@ -62,6 +65,9 @@ export class KnowledgeProfileEditor extends EditorPane {
 		// The page scrolls natively: the form grows as rows are added, and the root is the scroll container.
 		this.root = dom.append(parent, $('.active-profile'));
 		this.form = dom.append(this.root, $('.active-profile-form'));
+		// Outside the form, which is rebuilt as it's edited.
+		this.memoryHost = dom.append(dom.append(this.root, $('.active-profile-form.memory')), $('section'));
+		this._register(this.activeService.onDidChangeMemory(notes => this.renderMemory(notes)));
 	}
 
 	override async setInput(input: KnowledgeProfileInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -69,6 +75,7 @@ export class KnowledgeProfileEditor extends EditorPane {
 		const profile = this.activeService.profile;
 		this.draft = { ...profile, languages: [...profile.languages], concepts: [...profile.concepts], preferredVisuals: [...profile.preferredVisuals] };
 		this.renderForm();
+		void this.activeService.memoryNotes().then(notes => this.renderMemory(notes));
 	}
 
 	override layout(dimension: dom.Dimension): void {
@@ -151,6 +158,41 @@ export class KnowledgeProfileEditor extends EditorPane {
 			render(items.length - 1);
 		};
 		render();
+	}
+
+	/** What the explainer remembers, kept apart from the form: deleting a note takes effect at once. */
+	private renderMemory(notes: readonly MemoryNote[]): void {
+		this.memoryStore.clear();
+		const host = this.memoryHost;
+		dom.clearNode(host);
+		dom.append(host, $('h2')).textContent = localize('memory', "What Active remembers");
+		dom.append(host, $('p.help')).textContent = localize('memoryHelp', "Notes the explainer keeps between walkthroughs, so it doesn't explain the same thing twice, and the questions you've asked. All of it is given to the explainer; when it gets long, the explainer condenses it. Separate from the coding agent's memory.");
+		if (!notes.length) {
+			dom.append(host, $('p.empty')).textContent = localize('memoryEmpty', "Nothing yet. Notes appear here as walkthroughs explain things to you.");
+			return;
+		}
+		const groups: Array<[MemoryNote['scope'], string]> = [['personal', localize('memoryPersonal', "About you (all projects)")], ['project', localize('memoryProject', "This project")]];
+		for (const [scope, label] of groups) {
+			const scoped = notes.filter(note => note.scope === scope).slice().reverse();
+			if (!scoped.length) {
+				continue;
+			}
+			dom.append(host, $('h3')).textContent = label;
+			const list = dom.append(host, $('ul.memory-list'));
+			for (const note of scoped) {
+				const item = dom.append(list, $('li'));
+				dom.append(item, $('span.memory-text')).textContent = note.text;
+				const meta = dom.append(item, $('span.memory-meta'));
+				meta.textContent = [note.source === 'question' ? localize('memoryFromQuestion', "your question") : note.context, fromNow(note.at, true, true)].filter(Boolean).join(' · ');
+				const forget = dom.append(item, $('button.secondary.forget')) as HTMLButtonElement;
+				forget.textContent = localize('forget', "Forget");
+				forget.title = localize('forgetTitle', "Remove this note from the explainer's memory");
+				this.memoryStore.add(dom.addDisposableListener(forget, dom.EventType.CLICK, () => void this.activeService.forgetMemory(note.id)));
+			}
+		}
+		const clear = dom.append(host, $('button.secondary')) as HTMLButtonElement;
+		clear.textContent = localize('forgetAll', "Forget Everything");
+		this.memoryStore.add(dom.addDisposableListener(clear, dom.EventType.CLICK, () => void this.activeService.forgetMemory()));
 	}
 
 	private renderForm(): void {

@@ -15,6 +15,7 @@ import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
@@ -44,7 +45,9 @@ import { ActiveEvent, ExplainMode, WORKBENCH_EVENT_COMMAND } from '../common/act
 import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
 import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { ActiveChatEditor } from './chatEditor.js';
-import { explorerChangeCountsDescriptor } from './explorerStats.js';
+import { ACTIVE_CHANGE_COUNTS_VIEW_ID, ChangeCountsBar, explorerChangeCountsDescriptor } from './explorerStats.js';
+import { AgentDecorations, AgentQuickDiff } from './agentChanges.js';
+import { VIEW_CONTAINER as EXPLORER_VIEW_CONTAINER } from '../../files/browser/explorerViewlet.js';
 import { ActiveHistoryView } from './historyView.js';
 import { KnowledgeProfileEditor } from './profileEditor.js';
 import { ActiveCommandIds, WalkthroughCommandIds } from './walkthroughCommands.js';
@@ -147,6 +150,8 @@ const historyContainer = viewContainers.registerViewContainer({
 viewsRegistry.registerViews([{ id: ACTIVE_HISTORY_VIEW_ID, name: localize2('activeHistoryView', "History"), ctorDescriptor: new SyncDescriptor(ActiveHistoryView), canToggleVisibility: false, canMoveView: true, containerIcon: historyViewIcon }], historyContainer);
 
 Registry.as<IExplorerFileContributionRegistry>(ExplorerExtensions.FileContributionRegistry).register(explorerChangeCountsDescriptor);
+// The switch between the counts sits in a one-line bar at the top of the Explorer.
+viewsRegistry.registerViews([{ id: ACTIVE_CHANGE_COUNTS_VIEW_ID, name: localize2('changeCountsView', "Changes"), ctorDescriptor: new SyncDescriptor(ChangeCountsBar), order: -1, canToggleVisibility: true, canMoveView: false }], EXPLORER_VIEW_CONTAINER);
 
 // ---------------------------------------------------------------- actions & configurable keybindings
 
@@ -427,7 +432,12 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 
 // ---------------------------------------------------------------- startup & status bar
 
-/** Starts in chat mode: chat fills the work area inside the familiar shell. */
+const CHAT_LAYOUT_APPLIED_KEY = 'active.startup.chatLayoutApplied';
+
+/**
+ * Starts in chat mode: chat fills the work area inside the familiar shell. The side bars and panel are
+ * hidden only the first time a folder opens; after that the layout the user left is restored as usual.
+ */
 class ActiveStartup extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.activeStartup';
 
@@ -436,13 +446,17 @@ class ActiveStartup extends Disposable implements IWorkbenchContribution {
 		@IEditorService editorService: IEditorService,
 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
 		@IConfigurationService configurationService: IConfigurationService,
+		@IStorageService storageService: IStorageService,
 	) {
 		super();
 		void activeService.initialize();
 		if (configurationService.getValue<boolean>('active.startWithChat') !== false) {
-			layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
-			layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
-			layoutService.setPartHidden(true, Parts.PANEL_PART);
+			if (!storageService.getBoolean(CHAT_LAYOUT_APPLIED_KEY, StorageScope.WORKSPACE, false)) {
+				layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+				layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
+				layoutService.setPartHidden(true, Parts.PANEL_PART);
+				storageService.store(CHAT_LAYOUT_APPLIED_KEY, true, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+			}
 			void editorService.openEditor(new ActiveChatInput(), { pinned: true });
 		}
 	}
@@ -538,13 +552,20 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
  * Floating shortcuts over the editor area: Chat whenever chat isn't showing, and
  * Walkthrough (the latest explanation) whenever a walkthrough isn't showing.
  */
+/**
+ * One round button at the bottom right of the editor. Hovering (or focusing) it opens a small menu upwards:
+ * Walkthrough from chat, Chat from a walkthrough, both anywhere else. With one choice, clicking the circle
+ * runs it; with two, clicking opens the menu (for touch and keyboard).
+ */
 class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.activeFloatingButtons';
 
 	private readonly stack: HTMLElement;
+	private readonly menu: HTMLElement;
+	private readonly main: HTMLButtonElement;
+	private readonly mainIcon: HTMLElement;
 	private readonly chat: HTMLButtonElement;
 	private readonly walkthrough: HTMLButtonElement;
-	private host: HTMLElement | undefined;
 
 	constructor(
 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
@@ -556,9 +577,29 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		const host = layoutService.getContainer(mainWindow, Parts.EDITOR_PART) ?? layoutService.mainContainer;
 		this.stack = dom.append(host, dom.$('.active-fab-stack'));
 		this._register(toDisposable(() => this.stack.remove()));
-		this.walkthrough = this.button(Codicon.playCircle, localize('fabWalkthrough', "Walkthrough"), () => this.activeService.openRecentWalkthrough());
-		this.chat = this.button(Codicon.commentDiscussion, localize('fabChat', "Chat"), () => this.activeService.openChat(this.editorService.activeEditor instanceof WalkthroughInput));
-		this.chat.classList.add('primary');
+		this.menu = dom.append(this.stack, dom.$('.active-fab-menu'));
+		this.menu.setAttribute('role', 'menu');
+		// Top to bottom: the walkthrough sits above chat, nearest the circle.
+		this.walkthrough = this.item(Codicon.playCircle, localize('fabWalkthrough', "Walkthrough"), () => this.activeService.openRecentWalkthrough());
+		this.chat = this.item(Codicon.commentDiscussion, localize('fabChat', "Chat"), () => this.activeService.openChat(this.editorService.activeEditor instanceof WalkthroughInput));
+		this.main = dom.append(this.stack, dom.$('button.active-fab-main')) as HTMLButtonElement;
+		this.main.setAttribute('aria-haspopup', 'menu');
+		this.mainIcon = dom.append(this.main, dom.$('span.icon'));
+		this._register(dom.addDisposableListener(this.main, dom.EventType.CLICK, () => {
+			const choices = this.choices();
+			if (choices.length === 1) {
+				choices[0].click();
+			} else {
+				this.setOpen(!this.stack.classList.contains('open'));
+			}
+		}));
+		this._register(dom.addDisposableListener(this.stack, dom.EventType.MOUSE_LEAVE, () => this.setOpen(false)));
+		this._register(dom.addDisposableListener(this.stack, dom.EventType.KEY_DOWN, (event: KeyboardEvent) => {
+			if (event.key === 'Escape') {
+				this.setOpen(false);
+				this.main.blur();
+			}
+		}));
 		const update = () => this.update();
 		this._register(editorService.onDidActiveEditorChange(update));
 		this._register(activeService.onDidChangeRecentWalkthrough(update));
@@ -567,16 +608,28 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this._register(keybindingService.onDidUpdateKeybindings(update));
 		this._register(activeService.onDidChangeControlsHeight(update));
 		this._register(layoutService.onDidLayoutMainContainer(update));
-		this.host = host;
 		this.update();
 	}
 
-	private button(icon: ThemeIcon, label: string, run: () => unknown): HTMLButtonElement {
-		const element = dom.append(this.stack, dom.$('button.active-fab')) as HTMLButtonElement;
-		dom.append(element, dom.$('span')).classList.add(...ThemeIcon.asClassNameArray(icon));
+	private item(icon: ThemeIcon, label: string, run: () => unknown): HTMLButtonElement {
+		const element = dom.append(this.menu, dom.$('button.active-fab-item')) as HTMLButtonElement;
+		element.setAttribute('role', 'menuitem');
 		dom.append(element, dom.$('span.label')).textContent = label;
-		this._register(dom.addDisposableListener(element, dom.EventType.CLICK, () => run()));
+		dom.append(element, dom.$('span.icon')).classList.add(...ThemeIcon.asClassNameArray(icon));
+		this._register(dom.addDisposableListener(element, dom.EventType.CLICK, () => {
+			this.setOpen(false);
+			run();
+		}));
 		return element;
+	}
+
+	private choices(): HTMLButtonElement[] {
+		return [this.walkthrough, this.chat].filter(item => !item.classList.contains('hidden'));
+	}
+
+	private setOpen(open: boolean): void {
+		this.stack.classList.toggle('open', open);
+		this.main.setAttribute('aria-expanded', String(open));
 	}
 
 	private update(): void {
@@ -585,8 +638,11 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		const onWalkthrough = active instanceof WalkthroughInput;
 		this.chat.classList.toggle('hidden', onChat);
 		this.walkthrough.classList.toggle('hidden', onWalkthrough || !!this.activeService.pendingHandoff || !this.activeService.hasRecentWalkthrough);
-		// Over a walkthrough the stack sits just above its playback controls.
-		this.stack.classList.toggle('compact', (this.host?.clientWidth ?? 1000) < 560);
+		const choices = this.choices();
+		// The cascade runs from the item nearest the circle upwards.
+		choices.forEach((item, index) => item.style.setProperty('--active-fab-index', String(choices.length - 1 - index)));
+		this.stack.classList.toggle('hidden', choices.length === 0);
+		// Over a walkthrough the circle sits just above its playback controls.
 		this.stack.style.bottom = onWalkthrough && this.activeService.controlsHeight ? `${this.activeService.controlsHeight + 14}px` : '';
 		const chatKey = this.keybindingService.lookupKeybinding(onWalkthrough ? WalkthroughCommandIds.OpenChat : ActiveCommandIds.OpenChat)?.getLabel();
 		this.chat.title = onWalkthrough
@@ -596,6 +652,13 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this.walkthrough.title = player
 			? localize('fabWalkthroughResume', "Return to the walkthrough: {0}", player.walkthrough.title)
 			: localize('fabWalkthroughLatest', "Open the latest walkthrough");
+		// The circle shows the one thing it leads to, or "more" when there's a choice.
+		const icon = choices.length === 1 ? (choices[0] === this.chat ? Codicon.commentDiscussion : Codicon.playCircle) : Codicon.ellipsis;
+		this.mainIcon.className = 'icon';
+		this.mainIcon.classList.add(...ThemeIcon.asClassNameArray(icon));
+		this.main.title = choices.length === 1 ? choices[0].title : localize('fabMore', "Chat and walkthrough");
+		this.main.setAttribute('aria-label', choices.length === 1 ? choices[0].textContent ?? '' : localize('fabMoreLabel', "Open chat or the walkthrough"));
+		this.setOpen(false);
 	}
 }
 
@@ -603,3 +666,5 @@ registerWorkbenchContribution2(ActiveStartup.ID, ActiveStartup, WorkbenchPhase.A
 registerWorkbenchContribution2(ActiveFloatingButtons.ID, ActiveFloatingButtons, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(ActiveWelcomeDialog.ID, ActiveWelcomeDialog, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(ActiveStatusBar.ID, ActiveStatusBar, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(AgentQuickDiff.ID, AgentQuickDiff, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(AgentDecorations.ID, AgentDecorations, WorkbenchPhase.AfterRestored);

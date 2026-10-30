@@ -316,6 +316,8 @@ export interface Walkthrough {
 	readonly files: Readonly<Record<string, CapturedFile>>;
 	/** Long turns are explained in chapters (1-based); each covers the changes since the previous one. */
 	readonly chapter?: number;
+	/** The inline version of a short note: one scene at the change. It's saved to history but never pops up. */
+	readonly note?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +397,8 @@ export interface ChatEntry {
 	readonly phase?: string;
 	readonly approval?: ApprovalRequest;
 	readonly at: number;
+	/** For a note: the history record holding its inline version (a one-scene walkthrough at the change). */
+	readonly recordId?: string;
 }
 
 export type WalkthroughStage = 'idle' | 'collecting' | 'drafting' | 'waitingForBackground' | 'finalizing' | 'ready' | 'notExplained' | 'failed';
@@ -409,6 +413,8 @@ export interface FileChangeStat {
 	readonly path: string;
 	readonly added: number;
 	readonly removed: number;
+	/** The file didn't exist before (the agent created it). */
+	readonly created?: boolean;
 }
 
 export interface TurnSummary {
@@ -421,6 +427,8 @@ export interface TurnSummary {
 	readonly outcome: string;
 	readonly walkthroughId?: string;
 	readonly walkthroughTitle?: string;
+	/** The walkthrough is the inline version of a short note. */
+	readonly walkthroughIsNote?: boolean;
 	readonly explanationNote: string;
 	readonly files: ReadonlyArray<FileChangeStat>;
 }
@@ -486,10 +494,27 @@ export interface NarrationStatus {
 	readonly voices?: ReadonlyArray<VoiceInfo>;
 }
 
+/** `personal`: about the developer, across projects; `project`: about this folder. */
+export type MemoryScope = 'personal' | 'project';
+
+/** A note in the explainer's own memory (kept by Active, separate from the coding agent's). */
+export interface MemoryNote {
+	readonly id: string;
+	readonly scope: MemoryScope;
+	readonly text: string;
+	readonly at: number;
+	/** `explainer`: the explanation model chose to remember it; `question`: a question the developer asked. */
+	readonly source: 'explainer' | 'question';
+	/** What it came from, e.g. the walkthrough title. */
+	readonly context?: string;
+}
+
 export interface ElaborateRequest {
 	readonly requestId: string;
 	readonly walkthroughId: string;
 	readonly sceneId: string;
+	/** A question the developer asked from the scene's card; without one, the scene is re-explained in more depth. */
+	readonly question?: string;
 }
 
 export type ActiveEvent =
@@ -504,6 +529,7 @@ export type ActiveEvent =
 	| { readonly type: 'elaboration'; readonly requestId: string; readonly text: string; readonly status: 'streaming' | 'done' | 'error' }
 	| { readonly type: 'profile'; readonly profile: KnowledgeProfile }
 	| { readonly type: 'models'; readonly models: ReadonlyArray<AgentModelInfo> }
+	| { readonly type: 'memory'; readonly notes: ReadonlyArray<MemoryNote> }
 	/** The whole transcript changed (a session was resumed or a new one started). */
 	| { readonly type: 'chatReset'; readonly chat: ReadonlyArray<ChatEntry> };
 
@@ -528,6 +554,13 @@ export const enum ExtensionCommand {
 	NewSession = 'active.ext.newSession',
 	ResumeSession = 'active.ext.resumeSession',
 	Brief = 'active.ext.brief',
+	/** Uncommitted changes as git sees them, per file (`undefined` outside a git repository). */
+	GitChanges = 'active.ext.gitChanges',
+	/** A file as it was before the agent's last prompt that changed it: `{baseline}` (`null` if new), or `undefined`. */
+	AgentBaseline = 'active.ext.agentBaseline',
+	MemoryGet = 'active.ext.memoryGet',
+	/** Forgets one note (by id), or all of them when called without one. */
+	MemoryDelete = 'active.ext.memoryDelete',
 }
 
 /** Command id the workbench registers for extension → workbench events. */

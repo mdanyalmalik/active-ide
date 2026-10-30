@@ -114,15 +114,21 @@ export class ActiveHistoryView extends ViewPane {
 		this.timeLabel(dom.append(head, $('span.when')), () => fromNow(turn.startedAt, true));
 		dom.append(item, $('.task')).textContent = turn.task;
 		const note = dom.append(item, $('.note'));
-		note.textContent = turn.walkthroughTitle ? localize('walkthroughNote', "Walkthrough: {0}", turn.walkthroughTitle) : turn.explanationNote;
+		note.textContent = !turn.walkthroughTitle ? turn.explanationNote
+			: turn.walkthroughIsNote ? localize('noteEntry', "Note: {0}", turn.walkthroughTitle)
+				: localize('walkthroughNote', "Walkthrough: {0}", turn.walkthroughTitle);
 		note.classList.toggle('has-walkthrough', !!turn.walkthroughId);
 		if (turn.files.length) {
 			const files = dom.append(item, $('.files'));
 			for (const file of turn.files) {
 				const row = dom.append(files, $('span.file'));
 				dom.append(row, $('span.name')).textContent = file.path;
-				dom.append(row, $('span.added')).textContent = ` +${file.added}`;
-				dom.append(row, $('span.removed')).textContent = ` −${file.removed}`;
+				if (file.added) {
+					dom.append(row, $('span.added')).textContent = ` +${file.added}`;
+				}
+				if (file.removed) {
+					dom.append(row, $('span.removed')).textContent = ` −${file.removed}`;
+				}
 			}
 		}
 		const actions = dom.append(item, $('.actions'));

@@ -16,6 +16,7 @@ import { after, before, describe, test } from 'node:test';
 import { MuseHost } from '../agents/museHost';
 import { MuseProvider } from '../agents/providers';
 import { ActiveController } from '../controller';
+import { ExplainerMemory } from '../explain/memory';
 import { HistoryStore } from '../history/historyStore';
 import { ActiveEvent, ChatEntry, DEFAULT_PROFILE, Walkthrough, WalkthroughStage } from '../shared/activeProtocol';
 import { ChangeTracker } from '../tracking/changeTracker';
@@ -29,6 +30,7 @@ interface Harness {
 	events: ActiveEvent[];
 	root: string;
 	history: HistoryStore;
+	memory: ExplainerMemory;
 	waitFor<T extends ActiveEvent>(predicate: (event: ActiveEvent) => event is T, timeoutMs?: number): Promise<T>;
 }
 
@@ -42,6 +44,7 @@ async function harness(backgroundTimeoutMs: number, timing: { checkpointMs: numb
 	const files = new WorkspaceFiles(root);
 	const tracker = new ChangeTracker(files);
 	const history = new HistoryStore(path.join(storage, 'history'));
+	const memory = new ExplainerMemory({ personal: path.join(storage, 'memory-personal.json'), project: path.join(storage, 'memory-project.json') });
 	let controller: ActiveController;
 	let remembered: string | undefined;
 	const emit = (event: ActiveEvent) => {
@@ -66,6 +69,7 @@ async function harness(backgroundTimeoutMs: number, timing: { checkpointMs: numb
 		checkpointMs: () => timing.checkpointMs,
 		chapterMs: () => timing.chapterMs,
 		preferNotes: () => true,
+		memory,
 		explanationsEnabled: () => timing.explanations !== false,
 		profile: () => ({ ...DEFAULT_PROFILE, configured: true }),
 		emit,
@@ -87,7 +91,7 @@ async function harness(backgroundTimeoutMs: number, timing: { checkpointMs: numb
 	after(() => clearInterval(poll));
 	await controller.connect();
 	return {
-		controller, events, root, history,
+		controller, events, root, history, memory,
 		waitFor<T extends ActiveEvent>(predicate: (event: ActiveEvent) => event is T, timeoutMs = 20000): Promise<T> {
 			return new Promise<T>((resolve, reject) => {
 				const timer = setTimeout(() => reject(new Error('timed out waiting for event')), timeoutMs);
@@ -122,6 +126,12 @@ describe('explanations off (scripted MSP host)', () => {
 		await new Promise(resolve => setTimeout(resolve, 200));
 		assert.equal((await h.history.list())[0].task, 'Support minutes and hours in parseDuration');
 	});
+
+	test('with explanations off, memory is never condensed (the explanation model isn\'t used)', async () => {
+		await h.memory.add(Array.from({ length: 30 }, (_, index) => ({ scope: 'project' as const, note: `fact ${index} ${'x'.repeat(260)}` })));
+		await h.controller.condenseMemory();
+		assert.equal((await h.memory.list()).length, 30);
+	});
 });
 
 describe('chapters (scripted MSP host)', () => {
@@ -144,12 +154,12 @@ describe('chapters (scripted MSP host)', () => {
 		await h.controller.submitTask('Support minutes and hours in parseDuration');
 		const { walkthrough } = await chapter;
 		assert.equal(walkthrough.chapter, 1);
+		// Nothing changed after the chapter, so the end of the turn adds no second explanation.
+		await ended;
 		// The chapter was started at a checkpoint (the test run), while the agent was still working.
 		const chapterStarted = h.events.findIndex(event => event.type === 'walkthroughStatus' && /Writing chapter 1 while/.test(event.status.detail));
 		const finalMessage = h.events.findIndex(event => event.type === 'chat' && event.entry.role === 'agent' && /now accepts/.test(event.entry.text) && event.entry.status === 'done');
-		assert.ok(chapterStarted >= 0 && chapterStarted < finalMessage);
-		// Nothing changed after the chapter, so the end of the turn adds no second explanation.
-		await ended;
+		assert.ok(chapterStarted >= 0 && chapterStarted < finalMessage, `chapter started at event ${chapterStarted}, final message at ${finalMessage}`);
 		assert.equal(h.events.filter(event => event.type === 'walkthroughReady').length, 1);
 		const turns = await h.history.list();
 		assert.ok(turns.some(turn => turn.walkthroughId === walkthrough.id && turn.explanationNote.startsWith('Chapter 1')));
@@ -186,6 +196,29 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		// It was planned from the agent's final answer, and the end of the turn reused that plan.
 		const details = h.events.flatMap(event => event.type === 'walkthroughStatus' ? [event.status.detail] : []);
 		assert.ok(details.some(detail => /while .* wraps up/.test(detail)), details.join(' | '));
+		// What the explainer asked to remember is saved once, with where it came from.
+		const notes = await h.memory.list();
+		assert.deepStrictEqual(notes.map(note => [note.scope, note.source, note.context]).sort(), [['personal', 'explainer', walkthrough.title], ['project', 'explainer', walkthrough.title]]);
+		assert.ok(h.events.some(event => event.type === 'memory'));
+	});
+
+	test('the Explorer\'s "last prompt" counts stay until a prompt changes something', async () => {
+		const counts = (await h.controller.initialState()).turnChanges;
+		assert.deepStrictEqual(counts.map(file => file.path).sort(), ['src/duration.js', 'test/duration.test.js']);
+		const from = h.events.length;
+		const done = h.waitFor(isStage('notExplained'));
+		await h.controller.submitTask('Just answer: what does this project do?');
+		await done;
+		// No empty update at the start or end of a prompt that changed nothing...
+		assert.equal(h.events.slice(from).some(event => event.type === 'turnChanges'), false);
+		// ...and a reload still shows the last prompt that did change files.
+		assert.deepStrictEqual((await h.controller.initialState()).turnChanges, counts);
+		// The editor's "Agent" change bars diff against the files as they were before that prompt.
+		const original = await fs.readFile(path.join(repo, 'demo', 'ledger-api', 'src', 'duration.js'), 'utf8');
+		assert.deepStrictEqual(
+			[await h.controller.agentBaseline('src/duration.js'), await h.controller.agentBaseline('README.md')],
+			[{ baseline: original }, undefined],
+		);
 	});
 
 	test('reconnecting resumes the folder\'s last session and puts its chat back', async () => {
@@ -202,12 +235,23 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		await h.controller.submitTask('Fix the typo in the README');
 		const { status } = await done;
 		assert.equal(status.detail, 'Explained in a short note.');
-		assert.ok(h.events.some(event => event.type === 'chat' && event.entry.role === 'explainer' && /README wording/.test(event.entry.text)));
+		const note = h.events.find(event => event.type === 'chat' && event.entry.role === 'explainer' && /README wording/.test(event.entry.text));
+		assert.ok(note && note.type === 'chat');
+		// The note never pops up as a walkthrough...
+		assert.ok(!h.events.some(event => event.type === 'walkthroughReady' && event.walkthrough.task === 'Fix the typo in the README'));
 		await new Promise(resolve => setTimeout(resolve, 200));
 		const turns = await h.history.list();
 		assert.equal(turns[0].task, 'Fix the typo in the README');
-		assert.equal(turns[0].walkthroughId, undefined);
 		assert.deepStrictEqual(turns[0].files, [{ path: 'README.md', added: 1, removed: 1 }]);
+		// ...but its inline version (one scene at the change) is saved with the turn and linked from chat.
+		assert.equal(note.entry.recordId, turns[0].turnId);
+		const inline = (await h.history.get(turns[0].turnId))?.walkthrough;
+		assert.equal(inline?.note, true);
+		assert.equal(turns[0].walkthroughId, inline?.id);
+		assert.equal(turns[0].walkthroughIsNote, true);
+		assert.equal(inline?.scenes.length, 1);
+		assert.equal(inline?.scenes[0].file, 'README.md');
+		assert.match(inline!.scenes[0].narration.map(segment => segment.text).join(' '), /README wording/);
 	});
 
 	test('a multi-file change waits for background checks up to the timeout and marks them pending', async () => {
@@ -264,6 +308,37 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		const { text, requestId } = await done as Extract<ActiveEvent, { type: 'elaboration' }>;
 		assert.equal(requestId, 'r1');
 		assert.match(text, /slow down on/);
+	});
+
+	test('a question asked from a walkthrough card is answered beside the scene, not in chat', async () => {
+		const turns = await h.history.list();
+		const walkthroughId = turns.find(turn => turn.walkthroughId && !turn.walkthroughId.includes('-c'))!.walkthroughId!;
+		const chatBefore = h.events.filter(event => event.type === 'chat').length;
+		const done = h.waitFor((event): event is Extract<ActiveEvent, { type: 'elaboration' }> => event.type === 'elaboration' && event.requestId === 'q1' && event.status === 'done');
+		await h.controller.elaborate({ requestId: 'q1', walkthroughId, sceneId: 'model', question: 'Why does refill not need a timer?' });
+		const { text } = await done as Extract<ActiveEvent, { type: 'elaboration' }>;
+		assert.match(text, /never needs a timer/);
+		// The question is remembered (by Active, not the model) so later explanations know they asked.
+		assert.ok((await h.memory.list()).some(note => note.source === 'question' && /Why does refill not need a timer\?/.test(note.text)));
+		assert.equal(h.events.filter(event => event.type === 'chat').length, chatBefore);
+	});
+
+	test('when memory grows too long, the explainer condenses it and the condensed notes replace the old ones', async () => {
+		await h.memory.add(Array.from({ length: 25 }, (_, index) => ({ scope: 'project' as const, note: `project fact ${index} ${'x'.repeat(260)}` })));
+		const before = (await h.memory.list()).length;
+		assert.equal(await h.memory.needsCondensing(), true);
+		await h.controller.condenseMemory();
+		const notes = await h.memory.list();
+		assert.deepStrictEqual(notes.map(note => note.text).sort(), ['Condensed 1 personal notes.', `Condensed ${before - 1} project notes.`]);
+		assert.equal(await h.memory.needsCondensing(), false);
+		assert.ok(h.events.some(event => event.type === 'memory' && event.notes.length === 2));
+	});
+
+	test('"more detail" on a walkthrough that is gone reports an error instead of hanging', async () => {
+		const failed = h.waitFor((event): event is Extract<ActiveEvent, { type: 'elaboration' }> => event.type === 'elaboration' && event.requestId === 'gone' && event.status === 'error');
+		await h.controller.elaborate({ requestId: 'gone', walkthroughId: 'wt-missing', sceneId: 'model' });
+		const { text } = await failed as Extract<ActiveEvent, { type: 'elaboration' }>;
+		assert.match(text, /no longer in history/);
 	});
 
 	test('questions about a walkthrough go to the read-only explanation session', async () => {

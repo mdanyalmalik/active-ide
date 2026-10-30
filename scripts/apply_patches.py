@@ -53,6 +53,57 @@ patch(
     "'active.coding.reasoningEffort',",
 )
 
+# 6. A filter on file decorations, so Active can show the agent's changes instead of git's in the
+#    Explorer, editor tabs and breadcrumbs (Active's "Agent" / "Git" switch).
+patch(
+    "src/vs/workbench/services/decorations/common/decorations.ts",
+    "export interface IResourceDecorationChangeEvent {",
+    "/**\n * Hides decorations it rejects, wherever decorations are shown. `providerLabel` is the provider's label\n * (an extension's identifier for decorations contributed by extensions).\n */\nexport interface IDecorationsFilter {\n\treadonly onDidChange: Event<void>;\n\taccepts(providerLabel: string, data: IDecorationData): boolean;\n}\n\nexport interface IResourceDecorationChangeEvent {",
+    "export interface IDecorationsFilter",
+)
+patch(
+    "src/vs/workbench/services/decorations/common/decorations.ts",
+    "\tregisterDecorationsProvider(provider: IDecorationsProvider): IDisposable;\n",
+    "\tregisterDecorationsProvider(provider: IDecorationsProvider): IDisposable;\n\n\tregisterDecorationsFilter(filter: IDecorationsFilter): IDisposable;\n",
+    "registerDecorationsFilter(filter: IDecorationsFilter): IDisposable;",
+)
+patch(
+    "src/vs/workbench/services/decorations/browser/decorationsService.ts",
+    "import { IDecorationsService, IDecoration, IResourceDecorationChangeEvent, IDecorationsProvider, IDecorationData } from '../common/decorations.js';",
+    "import { IDecorationsService, IDecoration, IResourceDecorationChangeEvent, IDecorationsProvider, IDecorationData, IDecorationsFilter } from '../common/decorations.js';",
+    "IDecorationData, IDecorationsFilter } from '../common/decorations.js';",
+)
+patch(
+    "src/vs/workbench/services/decorations/browser/decorationsService.ts",
+    "\tprivate readonly _provider = new LinkedList<IDecorationsProvider>();\n",
+    "\tprivate readonly _provider = new LinkedList<IDecorationsProvider>();\n\tprivate readonly _filters = new Set<IDecorationsFilter>();\n",
+    "private readonly _filters = new Set<IDecorationsFilter>();",
+)
+patch(
+    "src/vs/workbench/services/decorations/browser/decorationsService.ts",
+    "\tprivate _ensureEntry(uri: URI): DecorationEntry {",
+    "\tregisterDecorationsFilter(filter: IDecorationsFilter): IDisposable {\n\t\tconst everything = () => this._onDidChangeDecorations.fire({ affectsResource() { return true; } });\n\t\tthis._filters.add(filter);\n\t\tconst listener = filter.onDidChange(everything);\n\t\teverything();\n\t\treturn toDisposable(() => {\n\t\t\tthis._filters.delete(filter);\n\t\t\tlistener.dispose();\n\t\t\teverything();\n\t\t});\n\t}\n\n\tprivate _accepts(provider: IDecorationsProvider, data: IDecorationData): boolean {\n\t\tfor (const filter of this._filters) {\n\t\t\tif (!filter.accepts(provider.label, data)) {\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}\n\t\treturn true;\n\t}\n\n\tprivate _ensureEntry(uri: URI): DecorationEntry {",
+    "registerDecorationsFilter(filter: IDecorationsFilter): IDisposable {",
+)
+patch(
+    "src/vs/workbench/services/decorations/browser/decorationsService.ts",
+    "\t\t\tif (data && !(data instanceof DecorationDataRequest)) {\n\t\t\t\t// having data\n\t\t\t\tall.push(data);",
+    "\t\t\tif (data && !(data instanceof DecorationDataRequest) && this._accepts(provider, data)) {\n\t\t\t\t// having data\n\t\t\t\tall.push(data);",
+    "!(data instanceof DecorationDataRequest) && this._accepts(provider, data)) {\n\t\t\t\t// having data",
+)
+patch(
+    "src/vs/workbench/services/decorations/browser/decorationsService.ts",
+    "\t\t\t\t\tfor (const data of tuple[1].values()) {\n\t\t\t\t\t\tif (data && !(data instanceof DecorationDataRequest)) {",
+    "\t\t\t\t\tfor (const [provider, data] of tuple[1]) {\n\t\t\t\t\t\tif (data && !(data instanceof DecorationDataRequest) && this._accepts(provider, data)) {",
+    "for (const [provider, data] of tuple[1]) {",
+)
+patch(
+    "src/vs/workbench/test/browser/workbenchTestServices.ts",
+    "\tregisterDecorationsProvider(_provider: IDecorationsProvider): IDisposable { return Disposable.None; }\n",
+    "\tregisterDecorationsProvider(_provider: IDecorationsProvider): IDisposable { return Disposable.None; }\n\tregisterDecorationsFilter(): IDisposable { return Disposable.None; }\n",
+    "registerDecorationsFilter(): IDisposable { return Disposable.None; }",
+)
+
 # 4. Branding.
 product_path = root / "product.json"
 product = json.loads(product_path.read_text())

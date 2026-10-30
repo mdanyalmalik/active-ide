@@ -47,6 +47,7 @@
    ],
    "walkthrough": {
     "title": "Durations become a lookup, not a special case",
+    "remember": [{ "scope": "project", "note": "parseDuration uses a unit table (ms, s, m, h) instead of one regex per unit." }, { "scope": "personal", "note": "Explained lookup tables replacing branches; no need to explain the pattern again." }],
     "summary": "parseDuration now converts any supported unit through one table and rejects values that would schedule nothing.",
     "terms": [
      {

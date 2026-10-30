@@ -3,12 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { timeout } from '../../../../base/common/async.js';
+import * as dom from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
+import { RunOnceScheduler, timeout } from '../../../../base/common/async.js';
 import { fromNow } from '../../../../base/common/date.js';
 import { IConfigurationService, ConfigurationTarget } from '../../../../platform/configuration/common/configuration.js';
 import { effortDescription, effortLabel, updateModelChoices } from './activeSettings.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -26,9 +28,9 @@ import { IPaneCompositePartService } from '../../../services/panecomposite/brows
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IExplorerService } from '../../files/browser/files.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, ActiveSetting, Briefing, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveEvent, ActiveSetting, Briefing, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
-import { ClipPlayer } from './clipPlayer.js';
+import { ClipOutcome, ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
 import { PlaybackPosition, WalkthroughPlayer } from './walkthroughPlayer.js';
 
@@ -36,16 +38,23 @@ export const ACTIVE_HISTORY_VIEW_ID = 'workbench.view.activeHistory';
 export const ActiveWalkthroughFocus = new RawContextKey<boolean>('activeWalkthroughFocus', false, localize('activeWalkthroughFocus', "Whether the Active walkthrough editor has focus"));
 export const ActiveWalkthroughAvailable = new RawContextKey<boolean>('activeWalkthroughAvailable', false, localize('activeWalkthroughAvailable', "Whether an Active walkthrough can be resumed"));
 
-/** A deeper re-explanation of one scene, streamed from the explanation session. */
+/** A deeper re-explanation of one scene, or the answer to a question asked from its card, streamed from the explanation session. */
 export interface Elaboration {
 	readonly requestId: string;
 	readonly walkthroughId: string;
 	readonly sceneId: string;
+	/** The question asked from the card; absent for "More detail". */
+	readonly question?: string;
 	readonly text: string;
 	readonly status: 'streaming' | 'done' | 'error';
 }
 
 const FEEDBACK_STORAGE_KEY = 'active.detailFeedback';
+
+export type ExplorerCountsMode = 'agent' | 'git';
+const EXPLORER_COUNTS_SETTING = 'active.explorer.changeCounts';
+/** Git counts also refresh this often, to catch commits and checkouts (which don't touch watched files). */
+const GIT_POLL_MS = 15_000;
 
 /** Where the user was in a walkthrough when they asked a question from it. */
 export interface ChatContext {
@@ -83,6 +92,16 @@ export interface IActiveService {
 	readonly profile: KnowledgeProfile;
 	readonly history: readonly TurnSummary[];
 	readonly turnChanges: ReadonlyMap<string, FileChangeStat>;
+	/** True once the extension has reported the saved state (profile, chat, history); until then they're defaults. */
+	readonly stateLoaded: boolean;
+	/** Which counts the Explorer shows: the agent's last prompt that changed files, or uncommitted changes in git. */
+	readonly explorerCountsMode: ExplorerCountsMode;
+	setExplorerCountsMode(mode: ExplorerCountsMode): Promise<void>;
+	/** The Explorer's counts for the current mode, by workspace-relative path. */
+	readonly explorerCounts: ReadonlyMap<string, FileChangeStat>;
+	/** `false` when the folder isn't a git repository (the git counts are then unavailable). */
+	readonly gitAvailable: boolean;
+	readonly onDidChangeExplorerCounts: Event<void>;
 	readonly narration: NarrationStatus;
 	readonly walkthroughStatus: WalkthroughStatus | undefined;
 	readonly player: WalkthroughPlayer | undefined;
@@ -174,10 +193,20 @@ export interface IActiveService {
 
 	/** A walkthrough's pending checks, including how those that have since finished turned out. */
 	pendingChecks(walkthrough: Walkthrough): readonly PendingCheck[];
-	elaborate(walkthroughId: string, sceneId: string): Elaboration;
+	/** "More detail" on a scene, or (with `question`) a question asked from its card. A scene shows the latest one. */
+	elaborate(walkthroughId: string, sceneId: string, question?: string): Elaboration;
 	elaboration(walkthroughId: string, sceneId: string): Elaboration | undefined;
-	/** Reads text aloud outside the walkthrough narration (deeper explanations, voice previews). */
-	speak(text: string, voice?: string): Promise<void>;
+	/** Reads text aloud (pausing walkthrough narration); resolves when it has finished, been stopped or failed. */
+	speak(text: string, voice?: string): Promise<ClipOutcome>;
+	/** The text being read aloud (or prepared), if any. */
+	readonly speakingText: string | undefined;
+	/** Opens the inline version of a note (a one-scene walkthrough at the change) from its history record. */
+	openNote(recordId: string): Promise<void>;
+	/** The explainer's own memory (separate from the coding agent's). */
+	memoryNotes(): Promise<readonly MemoryNote[]>;
+	/** Forgets one memory note, or all of them without an id. */
+	forgetMemory(id?: string): Promise<void>;
+	readonly onDidChangeMemory: Event<readonly MemoryNote[]>;
 	stopSpeaking(): void;
 	readonly speaking: boolean;
 	readonly onDidChangeSpeaking: Event<void>;
@@ -225,6 +254,8 @@ export class ActiveService extends Disposable implements IActiveService {
 	private _pendingHandoff: Walkthrough | undefined;
 	private readonly _onDidChangeChecks = this._register(new Emitter<string>());
 	readonly onDidChangeChecks = this._onDidChangeChecks.event;
+	private readonly _onDidChangeMemory = this._register(new Emitter<readonly MemoryNote[]>());
+	readonly onDidChangeMemory = this._onDidChangeMemory.event;
 	private readonly _onDidChangeElaboration = this._register(new Emitter<Elaboration>());
 	readonly onDidChangeElaboration = this._onDidChangeElaboration.event;
 	private readonly _onDidChangeRecentWalkthrough = this._register(new Emitter<void>());
@@ -241,9 +272,17 @@ export class ActiveService extends Disposable implements IActiveService {
 	private _agent: AgentState = { status: 'starting', provider: DEFAULT_PROVIDER, workspaceName: '', backgroundTasks: 0 };
 	private readonly _chat: ChatEntry[] = [];
 	private _profile: KnowledgeProfile = DEFAULT_PROFILE;
+	private _stateLoaded = false;
+	get stateLoaded(): boolean { return this._stateLoaded; }
 	private _models: readonly AgentModelInfo[] = [];
 	private _history: TurnSummary[] = [];
 	private readonly _turnChanges = new Map<string, FileChangeStat>();
+	private readonly _gitChanges = new Map<string, FileChangeStat>();
+	private _gitAvailable = true;
+	private readonly _onDidChangeExplorerCounts = this._register(new Emitter<void>());
+	readonly onDidChangeExplorerCounts = this._onDidChangeExplorerCounts.event;
+	private readonly gitRefresh = this._register(new RunOnceScheduler(() => void this.refreshGitChanges(), 600));
+	private readonly gitPoll = this._register(new MutableDisposable());
 	private _narration: NarrationStatus = { available: false, detail: localize('narrationStarting', "Starting narration") };
 	private _walkthroughStatus: WalkthroughStatus | undefined;
 	private readonly playerRef = this._register(new MutableDisposable<WalkthroughPlayer>());
@@ -277,6 +316,10 @@ export class ActiveService extends Disposable implements IActiveService {
 		super();
 		this.lastMode = this.mode;
 		this._register(this.configurationService.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration(EXPLORER_COUNTS_SETTING)) {
+				this.watchGitChanges();
+				this._onDidChangeExplorerCounts.fire();
+			}
 			if (event.affectsConfiguration(ActiveSetting.ExplainMode)) {
 				this.onModeChanged();
 			}
@@ -306,6 +349,55 @@ export class ActiveService extends Disposable implements IActiveService {
 	get profile(): KnowledgeProfile { return this._profile; }
 	get history(): readonly TurnSummary[] { return this._history; }
 	get turnChanges(): ReadonlyMap<string, FileChangeStat> { return this._turnChanges; }
+
+	get explorerCountsMode(): ExplorerCountsMode {
+		return this.configurationService.getValue<string>(EXPLORER_COUNTS_SETTING) === 'git' ? 'git' : 'agent';
+	}
+
+	async setExplorerCountsMode(mode: ExplorerCountsMode): Promise<void> {
+		await this.configurationService.updateValue(EXPLORER_COUNTS_SETTING, mode, ConfigurationTarget.USER);
+	}
+
+	get explorerCounts(): ReadonlyMap<string, FileChangeStat> {
+		return this.explorerCountsMode === 'git' ? this._gitChanges : this._turnChanges;
+	}
+
+	get gitAvailable(): boolean { return this._gitAvailable; }
+
+	/** Git counts are only fetched while they're shown: on switching, on file changes, on focus, and every 15 s. */
+	private watchGitChanges(): void {
+		if (this.explorerCountsMode !== 'git') {
+			this.gitPoll.clear();
+			this.gitRefresh.cancel();
+			return;
+		}
+		const store = new DisposableStore();
+		store.add(this.fileService.onDidFilesChange(() => this.gitRefresh.schedule()));
+		store.add(dom.addDisposableListener(mainWindow, dom.EventType.FOCUS, () => this.gitRefresh.schedule()));
+		const timer = setInterval(() => this.gitRefresh.schedule(), GIT_POLL_MS);
+		store.add(toDisposable(() => clearInterval(timer)));
+		this.gitPoll.value = store;
+		void this.refreshGitChanges();
+	}
+
+	private async refreshGitChanges(): Promise<void> {
+		const files = await this.commandService.executeCommand<FileChangeStat[] | undefined>(ExtensionCommand.GitChanges).catch(() => undefined);
+		const available = files !== undefined && files !== null;
+		const next = new Map((files ?? []).map(file => [file.path, file] as const));
+		const same = available === this._gitAvailable && next.size === this._gitChanges.size && [...next].every(([path, file]) => {
+			const current = this._gitChanges.get(path);
+			return current?.added === file.added && current.removed === file.removed;
+		});
+		if (same) {
+			return;
+		}
+		this._gitAvailable = available;
+		this._gitChanges.clear();
+		for (const [path, file] of next) {
+			this._gitChanges.set(path, file);
+		}
+		this._onDidChangeExplorerCounts.fire();
+	}
 	get narration() { return this._narration; }
 	private dismissedPlayer: string | undefined;
 	get walkthroughStatus(): WalkthroughStatus | undefined { return this._walkthroughStatus; }
@@ -354,9 +446,11 @@ export class ActiveService extends Disposable implements IActiveService {
 		this._agent = state.agent;
 		this._chat.splice(0, this._chat.length, ...state.chat);
 		this._profile = state.profile;
+		this._stateLoaded = true;
 		this._history = [...state.history];
 		this._narration = state.narration;
 		this.setTurnChanges(state.turnChanges);
+		this.watchGitChanges();
 		this._onDidChangeAgent.fire();
 		this._onDidChangeChat.fire(undefined);
 		this._onDidChangeProfile.fire();
@@ -381,10 +475,14 @@ export class ActiveService extends Disposable implements IActiveService {
 					this._chat[index] = event.entry;
 				} else {
 					this._chat.push(event.entry);
+					this.readNoteAloud(event.entry);
 				}
 				this._onDidChangeChat.fire(event.entry);
 				break;
 			}
+			case 'memory':
+				this._onDidChangeMemory.fire(event.notes);
+				break;
 			case 'chatReset':
 				this._chat.splice(0, this._chat.length, ...event.chat);
 				// A different chat starts clean: no offers, questions or status left over from the last one.
@@ -455,6 +553,11 @@ export class ActiveService extends Disposable implements IActiveService {
 			this._turnChanges.set(file.path, file);
 		}
 		this._onDidChangeTurnChanges.fire();
+		if (this.explorerCountsMode === 'git') {
+			this.gitRefresh.schedule();
+		} else {
+			this._onDidChangeExplorerCounts.fire();
+		}
 	}
 
 	/**
@@ -553,7 +656,8 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	private async startBriefing(since: number): Promise<void> {
 		const items = this._history
-			.filter(turn => turn.walkthroughId && (turn.endedAt ?? turn.startedAt) >= since)
+			// Notes are already in the briefing text; Play All is for walkthroughs.
+			.filter(turn => turn.walkthroughId && !turn.walkthroughIsNote && (turn.endedAt ?? turn.startedAt) >= since)
 			.reverse()
 			.map(turn => ({ recordId: turn.turnId, title: turn.walkthroughTitle ?? turn.task, chapter: /^Chapter (\d+)/.exec(turn.explanationNote)?.[1] ? Number(/^Chapter (\d+)/.exec(turn.explanationNote)![1]) : undefined, task: turn.task }));
 		const state: BriefingState = { since, minutes: Math.max(1, Math.round((Date.now() - since) / 60_000)), items, status: 'loading' };
@@ -892,23 +996,62 @@ export class ActiveService extends Disposable implements IActiveService {
 		return this.elaborations.get(`${walkthroughId}/${sceneId}`);
 	}
 
-	elaborate(walkthroughId: string, sceneId: string): Elaboration {
+	elaborate(walkthroughId: string, sceneId: string, question?: string): Elaboration {
 		const existing = this.elaboration(walkthroughId, sceneId);
-		if (existing && existing.status !== 'error') {
+		if (!question && existing && !existing.question && existing.status !== 'error') {
 			return existing;
 		}
-		const elaboration: Elaboration = { requestId: `elab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, walkthroughId, sceneId, text: '', status: 'streaming' };
+		const elaboration: Elaboration = { requestId: `elab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, walkthroughId, sceneId, question, text: '', status: 'streaming' };
 		this.elaborations.set(`${walkthroughId}/${sceneId}`, elaboration);
 		this._onDidChangeElaboration.fire(elaboration);
-		void this.commandService.executeCommand(ExtensionCommand.Elaborate, { requestId: elaboration.requestId, walkthroughId, sceneId }).then(undefined, error => {
+		void this.commandService.executeCommand(ExtensionCommand.Elaborate, { requestId: elaboration.requestId, walkthroughId, sceneId, question }).then(undefined, error => {
 			this.handleEvent({ type: 'elaboration', requestId: elaboration.requestId, text: String(error), status: 'error' });
 		});
 		return elaboration;
 	}
 
-	async speak(text: string, voice?: string): Promise<void> {
+	private _speakingText: string | undefined;
+	get speakingText(): string | undefined { return this.clipPlayer.speaking ? this._speakingText : undefined; }
+
+	async speak(text: string, voice?: string): Promise<ClipOutcome> {
 		this.player?.pause();
-		await this.clipPlayer.play(() => this.synthesize(text, voice));
+		this._speakingText = text;
+		return this.clipPlayer.play(() => this.synthesize(text, voice));
+	}
+
+	/**
+	 * In Auto mode a new note is read aloud where it appears, in chat: unlike a walkthrough it never takes over
+	 * the editor. A walkthrough (or anything else) already being read isn't interrupted.
+	 */
+	private readNoteAloud(entry: ChatEntry): void {
+		if (entry.role !== 'explainer' || !entry.id.startsWith('note') || !entry.text || this.mode !== 'auto' || !this.narration.available) {
+			return;
+		}
+		if (this.player?.playing || this.clipPlayer.speaking) {
+			return;
+		}
+		void this.speak(entry.text);
+	}
+
+	async memoryNotes(): Promise<readonly MemoryNote[]> {
+		return (await this.commandService.executeCommand<MemoryNote[]>(ExtensionCommand.MemoryGet)) ?? [];
+	}
+
+	async forgetMemory(id?: string): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.MemoryDelete, id);
+	}
+
+	async openNote(recordId: string): Promise<void> {
+		// The note reaches chat a moment before its turn is saved: give the save a moment.
+		for (let attempt = 0; attempt < 10; attempt++) {
+			const walkthrough = (await this.getHistory(recordId))?.walkthrough;
+			if (walkthrough) {
+				await this.openWalkthrough(walkthrough, { scene: 0, segment: 0 });
+				return;
+			}
+			await new Promise(resolve => setTimeout(resolve, 300));
+		}
+		this.notificationService.info(localize('noteMissing', "This note's code view is no longer in history."));
 	}
 
 	stopSpeaking(): void {
@@ -920,9 +1063,16 @@ export class ActiveService extends Disposable implements IActiveService {
 			return false;
 		}
 		this.askedFeedback.add(walkthrough.id);
-		// Ask now and then, not after every walkthrough: never twice in a row, always by the fourth.
+		if (walkthrough.note) {
+			// A one-sentence note has no "level of detail" worth asking about.
+			return false;
+		}
+		// A fixed rhythm rather than chance: after the 2nd finished walkthrough, then every 3rd.
 		const finishedSinceAsked = this.storageService.getNumber(FEEDBACK_STORAGE_KEY, StorageScope.PROFILE, 1) + 1;
-		const ask = finishedSinceAsked >= 4 || (finishedSinceAsked >= 2 && Math.random() < 0.4);
+		const ask = finishedSinceAsked >= 3 || (finishedSinceAsked === 2 && !this.storageService.getBoolean(FEEDBACK_STORAGE_KEY + '.askedOnce', StorageScope.PROFILE, false));
+		if (ask) {
+			this.storageService.store(FEEDBACK_STORAGE_KEY + '.askedOnce', true, StorageScope.PROFILE, StorageTarget.MACHINE);
+		}
 		this.storageService.store(FEEDBACK_STORAGE_KEY, ask ? 0 : finishedSinceAsked, StorageScope.PROFILE, StorageTarget.MACHINE);
 		return ask;
 	}

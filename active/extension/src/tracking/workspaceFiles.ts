@@ -134,6 +134,41 @@ export class WorkspaceFiles {
 		}
 	}
 
+	/**
+	 * Per-file line counts of uncommitted work, as git sees it: tracked changes against HEAD (or everything,
+	 * before the first commit) plus untracked files. `undefined` outside a git repository.
+	 */
+	async gitStats(): Promise<Array<{ path: string; added: number; removed: number }> | undefined> {
+		const git = async (args: string[]) => (await execFileAsync('git', args, { cwd: this.root, maxBuffer: 16 * 1024 * 1024 })).stdout;
+		try {
+			await git(['rev-parse', '--is-inside-work-tree']);
+		} catch {
+			return undefined;
+		}
+		// Before the first commit there's no HEAD: compare with the empty tree.
+		const base = await git(['rev-parse', '--verify', '-q', 'HEAD']).then(() => 'HEAD', () => '4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+		const stats: Array<{ path: string; added: number; removed: number }> = [];
+		// `--relative`: paths relative to the workspace folder, and only files inside it.
+		for (const entry of (await git(['diff', '--numstat', '--no-renames', '--relative', '-z', base])).split('\0')) {
+			const [added, removed, path] = entry.split('\t');
+			// Binary files show "-" counts.
+			if (path && added !== '-' && !isIgnoredPath(path)) {
+				stats.push({ path, added: Number(added), removed: Number(removed) });
+			}
+		}
+		for (const path of (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0')) {
+			if (!path || isIgnoredPath(path)) {
+				continue;
+			}
+			// Binary and oversized files aren't read, so they get no counts.
+			const text = await this.read(path);
+			if (typeof text === 'string') {
+				stats.push({ path, added: text.length ? text.split('\n').length - (text.endsWith('\n') ? 1 : 0) : 0, removed: 0 });
+			}
+		}
+		return stats;
+	}
+
 	async branch(): Promise<string | undefined> {
 		try {
 			const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.root });

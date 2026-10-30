@@ -414,7 +414,8 @@ export class ActiveChatEditor extends EditorPane {
 				this.noticeStore.add(dom.addDisposableListener(reconnect, dom.EventType.CLICK, () => this.activeService.reconnect()));
 			}
 		}
-		if (!this.activeService.profile.configured) {
+		// Until the saved profile has loaded it's the blank default: don't ask them to set up one they have.
+		if (this.activeService.stateLoaded && !this.activeService.profile.configured) {
 			const card = dom.append(this.notices, $('.notice'));
 			dom.append(card, $('.notice-title')).textContent = localize('profileNoticeTitle', "Personalize walkthroughs");
 			dom.append(card, $('.notice-detail')).textContent = localize('profileDetail', "Tell Active what you know and how much detail you want.");
@@ -423,24 +424,17 @@ export class ActiveChatEditor extends EditorPane {
 			setup.textContent = localize('setupProfile', "Set Up Knowledge Profile");
 			this.noticeStore.add(dom.addDisposableListener(setup, dom.EventType.CLICK, () => this.activeService.openProfile()));
 		}
-		const player = this.activeService.chatPlayer;
+		// A paused walkthrough is reached from the floating Walkthrough button, so chat only announces new ones.
 		const offered = this.activeService.offeredWalkthrough;
-		if (offered || player) {
+		if (offered) {
 			const card = dom.append(this.notices, $('.notice.walkthrough'));
-			const target = offered ?? player!.walkthrough;
-			const context = this.activeService.chatContext;
-			dom.append(card, $('.notice-title')).textContent = offered
-				? target.chapter ? localize('chapterReadyTitle', "Chapter {0} ready: {1}", target.chapter, target.title) : localize('walkthroughReadyTitle', "Walkthrough ready: {0}", target.title)
-				: localize('walkthroughPausedTitle', "Walkthrough paused: {0}", target.title);
-			if (!offered && player) {
-				dom.append(card, $('.notice-detail')).textContent = context
-					? localize('pausedAtScene', "Paused at {0} of {1}: “{2}”.", context.sceneIndex + 1, player.walkthrough.scenes.length, context.title)
-					: localize('pausedAt', "Paused at idea {0} of {1}.", player.position.scene + 1, player.walkthrough.scenes.length);
-			}
+			dom.append(card, $('.notice-title')).textContent = offered.chapter
+				? localize('chapterReadyTitle', "Chapter {0} ready: {1}", offered.chapter, offered.title)
+				: localize('walkthroughReadyTitle', "Walkthrough ready: {0}", offered.title);
 			const actions = dom.append(card, $('.notice-actions'));
-			const resume = dom.append(actions, $('button.primary'));
-			resume.textContent = offered ? localize('playWalkthrough', "Play Walkthrough") : localize('returnToWalkthrough', "Return to Walkthrough");
-			this.noticeStore.add(dom.addDisposableListener(resume, dom.EventType.CLICK, () => offered ? this.activeService.openWalkthrough(offered) : this.activeService.resumeWalkthrough()));
+			const play = dom.append(actions, $('button.primary'));
+			play.textContent = localize('playWalkthrough', "Play Walkthrough");
+			this.noticeStore.add(dom.addDisposableListener(play, dom.EventType.CLICK, () => this.activeService.openWalkthrough(offered)));
 		}
 		this.scrollable?.scanDomNode();
 	}
@@ -614,6 +608,9 @@ export class ActiveChatEditor extends EditorPane {
 				} else if (entry.status === 'streaming') {
 					body.textContent = '…';
 				}
+				if (entry.role === 'explainer' && entry.id.startsWith('note') && entry.text) {
+					this.renderNoteActions(node, entry, slot.store);
+				}
 				break;
 			}
 			case 'tool': {
@@ -656,6 +653,32 @@ export class ActiveChatEditor extends EditorPane {
 		if (reveal) {
 			this.intro.classList.toggle('compact', true);
 			this.revealBottom();
+		}
+	}
+
+	/** A note is also saved as a one-scene walkthrough at the change; it can be opened there or read aloud. */
+	private renderNoteActions(node: HTMLElement, entry: ChatEntry, store: DisposableStore): void {
+		const actions = dom.append(node, $('.note-actions'));
+		if (entry.recordId) {
+			const show = dom.append(actions, $('button.link')) as HTMLButtonElement;
+			show.textContent = localize('noteShowInCode', "Show in Code");
+			show.title = localize('noteShowInCodeTitle', "Open this note beside the lines it's about");
+			const recordId = entry.recordId;
+			store.add(dom.addDisposableListener(show, dom.EventType.CLICK, () => void this.activeService.openNote(recordId)));
+		}
+		if (this.activeService.narration.available) {
+			const listen = dom.append(actions, $('button.link')) as HTMLButtonElement;
+			const label = () => listen.textContent = this.activeService.speakingText === entry.text ? localize('noteStopReading', "Stop Reading") : localize('noteReadAloud', "Read Aloud");
+			label();
+			store.add(this.activeService.onDidChangeSpeaking(label));
+			store.add(dom.addDisposableListener(listen, dom.EventType.CLICK, () => {
+				if (this.activeService.speakingText === entry.text) {
+					this.activeService.stopSpeaking();
+				} else {
+					listen.textContent = localize('notePreparingSpeech', "Preparing…");
+					void this.activeService.speak(entry.text).finally(label);
+				}
+			}));
 		}
 	}
 
