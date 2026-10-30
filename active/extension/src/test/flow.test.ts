@@ -32,7 +32,7 @@ interface Harness {
 	waitFor<T extends ActiveEvent>(predicate: (event: ActiveEvent) => event is T, timeoutMs?: number): Promise<T>;
 }
 
-async function harness(backgroundTimeoutMs: number, timing = { checkpointMs: 5 * 60_000, chapterMs: 10 * 60_000 }, hostEnv: Record<string, string> = {}): Promise<Harness> {
+async function harness(backgroundTimeoutMs: number, timing: { checkpointMs: number; chapterMs: number; explanations?: boolean } = { checkpointMs: 5 * 60_000, chapterMs: 10 * 60_000 }, hostEnv: Record<string, string> = {}): Promise<Harness> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'active-flow-'));
 	await fs.cp(path.join(repo, 'demo', 'ledger-api'), root, { recursive: true });
 	execSync('git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: root });
@@ -66,6 +66,7 @@ async function harness(backgroundTimeoutMs: number, timing = { checkpointMs: 5 *
 		checkpointMs: () => timing.checkpointMs,
 		chapterMs: () => timing.chapterMs,
 		preferNotes: () => true,
+		explanationsEnabled: () => timing.explanations !== false,
 		profile: () => ({ ...DEFAULT_PROFILE, configured: true }),
 		emit,
 		log: line => process.env.FLOW_DEBUG && console.error(`[flow] ${line}`),
@@ -98,6 +99,30 @@ async function harness(backgroundTimeoutMs: number, timing = { checkpointMs: 5 *
 
 const isStage = (stage: WalkthroughStage) => (event: ActiveEvent): event is Extract<ActiveEvent, { type: 'walkthroughStatus' }> => event.type === 'walkthroughStatus' && event.status.stage === stage;
 const isReady = (event: ActiveEvent): event is Extract<ActiveEvent, { type: 'walkthroughReady' }> => event.type === 'walkthroughReady';
+
+describe('explanations off (scripted MSP host)', () => {
+	let h: Harness;
+
+	before(async () => {
+		process.env.ACTIVE_SCRIPTED_SCENARIO = path.join(repo, 'demo', 'scenarios', 'ledger.json');
+		process.env.ACTIVE_SCRIPTED_SPEED = '4';
+		h = await harness(1500, { checkpointMs: 0, chapterMs: 0, explanations: false }, { ACTIVE_SCRIPTED_CHAPTERS: '1' });
+	});
+
+	after(async () => {
+		await h.controller.dispose();
+	});
+
+	test('the "off" mode saves the turn to history without asking the explanation model', async () => {
+		const done = h.waitFor(isStage('notExplained'));
+		await h.controller.submitTask('Support minutes and hours in parseDuration');
+		const { status } = await done;
+		assert.equal(status.detail, 'Explanations are off. Saved to history.');
+		assert.equal(h.events.some(event => event.type === 'walkthroughReady' || (event.type === 'walkthroughStatus' && event.status.stage === 'drafting')), false);
+		await new Promise(resolve => setTimeout(resolve, 200));
+		assert.equal((await h.history.list())[0].task, 'Support minutes and hours in parseDuration');
+	});
+});
 
 describe('chapters (scripted MSP host)', () => {
 	let h: Harness;
@@ -212,6 +237,15 @@ describe('Active flow (scripted MSP host via @muse-code/sdk)', () => {
 		await new Promise(resolve => setTimeout(resolve, 100));
 		const detail = await h.history.get(turns[0].turnId);
 		assert.deepStrictEqual(detail!.walkthrough!.pending.map(check => check.state), ['finished']);
+	});
+
+	test('the return briefing condenses what happened since a time', async () => {
+		const briefing = await h.controller.brief({ since: 0 });
+		assert.equal(briefing.fallback, undefined);
+		assert.match(briefing.headline, /tasks finished while you were away/);
+		assert.ok(briefing.done.some(line => /parseDuration/.test(line)), briefing.done.join(' | '));
+		// Nothing since now: a plain briefing, without asking the model.
+		assert.deepStrictEqual((await h.controller.brief({ since: Date.now() + 1000 })).headline, 'Nothing new while you were away');
 	});
 
 	test('the explanation session refuses to start without the read-only profile', async () => {

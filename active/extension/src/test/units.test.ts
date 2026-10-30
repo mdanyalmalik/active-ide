@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { describe, test } from 'node:test';
 import type { AgentSession } from '../agents/agentTypes';
 import { ExplanationAgent, WalkthroughPlanner } from '../explain/planner';
-import { buildCheckpointPrompt, buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
+import { buildBriefingPrompt, buildCheckpointPrompt, buildElaborationPrompt, buildPlanningPrompt } from '../explain/prompts';
 import { assessWorthiness } from '../explain/worthiness';
 import { HistoryStore } from '../history/historyStore';
 import { applyDetailFeedback, applySkipSignal, CapturedFile, DEFAULT_PROFILE, extractJsonObject, KnowledgeProfile, validateWalkthrough, Walkthrough } from '../shared/activeProtocol';
@@ -220,6 +220,21 @@ describe('chapters and explainer-chosen length', () => {
 		const planner = new WalkthroughPlanner({ ask: async () => replies.shift()! } as unknown as ExplanationAgent, () => undefined);
 		const input = { profile: DEFAULT_PROFILE, task: 't', minutesSinceLastChapter: 10, progress: [], files: [], tools: [], earlierChapters: [], preferNotes: true };
 		assert.deepStrictEqual([await planner.checkpoint(input), await planner.checkpoint(input)], [{ decision: 'chapter', reason: 'tests pass' }, { decision: 'wait', reason: '' }]);
+	});
+});
+
+describe('return briefing', () => {
+	test('the briefing prompt carries outcomes, failures, pending checks and what is still running', () => {
+		const prompt = buildBriefingPrompt({
+			profile: DEFAULT_PROFILE, minutesAway: 42,
+			turns: [{ task: 'Add retries', outcome: 'completed', explanation: 'Walkthrough: Retries', summary: 'Failed jobs retry with backoff.', finalMessage: 'Done.', notes: [], failedCommands: ['npm run lint'], pendingChecks: ['npm run bench'], files: [{ path: 'src/queue.ts', added: 30, removed: 2 }] }],
+			running: { task: 'Add an HTTP API', progress: ['Server skeleton done.'] },
+			waiting: ['Run a shell command: rm -rf dist'],
+		});
+		assert.deepStrictEqual(
+			[prompt.startsWith('RETURN BRIEFING. The developer was away for 42 minutes'), prompt.includes('1. TASK: Add retries'), prompt.includes('failed commands: npm run lint'), prompt.includes('checks still pending: npm run bench'), prompt.includes('STILL RUNNING\nTASK: Add an HTTP API'), prompt.includes('- Run a shell command: rm -rf dist')],
+			[true, true, true, true, true, true],
+		);
 	});
 });
 

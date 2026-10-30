@@ -20,6 +20,8 @@ export const enum ActiveCommandIds {
 	PickVoice = 'active.pickNarrationVoice',
 	OpenSettings = 'active.openSettings',
 	NewChat = 'active.newChat',
+	CatchUp = 'active.catchUp',
+	PickExplainMode = 'active.pickExplainMode',
 	ResumeChat = 'active.resumeChat',
 	PickCodingEffort = 'active.pickCodingEffort',
 	OpenRecentWalkthrough = 'active.openRecentWalkthrough',

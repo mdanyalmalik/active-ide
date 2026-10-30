@@ -149,6 +149,18 @@ const general: IConfigurationNode = {
 			minimum: 0,
 			description: localize('backgroundTimeout', "How long to wait for background tasks (tests, builds) after a coding turn before explaining. Unfinished checks are marked pending and keep running."),
 		},
+		'active.explain.mode': {
+			type: 'string',
+			enum: ['auto', 'away', 'off'],
+			enumItemLabels: [localize('modeAutoLabel', "Auto"), localize('modeAwayLabel', "Away"), localize('modeOffLabel', "Off")],
+			enumDescriptions: [
+				localize('modeAutoDescription', "Explanations pop up as each piece of work is ready."),
+				localize('modeAwayDescription', "Walkthroughs are made but wait (short notes still go to chat); switching out of Away shows a short briefing of what happened, with the walkthroughs one click away."),
+				localize('modeOffDescription', "No explanations (the explanation model isn't asked). Tasks are still saved to history."),
+			],
+			default: 'auto',
+			markdownDescription: localize('explainMode', "How Active explains the coding agent's work. Also changeable from the indicator under the chat box."),
+		},
 		'active.explain.checkpointMinutes': {
 			type: 'number',
 			default: 5,

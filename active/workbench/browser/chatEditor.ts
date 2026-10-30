@@ -14,7 +14,9 @@ import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
+import { toAction } from '../../../../base/common/actions.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
@@ -25,7 +27,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { ActiveSetting, type ChatEntry } from '../common/activeProtocol.js';
+import { ActiveSetting, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
 import { effortLabel } from './activeSettings.js';
 import { ActiveChatInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
@@ -65,6 +67,7 @@ export class ActiveChatEditor extends EditorPane {
 	private readonly footerStore = this._register(new DisposableStore());
 	private readonly handoffStore = this._register(new DisposableStore());
 	private readonly headerStore = this._register(new DisposableStore());
+	private readonly modeStore = this._register(new DisposableStore());
 	private introLead!: HTMLElement;
 	private readonly setupView: SetupPanelViewState = { showLog: false, apiKeyDraft: '' };
 	private handoffCard!: HTMLElement;
@@ -79,6 +82,7 @@ export class ActiveChatEditor extends EditorPane {
 		@IOpenerService private readonly openerService: IOpenerService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IContextMenuService private readonly contextMenuService: IContextMenuService,
 	) {
 		super(ActiveChatEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -115,6 +119,7 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(dom.addDisposableListener(this.textarea, dom.EventType.INPUT, () => this.updateSendState()));
 		const bar = dom.append(composer, $('.composer-bar'));
 		this.modeLabel = dom.append(bar, $('.composer-mode'));
+		this._register(this.activeService.onDidChangeMode(() => this.renderComposerContext()));
 		const tools = dom.append(bar, $('.composer-tools'));
 		// The coding agent's effort, one click from where the task is typed.
 		this.effortButton = dom.append(tools, $('button.composer-effort')) as HTMLButtonElement;
@@ -139,6 +144,7 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(this.activeService.onDidChangeChat(entry => entry ? this.renderEntry(entry, true) : this.renderTranscript()));
 		this._register(this.activeService.onDidChangeAgent(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangeProfile(() => this.renderNotices()));
+		this._register(this.activeService.onDidChangeBriefing(() => this.renderNotices()));
 		this._register(this.activeService.onDidChangeWalkthroughStatus(() => this.renderStage()));
 		this._register(this.activeService.onDidChangeOffer(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangePlayer(() => this.renderChrome()));
@@ -307,9 +313,88 @@ export class ActiveChatEditor extends EditorPane {
 		this.intro.classList.toggle('compact', this.activeService.chat.length > 0);
 	}
 
+	/** The return briefing: what happened while they were away, with the walkthroughs one click away. */
+	private renderBriefing(): void {
+		const state = this.activeService.briefing;
+		if (!state) {
+			return;
+		}
+		const card = dom.append(this.notices, $('.notice.briefing'));
+		const hours = Math.floor(state.minutes / 60);
+		const away = hours === 0
+			? localize('briefingMinutes', "{0} min", state.minutes)
+			: state.minutes % 60 === 0 || hours >= 6 ? localize('briefingHours', "{0} h", hours) : localize('briefingHoursMinutes', "{0} h {1} min", hours, state.minutes % 60);
+		dom.append(card, $('.eyebrow')).textContent = localize('briefingEyebrow', "While you were away · {0}", away);
+		const briefing = state.briefing;
+		const title = dom.append(card, $('.notice-title'));
+		if (!briefing) {
+			const spinner = dom.append(title, $('span'));
+			spinner.classList.add(...ThemeIcon.asClassNameArray(Codicon.loading), 'codicon-modifier-spin');
+			dom.append(title, $('span')).textContent = localize('briefingLoading', "Catching you up…");
+		} else {
+			title.textContent = briefing.headline;
+			const section = (label: string, items: readonly string[], kind: string) => {
+				if (!items.length) {
+					return;
+				}
+				const block = dom.append(card, $(`.briefing-section.${kind}`));
+				dom.append(block, $('.briefing-label')).textContent = label;
+				const list = dom.append(block, $('ul'));
+				for (const item of items) {
+					dom.append(list, $('li')).textContent = item;
+				}
+			};
+			section(localize('briefingNeedsYou', "Needs you"), briefing.attention, 'attention');
+			section(localize('briefingDone', "Done"), briefing.done, 'done');
+			section(localize('briefingProblems', "Unresolved"), briefing.problems, 'problems');
+			if (briefing.next) {
+				const next = dom.append(card, $('.briefing-section.next'));
+				dom.append(next, $('.briefing-label')).textContent = localize('briefingNext', "Next");
+				dom.append(next, $('p')).textContent = briefing.next;
+			}
+		}
+		if (state.items.length) {
+			const list = dom.append(card, $('.briefing-walkthroughs'));
+			dom.append(list, $('.briefing-label')).textContent = localize('briefingWalkthroughs', "Walkthroughs, if you want the detail");
+			for (const item of state.items) {
+				const row = dom.append(list, $('button.briefing-walkthrough')) as HTMLButtonElement;
+				dom.append(row, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.playCircle));
+				dom.append(row, $('span')).textContent = item.chapter ? localize('briefingChapter', "Chapter {0}: {1}", item.chapter, item.title) : item.title;
+				row.title = item.task;
+				this.noticeStore.add(dom.addDisposableListener(row, dom.EventType.CLICK, () => this.activeService.playBriefing(item.recordId)));
+			}
+		}
+		const actions = dom.append(card, $('.notice-actions'));
+		if (state.items.length) {
+			const all = dom.append(actions, $('button.primary')) as HTMLButtonElement;
+			all.textContent = state.items.length === 1 ? localize('briefingPlayOne', "Play Walkthrough") : localize('briefingPlayAll', "Play All ({0})", state.items.length);
+			this.noticeStore.add(dom.addDisposableListener(all, dom.EventType.CLICK, () => this.activeService.playBriefing()));
+		}
+		if (briefing && this.activeService.narration.available) {
+			const listen = dom.append(actions, $('button.secondary')) as HTMLButtonElement;
+			const spoken = [briefing.headline, ...briefing.attention, ...briefing.done, ...briefing.problems, briefing.next].filter(Boolean).join('. ');
+			// The button shows that it's reading, and stops it.
+			const label = () => listen.textContent = this.activeService.speaking ? localize('briefingStopListening', "Stop Reading") : localize('briefingListen', "Read Aloud");
+			label();
+			this.noticeStore.add(this.activeService.onDidChangeSpeaking(label));
+			this.noticeStore.add(dom.addDisposableListener(listen, dom.EventType.CLICK, () => {
+				if (this.activeService.speaking) {
+					this.activeService.stopSpeaking();
+				} else {
+					listen.textContent = localize('briefingPreparingSpeech', "Preparing…");
+					void this.activeService.speak(spoken).finally(label);
+				}
+			}));
+		}
+		const dismiss = dom.append(actions, $('button.secondary')) as HTMLButtonElement;
+		dismiss.textContent = localize('briefingDismiss', "Got It");
+		this.noticeStore.add(dom.addDisposableListener(dismiss, dom.EventType.CLICK, () => this.activeService.dismissBriefing()));
+	}
+
 	private renderNotices(): void {
 		this.noticeStore.clear();
 		dom.clearNode(this.notices);
+		this.renderBriefing();
 		const agent = this.activeService.agent;
 		if (agent.setup && !this.activeService.needsTrust) {
 			renderSetupPanel(this.notices, agent.setup, agent.provider, this.setupView, () => this.renderNotices(), this.noticeStore, this.activeService, this.openerService);
@@ -338,14 +423,14 @@ export class ActiveChatEditor extends EditorPane {
 			setup.textContent = localize('setupProfile', "Set Up Knowledge Profile");
 			this.noticeStore.add(dom.addDisposableListener(setup, dom.EventType.CLICK, () => this.activeService.openProfile()));
 		}
-		const player = this.activeService.player;
+		const player = this.activeService.chatPlayer;
 		const offered = this.activeService.offeredWalkthrough;
 		if (offered || player) {
 			const card = dom.append(this.notices, $('.notice.walkthrough'));
 			const target = offered ?? player!.walkthrough;
 			const context = this.activeService.chatContext;
 			dom.append(card, $('.notice-title')).textContent = offered
-				? localize('walkthroughReadyTitle', "Walkthrough ready: {0}", target.title)
+				? target.chapter ? localize('chapterReadyTitle', "Chapter {0} ready: {1}", target.chapter, target.title) : localize('walkthroughReadyTitle', "Walkthrough ready: {0}", target.title)
 				: localize('walkthroughPausedTitle', "Walkthrough paused: {0}", target.title);
 			if (!offered && player) {
 				dom.append(card, $('.notice-detail')).textContent = context
@@ -404,10 +489,43 @@ export class ActiveChatEditor extends EditorPane {
 			this.mode = 'task';
 		}
 		this.sendButton.textContent = this.mode === 'ask' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
-		this.modeLabel.textContent = this.mode === 'ask' ? localize('explanationSession', "Explanation session (read-only)") : this.activeService.agent.provider.name;
+		this.renderExplainMode();
 		this.textarea.placeholder = this.mode === 'ask' ? localize('askPlaceholder', "Ask about this part…") : localize('taskPlaceholder', "Describe a coding task…");
 		this.renderEffort();
 		this.updateSendState();
+	}
+
+	/** Bottom left of the chat box: how explanations are delivered (Auto, Away, Off), changeable in place. */
+	private renderExplainMode(): void {
+		this.modeStore.clear();
+		dom.clearNode(this.modeLabel);
+		if (this.mode === 'ask') {
+			this.modeLabel.textContent = localize('explanationSession', "Asking about the walkthrough");
+			return;
+		}
+		const modes: Array<{ id: ExplainMode; label: string; detail: string; icon: ThemeIcon }> = [
+			{ id: 'auto', label: localize('explainAuto', "Auto"), detail: localize('explainAutoDetail', "Explain as work finishes"), icon: Codicon.playCircle },
+			{ id: 'away', label: localize('explainAway', "Away"), detail: localize('explainAwayDetail', "Hold walkthroughs and brief me when I'm back; short notes still go to chat"), icon: Codicon.history },
+			{ id: 'off', label: localize('explainOff', "Off"), detail: localize('explainOffDetail', "Don't explain"), icon: Codicon.circleSlash },
+		];
+		const current = modes.find(mode => mode.id === this.activeService.mode) ?? modes[0];
+		const button = dom.append(this.modeLabel, $('button.composer-explain-mode')) as HTMLButtonElement;
+		button.classList.add(current.id);
+		dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(current.icon));
+		dom.append(button, $('span')).textContent = current.label;
+		dom.append(button, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		button.title = localize('explainModeTitle', "Explanations: {0}. Click to change.", current.detail);
+		this.modeStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => {
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => button,
+				getActions: () => modes.map(mode => toAction({
+					id: `active.explainMode.${mode.id}`,
+					label: `${mode.label} — ${mode.detail}`,
+					checked: mode.id === current.id,
+					run: () => this.activeService.setMode(mode.id),
+				})),
+			});
+		}));
 	}
 
 	private renderEffort(): void {
@@ -491,7 +609,7 @@ export class ActiveChatEditor extends EditorPane {
 				eyebrow(entry.role === 'agent' ? this.activeService.agent.provider.shortName : entry.id.startsWith('note') ? localize('explainerNote', "Active · note") : localize('explainer', "Active · explanation"));
 				const body = dom.append(node, $('.text.markdown'));
 				if (entry.text) {
-					const rendered = slot.store.add(this.markdownRenderer.render(new MarkdownString(entry.text)));
+					const rendered = slot.store.add(this.markdownRenderer.render(new MarkdownString(escapeIdentifierUnderscores(entry.text))));
 					body.appendChild(rendered.element);
 				} else if (entry.status === 'streaming') {
 					body.textContent = '…';
@@ -548,4 +666,12 @@ export class ActiveChatEditor extends EditorPane {
 			this.scrollable.setScrollPosition({ scrollTop: this.content.scrollHeight });
 		});
 	}
+}
+
+/**
+ * Agents often write Python-style names like `__repr__` or `__init__.py` without backticks,
+ * which markdown would turn into bold text. Escapes the underscores of such names outside code.
+ */
+export function escapeIdentifierUnderscores(text: string): string {
+	return text.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map((part, index) => index % 2 ? part : part.replace(/(?<![\w\\])[\w.]*__\w*/g, name => name.replace(/_/g, '\\_'))).join('');
 }

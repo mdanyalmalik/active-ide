@@ -58,6 +58,19 @@ export class BridgeHost implements AgentHost {
 		return session;
 	}
 
+	/** Bridge sessions hold no agent-side state, so resuming only reuses the id; turn ids get a fresh suffix so they never collide with claimed ones. */
+	async resumeSession(sessionId: string, options: AgentSessionOptions): Promise<AgentSession> {
+		if (!sessionId.startsWith(`bridge-${this.role}-`)) {
+			throw new Error(`not a bridge ${this.role} session: ${sessionId}`);
+		}
+		const dir = path.join(this.bridgeDir, this.role);
+		await fs.mkdir(path.join(dir, 'inbox'), { recursive: true });
+		await fs.mkdir(path.join(dir, 'outbox'), { recursive: true });
+		const session = new BridgeSession(sessionId, dir, options, `r${Date.now().toString(36)}`);
+		this.sessions.push(session);
+		return session;
+	}
+
 	async dispose(): Promise<void> {
 		for (const session of this.sessions) {
 			session.dispose();
@@ -71,14 +84,14 @@ class BridgeSession implements AgentSession {
 	private readonly timers = new Set<NodeJS.Timeout>();
 	private readonly background = new Map<string, AgentTask>();
 
-	constructor(readonly sessionId: string, private readonly dir: string, private readonly options: AgentSessionOptions) { }
+	constructor(readonly sessionId: string, private readonly dir: string, private readonly options: AgentSessionOptions, private readonly turnPrefix = '') { }
 
 	private get listener(): AgentSessionListener {
 		return this.options.listener;
 	}
 
 	async startTurn(text: string): Promise<string> {
-		const turnId = `${this.sessionId}-t${++this.seq}`;
+		const turnId = `${this.sessionId}-${this.turnPrefix}t${++this.seq}`;
 		const request = { turnId, sessionId: this.sessionId, text, workspaceRoot: this.options.workspaceRoot, readOnly: this.options.readOnly, at: Date.now() };
 		const name = `${String(Date.now()).padStart(15, '0')}-${turnId}.json`;
 		const target = path.join(this.dir, 'inbox', name);

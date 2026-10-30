@@ -569,6 +569,37 @@
 	font-size: 13px;
 }
 
+.monaco-workbench .active-chat-composer button.composer-explain-mode {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: 1px solid var(--active-border);
+	color: var(--vscode-foreground);
+	font-family: inherit;
+	font-size: 12px;
+	padding: 3px 8px 3px 7px;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.monaco-workbench .active-chat-composer button.composer-explain-mode:hover {
+	border-color: var(--active-accent);
+}
+
+.monaco-workbench .active-chat-composer button.composer-explain-mode .chevron {
+	font-size: 12px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-chat-composer button.composer-explain-mode.away {
+	border-color: var(--vscode-editorWarning-foreground, var(--active-border));
+}
+
+.monaco-workbench .active-chat-composer button.composer-explain-mode.off {
+	color: var(--active-muted);
+}
+
 .monaco-workbench .active-chat-composer .composer-tools {
 	display: flex;
 	align-items: center;
@@ -632,6 +663,77 @@
 	margin: 0;
 }
 
+/* Return briefing */
+.monaco-workbench .active-chat-notices .notice.briefing {
+	border-left: 3px solid var(--active-accent);
+	animation: active-part-in 360ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
+}
+
+.monaco-workbench .notice.briefing .notice-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 16px;
+	margin-top: 4px;
+}
+
+.monaco-workbench .notice.briefing .briefing-section {
+	margin-top: 12px;
+}
+
+.monaco-workbench .notice.briefing .briefing-label {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--active-muted);
+	margin-bottom: 4px;
+}
+
+.monaco-workbench .notice.briefing ul {
+	margin: 0;
+	padding-left: 18px;
+	line-height: 1.55;
+}
+
+.monaco-workbench .notice.briefing p {
+	margin: 0;
+	line-height: 1.55;
+}
+
+.monaco-workbench .notice.briefing .briefing-section.attention .briefing-label {
+	color: var(--vscode-editorWarning-foreground, var(--active-muted));
+}
+
+.monaco-workbench .notice.briefing .briefing-section.problems .briefing-label {
+	color: var(--active-removed);
+}
+
+.monaco-workbench .notice.briefing .briefing-walkthroughs {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	margin-top: 14px;
+}
+
+.monaco-workbench .notice.briefing button.briefing-walkthrough {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: transparent;
+	border: none;
+	color: var(--vscode-textLink-foreground);
+	font-family: inherit;
+	font-size: 13px;
+	padding: 3px 0;
+	cursor: pointer;
+	text-align: left;
+}
+
+.monaco-workbench .notice.briefing button.briefing-walkthrough:hover {
+	text-decoration: underline;
+}
+
 /* ------------------------------------------------------------------ walkthrough */
 
 .monaco-workbench .active-walkthrough {
@@ -682,6 +784,7 @@
 		padding: 14px 16px 16px;
 	}
 	.monaco-editor .active-explain-card h2.title {
+	text-wrap: balance;
 		font-size: 18px;
 	}
 	.monaco-workbench .walkthrough-crumbs {
@@ -1290,8 +1393,23 @@
 	flex-direction: column;
 	gap: 12px;
 	flex: 0 1 220px;
-	min-width: 110px;
+	min-width: 72px;
 	transition: opacity 250ms ease;
+}
+
+.monaco-editor .active-visual-diagram .diagram-columns.single-row {
+	align-items: stretch;
+}
+
+.monaco-editor .active-visual-diagram .diagram-columns.single-row .diagram-node {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+}
+
+.monaco-editor .active-visual-diagram .diagram-column.roomy {
+	gap: 36px;
 }
 
 .monaco-editor .active-visual-diagram .diagram-column.dim {
@@ -1308,6 +1426,7 @@
 
 .monaco-editor .active-visual-diagram .diagram-node .label {
 	font-size: 14px;
+	overflow-wrap: break-word;
 }
 
 .monaco-editor .active-visual-diagram .diagram-node .detail {
@@ -1361,13 +1480,19 @@
 	color: var(--active-muted);
 	background: var(--active-card);
 	padding: 0 4px;
-	max-width: 112px;
+	/* Labels fit the space between columns, which shrinks when there are many. */
+	max-width: max(56px, min(112px, calc(var(--active-gap, 120px) - 16px)));
 	text-align: center;
 	line-height: 1.25;
 }
 
 .monaco-editor .active-visual-diagram .edge-label.below {
 	transform: translate(-50%, 40%);
+}
+
+.monaco-editor .active-visual-diagram .edge-label.beside {
+	transform: translate(0, -50%);
+	text-align: left;
 }
 
 .monaco-editor .active-visual-diagram .edge-label.highlight {

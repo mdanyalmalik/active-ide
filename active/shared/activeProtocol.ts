@@ -443,7 +443,11 @@ export const enum ActiveSetting {
 	ExplanationEffort = 'active.explanation.reasoningEffort',
 	NarrationVoice = 'active.narration.voice',
 	NarrationSpeed = 'active.narration.speed',
+	ExplainMode = 'active.explain.mode',
 }
+
+/** `auto`: explanations pop up when ready; `away`: they wait for a return briefing; `off`: none are made. */
+export type ExplainMode = 'auto' | 'away' | 'off';
 
 /** Reasoning effort tiers, lowest first. `default` in a setting means the agent's own default for the model. */
 export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -523,10 +527,31 @@ export const enum ExtensionCommand {
 	Elaborate = 'active.ext.elaborate',
 	NewSession = 'active.ext.newSession',
 	ResumeSession = 'active.ext.resumeSession',
+	Brief = 'active.ext.brief',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
 export const WORKBENCH_EVENT_COMMAND = '_active.workbench.event';
+
+/** What happened while the developer was away, condensed for their return. */
+export interface Briefing {
+	readonly headline: string;
+	/** Meaningful outcomes. */
+	readonly done: readonly string[];
+	/** Decisions or questions that need the developer. */
+	readonly attention: readonly string[];
+	/** Unresolved problems: failing checks, errors, unfinished work. */
+	readonly problems: readonly string[];
+	/** Where to pick up. */
+	readonly next: string;
+	/** Set when the explanation model couldn't write it and this is the plain fallback. */
+	readonly fallback?: boolean;
+}
+
+export interface BriefingRequest {
+	/** Cover turns that ended (and chapters made) at or after this time. */
+	readonly since: number;
+}
 
 export interface AskRequest {
 	readonly question: string;

@@ -6,7 +6,7 @@
 import * as dom from '../../../../base/browser/dom.js';
 import { DomScrollableElement } from '../../../../base/browser/ui/scrollbar/scrollableElement.js';
 import { fromNow } from '../../../../base/common/date.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { localize } from '../../../../nls.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -31,6 +31,8 @@ export class ActiveHistoryView extends ViewPane {
 	private scrollable!: DomScrollableElement;
 	private readonly listStore = this._register(new DisposableStore());
 	private readonly expanded = new Map<string, HistoryDetail | 'loading'>();
+	/** Relative times ("5 mins ago") on screen, refreshed every minute so they don't go stale. */
+	private timeLabels: Array<{ element: HTMLElement; text: () => string }> = [];
 
 	constructor(
 		options: IViewPaneOptions,
@@ -48,6 +50,17 @@ export class ActiveHistoryView extends ViewPane {
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._register(this.activeService.onDidChangeHistory(() => this.renderList()));
+		const timer = setInterval(() => {
+			if (this.isBodyVisible()) {
+				this.timeLabels.forEach(label => label.element.textContent = label.text());
+			}
+		}, 60_000);
+		this._register(toDisposable(() => clearInterval(timer)));
+	}
+
+	private timeLabel(element: HTMLElement, text: () => string): void {
+		element.textContent = text();
+		this.timeLabels.push({ element, text });
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -70,6 +83,7 @@ export class ActiveHistoryView extends ViewPane {
 			return;
 		}
 		this.listStore.clear();
+		this.timeLabels = [];
 		dom.clearNode(this.list);
 		const history = this.activeService.history;
 		if (!history.length) {
@@ -77,14 +91,19 @@ export class ActiveHistoryView extends ViewPane {
 			this.scrollable.scanDomNode();
 			return;
 		}
-		let session: string | undefined;
+		// Turns are newest first; each run of turns from one chat gets a header saying when that chat began
+		// (its first turn overall, as in the Chats picker, even if the chat was left and resumed later).
+		const chatStart = new Map<string, number>();
 		for (const turn of history) {
-			if (turn.sessionId !== session) {
-				session = turn.sessionId;
-				dom.append(this.list, $('.session')).textContent = localize('session', "Session {0}", turn.sessionId.slice(0, 8));
+			chatStart.set(turn.sessionId, Math.min(turn.startedAt, chatStart.get(turn.sessionId) ?? Infinity));
+		}
+		history.forEach((turn, index) => {
+			if (turn.sessionId !== history[index - 1]?.sessionId) {
+				const started = chatStart.get(turn.sessionId)!;
+				this.timeLabel(dom.append(this.list, $('.session')), () => localize('chatStarted', "Chat started {0}", fromNow(started, true)));
 			}
 			this.renderTurn(turn);
-		}
+		});
 		this.scrollable.scanDomNode();
 	}
 
@@ -92,7 +111,7 @@ export class ActiveHistoryView extends ViewPane {
 		const item = dom.append(this.list, $('.turn'));
 		const head = dom.append(item, $('.turn-head'));
 		dom.append(head, $('span.index')).textContent = localize('turnIndex', "Turn {0}", turn.index);
-		dom.append(head, $('span.when')).textContent = fromNow(turn.startedAt, true);
+		this.timeLabel(dom.append(head, $('span.when')), () => fromNow(turn.startedAt, true));
 		dom.append(item, $('.task')).textContent = turn.task;
 		const note = dom.append(item, $('.note'));
 		note.textContent = turn.walkthroughTitle ? localize('walkthroughNote', "Walkthrough: {0}", turn.walkthroughTitle) : turn.explanationNote;

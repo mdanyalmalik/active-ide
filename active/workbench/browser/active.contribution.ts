@@ -26,6 +26,7 @@ import { IInstantiationService, ServicesAccessor } from '../../../../platform/in
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
+import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
@@ -39,7 +40,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { ExplorerExtensions, IExplorerFileContributionRegistry } from '../../files/browser/explorerFileContrib.js';
-import { ActiveEvent, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
+import { ActiveEvent, ExplainMode, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
 import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { ActiveChatEditor } from './chatEditor.js';
@@ -296,6 +297,34 @@ registerAction2(class extends Action2 {
 
 registerAction2(class extends Action2 {
 	constructor() {
+		super({ id: ActiveCommandIds.PickExplainMode, title: localize2('pickExplainMode', "Change Explanation Mode"), category, f1: true });
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const service = accessor.get(IActiveService);
+		const quickInput = accessor.get(IQuickInputService);
+		const items: Array<IQuickPickItem & { mode: ExplainMode }> = [
+			{ mode: 'auto', label: localize('pickAuto', "Auto"), detail: localize('pickAutoDetail', "Explanations pop up as each piece of work is ready.") },
+			{ mode: 'away', label: localize('pickAway', "Away"), detail: localize('pickAwayDetail', "Walkthroughs wait (short notes still go to chat); switching back shows a short briefing.") },
+			{ mode: 'off', label: localize('pickOff', "Off"), detail: localize('pickOffDetail', "No explanations; tasks are still saved to history.") },
+		];
+		const picked = await quickInput.pick(items.map(item => ({ ...item, description: item.mode === service.mode ? localize('currentMode', "current") : undefined })), { title: localize('explainModeTitle', "Explanation Mode") });
+		if (picked) {
+			await service.setMode(picked.mode);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.CatchUp, title: localize2('catchUp', "Catch Me Up"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).catchUp();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
 		super({ id: ActiveCommandIds.NewChat, title: localize2('newChat', "New Chat"), category, f1: true });
 	}
 	run(accessor: ServicesAccessor): Promise<void> {
@@ -447,20 +476,24 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 		this._register(activeService.onDidChangeOffer(update));
 		this._register(activeService.onDidChangeNarration(update));
 		this._register(activeService.onDidChangeProfile(update));
+		this._register(activeService.onDidChangeMode(update));
 		this._register(editorService.onDidActiveEditorChange(update));
 	}
 
 	private modeEntry() {
 		const active = this.editorService.activeEditor;
-		let text: string;
+		const mode = this.activeService.mode;
+		const name = mode === 'away' ? localize('modeAway', "Away") : mode === 'off' ? localize('modeOff', "Explanations off") : localize('modeAuto', "Auto");
+		let text = name;
 		if (active instanceof WalkthroughInput) {
-			text = this.activeService.player?.playing ? localize('modeExplaining', "Auto · explaining") : localize('modeWalkthroughPaused', "Auto · walkthrough paused");
+			const player = this.activeService.player;
+			text = player?.playing ? localize('modeExplaining', "{0} · explaining", name)
+				: player?.state === 'ended' ? localize('modeWalkthroughDone', "{0} · walkthrough finished", name)
+					: localize('modeWalkthroughPaused', "{0} · walkthrough paused", name);
 		} else if (active instanceof ActiveChatInput) {
-			text = localize('modeChat', "Auto · chat open");
-		} else {
-			text = localize('modeAuto', "Auto");
+			text = localize('modeChat', "{0} · chat open", name);
 		}
-		return { name: localize('activeMode', "Active Mode"), text, ariaLabel: text, command: ActiveCommandIds.OpenChat };
+		return { name: localize('activeMode', "Active Mode"), text, ariaLabel: text, tooltip: localize('modeTooltip', "How explanations are delivered. Click to change."), command: ActiveCommandIds.PickExplainMode };
 	}
 
 	private activityEntry() {

@@ -7,7 +7,7 @@ import * as dom from '../../../../base/browser/dom.js';
 import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
-import { Disposable, DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
@@ -21,6 +21,8 @@ import { renderSetupPanel, SetupPanelViewState } from './setupPanel.js';
 
 const $ = dom.$;
 const HIDE_KEY = 'active.welcome.hidden';
+/** How long setup must look incomplete before the dialog opens. */
+const OPEN_DELAY_MS = 2500;
 
 /**
  * The startup modal (in the spirit of the workspace trust prompt) shown while
@@ -33,6 +35,7 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 
 	private readonly dialog = this._register(new MutableDisposable<DisposableStore>());
 	private shown = false;
+	private openTimer: ReturnType<typeof setTimeout> | undefined;
 	private connecting = false;
 	private readonly setupView: SetupPanelViewState = { showLog: false, apiKeyDraft: '' };
 
@@ -58,6 +61,7 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 				evaluate();
 			}
 		});
+		this._register(toDisposable(() => clearTimeout(this.openTimer)));
 		void activeService.initialize().then(evaluate);
 	}
 
@@ -77,10 +81,19 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 			return;
 		}
 		if (!this.activeService.needsTrust && this.agentReady && this.activeService.profile.configured) {
+			clearTimeout(this.openTimer);
+			this.openTimer = undefined;
 			return;
 		}
-		this.shown = true;
-		this.open();
+		// The agent can look unready for a moment while it reconnects after a reload, so only
+		// open if setup still looks incomplete a little later.
+		this.openTimer ??= setTimeout(() => {
+			this.openTimer = undefined;
+			if (!this.shown && (this.activeService.needsTrust || !this.agentReady || !this.activeService.profile.configured)) {
+				this.shown = true;
+				this.open();
+			}
+		}, OPEN_DELAY_MS);
 	}
 
 	private open(): void {

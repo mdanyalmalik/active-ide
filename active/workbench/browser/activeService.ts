@@ -26,7 +26,7 @@ import { IPaneCompositePartService } from '../../../services/panecomposite/brows
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IExplorerService } from '../../files/browser/files.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, ActiveSetting, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveEvent, ActiveSetting, Briefing, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
 import { ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
@@ -59,7 +59,21 @@ export interface ChatContext {
 /** Shown until the agent services report which coding agent is configured. */
 const DEFAULT_PROVIDER: AgentProviderInfo = { id: 'muse', name: 'Muse Code', shortName: 'Muse', devOnly: false };
 
+/** When the developer last dismissed a briefing in this folder: "Catch Me Up" covers everything since. */
+const CAUGHT_UP_KEY = 'active.away.caughtUpAt';
+/** When Away mode was switched on in this folder (kept across reloads). */
+const AWAY_SINCE_KEY = 'active.away.since';
+
 export const IActiveService = createDecorator<IActiveService>('activeService');
+
+export interface BriefingState {
+	readonly since: number;
+	readonly minutes: number;
+	/** Walkthroughs and chapters made in the period, oldest first (history record ids). */
+	readonly items: ReadonlyArray<{ readonly recordId: string; readonly title: string; readonly chapter?: number; readonly task: string }>;
+	readonly status: 'loading' | 'ready';
+	readonly briefing?: Briefing;
+}
 
 export interface IActiveService {
 	readonly _serviceBrand: undefined;
@@ -72,6 +86,8 @@ export interface IActiveService {
 	readonly narration: NarrationStatus;
 	readonly walkthroughStatus: WalkthroughStatus | undefined;
 	readonly player: WalkthroughPlayer | undefined;
+	/** The player chat offers to return to: none once the user has moved on (a new chat or a new task) until another walkthrough plays. */
+	readonly chatPlayer: WalkthroughPlayer | undefined;
 	/** A finished walkthrough offered to the user (not yet shown because they had navigated elsewhere). */
 	readonly offeredWalkthrough: Walkthrough | undefined;
 	readonly chatContext: ChatContext | undefined;
@@ -128,6 +144,18 @@ export interface IActiveService {
 	selectWalkthrough(walkthrough: Walkthrough): void;
 	/** Opens Active's section of Settings. */
 	openSettings(): Promise<void>;
+	/** How explanations are delivered: pop up (`auto`), wait for a briefing (`away`), or not made (`off`). */
+	readonly mode: ExplainMode;
+	readonly onDidChangeMode: Event<void>;
+	setMode(mode: ExplainMode): Promise<void>;
+	/** The return briefing shown in chat after Away mode (or on request), until dismissed. */
+	readonly briefing: BriefingState | undefined;
+	readonly onDidChangeBriefing: Event<void>;
+	/** Briefs on everything since the last briefing was dismissed. */
+	catchUp(): Promise<void>;
+	dismissBriefing(): void;
+	/** Opens one of the briefing's walkthroughs, or all of them in order. */
+	playBriefing(recordId?: string): Promise<void>;
 	/** Starts a new chat (a new coding session) in this folder. */
 	newChat(): Promise<void>;
 	/** Lists this folder's earlier chats and resumes the chosen one. */
@@ -247,7 +275,11 @@ export class ActiveService extends Disposable implements IActiveService {
 		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
 		super();
+		this.lastMode = this.mode;
 		this._register(this.configurationService.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration(ActiveSetting.ExplainMode)) {
+				this.onModeChanged();
+			}
 			if (event.affectsConfiguration(ActiveSetting.NarrationVoice)) {
 				this.narrationCache.clear();
 				this._onDidChangeNarration.fire();
@@ -275,8 +307,10 @@ export class ActiveService extends Disposable implements IActiveService {
 	get history(): readonly TurnSummary[] { return this._history; }
 	get turnChanges(): ReadonlyMap<string, FileChangeStat> { return this._turnChanges; }
 	get narration() { return this._narration; }
+	private dismissedPlayer: string | undefined;
 	get walkthroughStatus(): WalkthroughStatus | undefined { return this._walkthroughStatus; }
 	get player(): WalkthroughPlayer | undefined { return this.playerRef.value; }
+	get chatPlayer(): WalkthroughPlayer | undefined { return this.player?.walkthrough.id === this.dismissedPlayer ? undefined : this.player; }
 	get offeredWalkthrough(): Walkthrough | undefined { return this._offered; }
 	get chatContext(): ChatContext | undefined { return this._chatContext; }
 	get pendingHandoff(): Walkthrough | undefined { return this._pendingHandoff; }
@@ -353,6 +387,13 @@ export class ActiveService extends Disposable implements IActiveService {
 			}
 			case 'chatReset':
 				this._chat.splice(0, this._chat.length, ...event.chat);
+				// A different chat starts clean: no offers, questions or status left over from the last one.
+				this.dismissedPlayer = this.player?.walkthrough.id;
+				this._chatContext = undefined;
+				this._walkthroughStatus = undefined;
+				this.offer(undefined);
+				this._onDidChangeWalkthroughStatus.fire();
+				this._onDidChangePlayer.fire();
 				this._onDidChangeChat.fire(undefined);
 				break;
 			case 'turnChanges':
@@ -422,6 +463,12 @@ export class ActiveService extends Disposable implements IActiveService {
 	 * offered instead of taking over.
 	 */
 	private async onWalkthroughReady(walkthrough: Walkthrough): Promise<void> {
+		if (this.mode !== 'auto') {
+			// Away: keep it for the briefing instead of popping it up.
+			this.heldWalkthroughs.push(walkthrough);
+			this.offer(walkthrough);
+			return;
+		}
 		const active = this.editorService.activeEditor;
 		// A chapter that arrives while the previous one is being watched waits its turn.
 		const player = this.player;
@@ -430,10 +477,15 @@ export class ActiveService extends Disposable implements IActiveService {
 			this.offer(walkthrough);
 			return;
 		}
-		const historyOpen = this.viewsService.isViewVisible(ACTIVE_HISTORY_VIEW_ID);
+		// On chat (even with History open beside it), announce with the countdown; Stay in Chat is one click.
 		const onChat = !active || active instanceof ActiveChatInput;
+		// Sitting on a walkthrough that has finished: the next one (often the next chapter) simply follows.
+		if (active instanceof WalkthroughInput && player?.state === 'ended' && !this._chatContext) {
+			await this.openWalkthrough(walkthrough);
+			return;
+		}
 		const watchingOtherWalkthrough = active instanceof WalkthroughInput && this.player?.playing;
-		if (onChat && !historyOpen && !watchingOtherWalkthrough && !this._chatContext) {
+		if (onChat && !watchingOtherWalkthrough && !this._chatContext) {
 			if (active instanceof ActiveChatInput) {
 				// Chat announces the walkthrough with a short countdown before handing off.
 				this._pendingHandoff = walkthrough;
@@ -450,6 +502,93 @@ export class ActiveService extends Disposable implements IActiveService {
 			label: localize('play', "Play Walkthrough"),
 			run: () => this.openWalkthrough(walkthrough),
 		}]);
+	}
+
+	// ------------------------------------------------------------- away mode
+
+	/** Held walkthroughs while in Away mode (the briefing lists everything from history anyway). */
+	private readonly heldWalkthroughs: Walkthrough[] = [];
+	private _briefing: BriefingState | undefined;
+	private readonly _onDidChangeBriefing = this._register(new Emitter<void>());
+	readonly onDidChangeBriefing = this._onDidChangeBriefing.event;
+	get briefing(): BriefingState | undefined { return this._briefing; }
+	private readonly _onDidChangeMode = this._register(new Emitter<void>());
+	readonly onDidChangeMode = this._onDidChangeMode.event;
+	private lastMode: ExplainMode = 'auto';
+
+	get mode(): ExplainMode {
+		const value = this.configurationService.getValue<string>(ActiveSetting.ExplainMode);
+		return value === 'away' || value === 'off' ? value : 'auto';
+	}
+
+	async setMode(mode: ExplainMode): Promise<void> {
+		await this.configurationService.updateValue(ActiveSetting.ExplainMode, mode, ConfigurationTarget.USER);
+	}
+
+	/** Entering Away starts the period a briefing covers; leaving it shows the briefing if anything happened. */
+	private onModeChanged(): void {
+		const mode = this.mode;
+		const previous = this.lastMode;
+		if (mode === previous) {
+			return;
+		}
+		this.lastMode = mode;
+		if (mode === 'away') {
+			this.storageService.store(AWAY_SINCE_KEY, Date.now(), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		} else if (previous === 'away') {
+			const since = this.storageService.getNumber(AWAY_SINCE_KEY, StorageScope.WORKSPACE);
+			this.storageService.remove(AWAY_SINCE_KEY, StorageScope.WORKSPACE);
+			const held = this.heldWalkthroughs.splice(0);
+			if (since !== undefined && (held.length || this._history.some(turn => (turn.endedAt ?? 0) >= since))) {
+				void this.startBriefing(since);
+			}
+		}
+		this._onDidChangeMode.fire();
+	}
+
+	async catchUp(): Promise<void> {
+		const since = this.storageService.getNumber(CAUGHT_UP_KEY, StorageScope.WORKSPACE) ?? Date.now() - 12 * 60 * 60_000;
+		await this.startBriefing(since);
+	}
+
+	private async startBriefing(since: number): Promise<void> {
+		const items = this._history
+			.filter(turn => turn.walkthroughId && (turn.endedAt ?? turn.startedAt) >= since)
+			.reverse()
+			.map(turn => ({ recordId: turn.turnId, title: turn.walkthroughTitle ?? turn.task, chapter: /^Chapter (\d+)/.exec(turn.explanationNote)?.[1] ? Number(/^Chapter (\d+)/.exec(turn.explanationNote)![1]) : undefined, task: turn.task }));
+		const state: BriefingState = { since, minutes: Math.max(1, Math.round((Date.now() - since) / 60_000)), items, status: 'loading' };
+		this._briefing = state;
+		this._onDidChangeBriefing.fire();
+		await this.openChat(false);
+		const briefing = await this.commandService.executeCommand<Briefing>(ExtensionCommand.Brief, { since }).catch(() => undefined);
+		if (this._briefing === state) {
+			this._briefing = { ...state, status: 'ready', briefing: briefing ?? { headline: localize('briefingUnavailable', "Couldn't write the briefing"), done: [], attention: [], problems: [], next: '', fallback: true } };
+			this._onDidChangeBriefing.fire();
+		}
+	}
+
+	dismissBriefing(): void {
+		this.storageService.store(CAUGHT_UP_KEY, Date.now(), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		this._briefing = undefined;
+		this._onDidChangeBriefing.fire();
+	}
+
+	async playBriefing(recordId?: string): Promise<void> {
+		const ids = recordId ? [recordId] : this._briefing?.items.map(item => item.recordId) ?? [];
+		const walkthroughs: Walkthrough[] = [];
+		for (const id of ids) {
+			const walkthrough = (await this.getHistory(id))?.walkthrough;
+			if (walkthrough) {
+				walkthroughs.push(walkthrough);
+			}
+		}
+		const [first, ...rest] = walkthroughs;
+		if (!first) {
+			return;
+		}
+		// The rest play one after another, like queued chapters.
+		this.queuedWalkthroughs.splice(0, this.queuedWalkthroughs.length, ...rest);
+		await this.openWalkthrough(first, { scene: 0, segment: 0 });
 	}
 
 	/** Chapters queued while the previous one played: the next pops up once it ends. */
@@ -499,10 +638,15 @@ export class ActiveService extends Disposable implements IActiveService {
 	// ------------------------------------------------------------- extension calls
 
 	async submitTask(text: string): Promise<void> {
+		if (this._briefing) {
+			this.dismissBriefing();
+		}
 		// A new coding task means the user has moved on from questions about an earlier
 		// walkthrough, so that context must not stop the next walkthrough from taking over.
-		if (this._chatContext) {
+		// The paused walkthrough was about earlier work; chat stops offering to return to it.
+		if (this._chatContext || this.chatPlayer) {
 			this._chatContext = undefined;
+			this.dismissedPlayer = this.player?.walkthrough.id;
 			this._onDidChangePlayer.fire();
 		}
 		await this.commandService.executeCommand(ExtensionCommand.SubmitTask, text);
@@ -611,6 +755,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	private activatePlayer(walkthrough: Walkthrough, start?: PlaybackPosition): void {
+		this.dismissedPlayer = undefined;
 		if (this.player?.walkthrough.id !== walkthrough.id) {
 			if (this.player) {
 				this.positions.set(this.player.walkthrough.id, this.player.position);
@@ -861,8 +1006,10 @@ export class ActiveService extends Disposable implements IActiveService {
 			return {
 				sessionId,
 				label: first.task.split('\n')[0].slice(0, 80),
-				description: sessionId === current ? localize('currentChat', "current") : fromNow(latest.startedAt, true),
-				detail: turns.length === 1 ? localize('oneTask', "1 task") : localize('tasks', "{0} tasks · latest: {1}", turns.length, latest.task.split('\n')[0].slice(0, 60)),
+				description: sessionId === current ? localize('currentChat', "current chat") : localize('lastActive', "last task {0}", fromNow(latest.startedAt, true)),
+				detail: turns.length === 1
+					? localize('oneTaskStarted', "Started {0} · 1 task", fromNow(first.startedAt, true))
+					: localize('tasksStarted', "Started {0} · {1} tasks · latest: {2}", fromNow(first.startedAt, true), turns.length, latest.task.split('\n')[0].slice(0, 60)),
 			};
 		});
 		if (!items.length) {

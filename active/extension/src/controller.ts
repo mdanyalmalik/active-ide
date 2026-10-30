@@ -6,11 +6,11 @@
 import { createHash } from 'node:crypto';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
 import { ExplanationAgent, PlanResult, WalkthroughPlanner } from './explain/planner';
-import { buildElaborationPrompt, buildQuestionPrompt, PlanningContext } from './explain/prompts';
+import { buildBriefingPrompt, buildElaborationPrompt, buildQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import { HistoryStore } from './history/historyStore';
-import { REASONING_EFFORTS } from './shared/activeProtocol';
-import type { ActiveEvent, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, KnowledgeProfile, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
+import { extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
+import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, InitialState, KnowledgeProfile, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 import { diffStats } from './tracking/lineDiff';
 
@@ -23,6 +23,8 @@ export interface ControllerOptions {
 	readonly chapterMs: () => number;
 	/** Lean toward a short note for small changes and short requests. */
 	readonly preferNotes: () => boolean;
+	/** False in the "off" explanation mode: the explanation model isn't asked during or after turns. */
+	readonly explanationsEnabled?: () => boolean;
 	readonly profile: () => KnowledgeProfile;
 	readonly emit: (event: ActiveEvent) => void;
 	readonly log: (line: string) => void;
@@ -591,7 +593,7 @@ export class ActiveController implements AgentSessionListener {
 	 * `chapterMs` has passed since the last chapter (or the start of the turn).
 	 */
 	private checkpoint(turn: LogicalTurn): void {
-		if (turn.codingDone || this.turn !== turn) {
+		if (turn.codingDone || this.turn !== turn || this.options.explanationsEnabled?.() === false) {
 			return;
 		}
 		if (turn.checking) {
@@ -742,6 +744,9 @@ export class ActiveController implements AgentSessionListener {
 	 * walkthrough is planned meanwhile (it's reused at the end if nothing changed).
 	 */
 	private requestDraft(turn: LogicalTurn): void {
+		if (this.options.explanationsEnabled?.() === false) {
+			return;
+		}
 		if (turn.drafting) {
 			turn.redraft = true;
 			return;
@@ -1000,8 +1005,12 @@ export class ActiveController implements AgentSessionListener {
 
 		let walkthrough: Walkthrough | undefined;
 		let note: string;
+		let startedNext = false;
 		if (terminal !== 'completed' && Object.keys(files).length === 0) {
 			note = `Turn ${terminal}; no changes to explain.`;
+			this.setStage(turn, 'notExplained', note);
+		} else if (this.options.explanationsEnabled?.() === false) {
+			note = 'Explanations are off. Saved to history.';
 			this.setStage(turn, 'notExplained', note);
 		} else if (!verdict.worthy) {
 			note = chapters ? `Explained in ${chapters} chapter${chapters === 1 ? '' : 's'}.` : 'No code changes to explain.';
@@ -1009,6 +1018,7 @@ export class ActiveController implements AgentSessionListener {
 		} else {
 			// Start the queued task right away: the coding agent never waits for explanations.
 			if (next) {
+				startedNext = true;
 				void this.beginLogicalTurn(next);
 			}
 			const pending = await this.waitForBackground(turn);
@@ -1086,7 +1096,7 @@ export class ActiveController implements AgentSessionListener {
 		if (this.turn === turn) {
 			this.turn = undefined;
 		}
-		if (next && !verdict.worthy) {
+		if (next && !startedNext) {
 			await this.beginLogicalTurn(next);
 		}
 	}
@@ -1179,6 +1189,60 @@ export class ActiveController implements AgentSessionListener {
 			return {};
 		}
 		return { walkthrough: this.toWalkthrough(turn, result.draft, files, pending, chapter) };
+	}
+
+	// ---------------------------------------------------------------- away mode
+
+	/**
+	 * The return briefing: what happened since `since` (finished tasks, chapters, notes, failures,
+	 * pending checks, anything waiting on the developer), condensed by the explanation model. Falls
+	 * back to a plain summary when the model can't answer, so there's always something to show.
+	 */
+	async brief(request: BriefingRequest): Promise<Briefing> {
+		const summaries = (await this.history.list()).filter(turn => (turn.endedAt ?? turn.startedAt) >= request.since).reverse();
+		const turns: BriefingTurn[] = [];
+		for (const summary of summaries) {
+			const detail = await this.history.get(summary.turnId);
+			const agentMessages = detail?.chat.filter(entry => entry.role === 'agent' && entry.phase !== 'commentary' && entry.text) ?? [];
+			turns.push({
+				task: summary.task,
+				outcome: summary.outcome,
+				explanation: summary.explanationNote,
+				summary: detail?.walkthrough?.summary,
+				finalMessage: agentMessages[agentMessages.length - 1]?.text,
+				notes: detail?.chat.filter(entry => entry.role === 'explainer' && entry.id.startsWith('note')).map(entry => entry.text) ?? [],
+				failedCommands: (detail?.tools ?? []).filter(tool => tool.command && /fail|error/i.test(tool.status)).map(tool => tool.command!),
+				pendingChecks: (detail?.walkthrough?.pending ?? []).filter(check => check.state === 'running').map(check => check.label),
+				files: summary.files,
+			});
+		}
+		const turn = this.turn && !this.turn.codingDone ? this.turn : undefined;
+		const running = turn ? { task: turn.task, progress: [...turn.agentMessages.values()].slice(-3) } : undefined;
+		const waiting = this.chat.filter(entry => entry.approval && !entry.approval.resolved).map(entry => `${entry.approval!.title}: ${entry.approval!.detail}`.slice(0, 200));
+		const minutesAway = Math.max(1, Math.round((Date.now() - request.since) / 60000));
+		const fallback: Briefing = {
+			headline: turns.length ? `${turns.length} task${turns.length === 1 ? '' : 's'} finished while you were away` : running ? `Still working on: ${running.task}` : 'Nothing new while you were away',
+			done: turns.map(entry => `${entry.task.split('\n')[0].slice(0, 80)} — ${entry.explanation}`),
+			attention: waiting,
+			problems: turns.flatMap(entry => [...entry.failedCommands.map(command => `Failed: ${command}`), ...entry.pendingChecks.map(check => `Still running: ${check}`)]),
+			next: running ? `${this.options.provider.name} is still working on "${running.task.split('\n')[0].slice(0, 80)}".` : '',
+			fallback: true,
+		};
+		if (!turns.length && !running && !waiting.length) {
+			return fallback;
+		}
+		try {
+			const reply = await this.explainer.ask(buildBriefingPrompt({ profile: this.options.profile(), minutesAway, turns, running, waiting }));
+			const parsed = extractJsonObject(reply) as Partial<Record<keyof Briefing, unknown>> | undefined;
+			const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && !!item.trim()) : [];
+			if (!parsed || typeof parsed.headline !== 'string') {
+				throw new Error('no headline in the reply');
+			}
+			return { headline: parsed.headline, done: list(parsed.done), attention: list(parsed.attention), problems: list(parsed.problems), next: typeof parsed.next === 'string' ? parsed.next : '' };
+		} catch (error) {
+			this.options.log(`return briefing failed: ${error instanceof Error ? error.message : String(error)}`);
+			return fallback;
+		}
 	}
 
 	// ---------------------------------------------------------------- history

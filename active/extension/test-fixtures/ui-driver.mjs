@@ -13,6 +13,11 @@
 //   ui-driver.mjs wait <seconds> [walkthrough|idle]   wait, optionally until a walkthrough is showing / the agent is idle
 //   ui-driver.mjs history                 list saved turns
 //   ui-driver.mjs replay <turnNumber>     replay a saved walkthrough
+//   ui-driver.mjs click <text>            click the visible button, link, tab, menu or list item with that text (or tooltip)
+//   ui-driver.mjs type <text>             type into whatever has focus (add --enter to press Enter after)
+//   ui-driver.mjs key <combo>             press a key or chord, e.g. Escape, Enter, Meta+Comma
+//   ui-driver.mjs command <title>         run a command from the Command Palette, e.g. "Active: Catch Me Up"
+//   ui-driver.mjs setting <title> <value> in an open Settings editor, change the setting with that title (dropdown, number, text or checkbox)
 
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
@@ -57,6 +62,18 @@ function snapshot() {
 		const stage = text(q('.active-chat-stage'));
 		if (stage) {
 			out.push(`ACTIVITY: ${stage}`);
+		}
+		const headerButtons = qa('.active-chat-header button').map(button => `[${text(button) || button.title || button.getAttribute('aria-label')}]`);
+		if (headerButtons.length) {
+			out.push(`HEADER BUTTONS: ${headerButtons.join(' ')}`);
+		}
+		const handoff = q('.active-chat-handoff');
+		if (handoff && !handoff.classList.contains('hidden') && text(handoff)) {
+			out.push(`HANDOFF: ${text(handoff).replace(/\n/g, ' / ')}`);
+		}
+		const tools = qa('.active-chat-composer .composer-bar button, .active-chat-composer .composer-tools button').map(button => `[${text(button) || button.title || button.getAttribute('aria-label')}${button.disabled ? ' (disabled)' : ''}]`);
+		if (tools.length) {
+			out.push(`COMPOSER BUTTONS: ${[...new Set(tools)].join(' ')}`);
 		}
 		const modes = qa('.composer-context button.mode').map(button => `${button.classList.contains('selected') ? '[x]' : '[ ]'} ${text(button)}`);
 		if (modes.length) {
@@ -127,9 +144,44 @@ function snapshot() {
 			}
 		}
 	}
+	const feedback = qa('.detail-feedback').find(el => el.offsetParent);
+	if (feedback) {
+		out.push('', `DETAIL QUESTION: ${text(feedback).replace(/\n/g, ' | ')}`);
+	}
 	const history = q('.active-history');
 	if (history && history.offsetParent) {
 		out.push('', '== HISTORY ==', ...qa('.active-history .turn').map(turn => `- ${text(turn).replace(/\n/g, ' | ')}`));
+	}
+	// Settings may open as a tab or as a floating panel over the editor.
+	const settings = qa('.settings-editor').find(el => el.offsetParent);
+	if (settings) {
+		out.push('', '== SETTINGS ==');
+		out.push(`SEARCH: ${text(q('.settings-header .suggest-input-container', settings)).replace(/\n/g, ' ')}`);
+		out.push(`TOC: ${qa('.settings-toc-container .monaco-list-row', settings).map(row => text(row)).join(' | ')}`);
+		for (const row of qa('.settings-tree-container .monaco-list-row', settings).slice(0, 14)) {
+			const title = text(q('.setting-item-label', row)) || text(q('.settings-group-title-label', row));
+			const category = text(q('.setting-item-category', row));
+			const value = q('select', row)?.selectedOptions?.[0]?.textContent ?? q('input[type=number], input[type=text], textarea', row)?.value ?? (q('.setting-value-checkbox', row) ? (q('.setting-value-checkbox', row).classList.contains('checked') ? 'on' : 'off') : '');
+			const description = text(q('.setting-item-description', row)).slice(0, 140);
+			out.push(`- ${category}${title}${value !== '' ? ` = ${value}` : ''}${description ? `  — ${description}` : ''}`);
+		}
+	}
+	const editorPane = activeTab && !/Active Chat|Walkthrough|Settings/.test(activeTab) ? q('.editor-group-container.active .editor-container') : null;
+	if (!settings && editorPane && !q('.active-chat', editorPane)?.offsetParent && !q('.active-walkthrough', editorPane)?.offsetParent) {
+		out.push('', '== EDITOR ==', text(editorPane).slice(0, 3000));
+	}
+	const menu = qa('.monaco-menu .action-item:not(.disabled) .action-label, .context-view .monaco-menu .action-label').map(el => `${el.closest('.action-item')?.querySelector('[aria-checked=true]') ? '✓ ' : ''}${text(el)}`).filter(Boolean);
+	if (menu.length) {
+		out.push('', `OPEN MENU: ${[...new Set(menu)].join(' | ')}`);
+	}
+	const quickInput = q('.quick-input-widget');
+	if (quickInput && quickInput.style.display !== 'none' && quickInput.offsetParent) {
+		out.push('', `QUICK PICK: ${q('.quick-input-box input', quickInput)?.placeholder ?? ''}`);
+		out.push(...qa('.quick-input-list .monaco-list-row', quickInput).slice(0, 12).map(row => `- ${text(row).replace(/\n/g, ' — ')}`));
+	}
+	const dialog = q('.monaco-dialog-box');
+	if (dialog) {
+		out.push('', `DIALOG: ${text(dialog).replace(/\n/g, ' / ')}`);
 	}
 	const notifications = qa('.notifications-toasts .notification-list-item-message').map(text);
 	if (notifications.length) {
@@ -140,6 +192,14 @@ function snapshot() {
 
 async function focusWalkthrough() {
 	await page.click('.active-walkthrough .walkthrough-crumbs');
+}
+
+/** Opens the History view; its activity bar icon toggles, so only click when it's hidden. */
+async function showHistory() {
+	if (!await page.locator('.active-history').isVisible().catch(() => false)) {
+		await page.click(".activitybar [aria-label^='History']");
+		await sleep(800);
+	}
 }
 
 async function openChat() {
@@ -186,7 +246,7 @@ switch (command) {
 	}
 	case 'ask': {
 		if (await page.locator('.active-walkthrough').isVisible().catch(() => false)) {
-			await page.click('.walkthrough-controls .open-chat');
+			await page.locator('.active-fab-stack .active-fab', { hasText: 'Chat' }).first().click();
 			await sleep(800);
 		} else {
 			await openChat();
@@ -215,7 +275,7 @@ switch (command) {
 			await openChat();
 			await page.click('text=Return to Walkthrough').catch(() => page.click('text=Play Walkthrough'));
 		} else if (action === 'open-chat') {
-			await page.click('.walkthrough-controls .open-chat');
+			await page.locator('.active-fab-stack .active-fab', { hasText: 'Chat' }).first().click();
 		} else if (action === 'open-file') {
 			await page.click('.active-explain-card .open-file');
 		} else {
@@ -250,20 +310,111 @@ switch (command) {
 		break;
 	}
 	case 'history':
-		await page.click(".activitybar [aria-label^='History']");
-		await sleep(800);
+		await showHistory();
 		console.log(await page.evaluate(snapshot));
 		break;
 	case 'replay': {
-		await page.click(".activitybar [aria-label^='History']");
-		await sleep(800);
+		await showHistory();
 		await page.locator('.active-history .turn', { hasText: `Turn ${args[0]} ` }).first().locator('button', { hasText: 'Replay' }).click();
 		await sleep(2000);
 		console.log(await page.evaluate(snapshot));
 		break;
 	}
+	case 'click': {
+		const label = args.join(' ');
+		const candidates = [
+			page.getByRole('menuitem', { name: label, exact: false }),
+			page.getByRole('menuitemcheckbox', { name: label, exact: false }),
+			page.getByRole('button', { name: label, exact: true }),
+			page.locator('button, a, [role=button]').filter({ hasText: new RegExp(`^\\W*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\W*$`) }),
+			page.getByRole('option', { name: label, exact: false }),
+			page.getByRole('tab', { name: label, exact: false }),
+			page.getByRole('button', { name: label, exact: false }),
+			page.getByTitle(label, { exact: false }),
+			page.getByText(label, { exact: true }),
+			page.getByText(label, { exact: false }),
+		];
+		let clicked = false;
+		for (const locator of candidates) {
+			const visible = locator.filter({ visible: true });
+			if (await visible.count().catch(() => 0)) {
+				await visible.first().click({ timeout: 5000 }).then(() => clicked = true).catch(() => undefined);
+				if (clicked) {
+					break;
+				}
+			}
+		}
+		if (!clicked) {
+			console.error(`Nothing visible to click matching "${label}".`);
+		}
+		await sleep(1200);
+		console.log(await page.evaluate(snapshot));
+		break;
+	}
+	case 'type': {
+		const enter = args.includes('--enter');
+		await page.keyboard.type(args.filter(arg => arg !== '--enter').join(' '), { delay: 5 });
+		if (enter) {
+			await page.keyboard.press('Enter');
+		}
+		await sleep(1000);
+		console.log(await page.evaluate(snapshot));
+		break;
+	}
+	case 'key':
+		await page.keyboard.press(args[0]);
+		await sleep(1000);
+		console.log(await page.evaluate(snapshot));
+		break;
+	case 'command': {
+		await page.keyboard.press('Meta+Shift+KeyP');
+		await page.waitForSelector('.quick-input-widget .quick-input-box input', { state: 'visible', timeout: 5000 });
+		await page.keyboard.type(args.join(' '), { delay: 5 });
+		await sleep(600);
+		await page.keyboard.press('Enter');
+		await sleep(1500);
+		console.log(await page.evaluate(snapshot));
+		break;
+	}
+	case 'setting': {
+		const value = args.at(-1);
+		const title = args.slice(0, -1).join(' ');
+		const row = page.locator('.settings-editor .settings-tree-container .monaco-list-row').filter({ has: page.locator('.setting-item-label', { hasText: title }) }).first();
+		if (!await row.count() && await page.locator('.settings-editor .settings-header .suggest-input-container').count()) {
+			// Off-screen rows aren't rendered: search for the setting like a person would.
+			await page.locator('.settings-editor .settings-header .suggest-input-container').first().click();
+			await page.keyboard.press('Meta+KeyA');
+			await page.keyboard.type(`@tag:active ${title}`, { delay: 5 });
+			await sleep(1200);
+		}
+		if (!await row.count()) {
+			console.error(`No visible setting titled "${title}". Search for it first (click the settings search box and type).`);
+		} else {
+			await row.scrollIntoViewIfNeeded();
+			const select = row.locator('select');
+			const input = row.locator('input[type=number], input[type=text], textarea');
+			const checkbox = row.locator('.setting-value-checkbox');
+			if (await select.count()) {
+				await select.first().selectOption({ label: value }).catch(() => select.first().selectOption(value));
+			} else if (await input.count()) {
+				await input.first().click();
+				await input.first().fill(value);
+				await page.keyboard.press('Tab');
+			} else if (await checkbox.count()) {
+				const checked = await checkbox.first().evaluate(el => el.classList.contains('checked'));
+				if (checked !== /^(on|true|yes)$/i.test(value)) {
+					await checkbox.first().click();
+				}
+			} else {
+				console.error('That setting has no editable control here.');
+			}
+		}
+		await sleep(1200);
+		console.log(await page.evaluate(snapshot));
+		break;
+	}
 	default:
-		console.error('usage: ui-driver.mjs <observe|shot|chat|ask|wt|wait|history|replay> ...');
+		console.error('usage: ui-driver.mjs <observe|shot|chat|ask|wt|wait|history|replay|click|type|key|command|setting> ...');
 		process.exit(2);
 }
 await browser.close().catch(() => undefined);

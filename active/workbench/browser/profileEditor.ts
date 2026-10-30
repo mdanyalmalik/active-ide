@@ -106,9 +106,9 @@ export class KnowledgeProfileEditor extends EditorPane {
 		}
 	}
 
-	private familiarityList(parent: HTMLElement, items: Array<{ name: string; familiarity: Familiarity }>, placeholder: string): void {
+	private familiarityList(parent: HTMLElement, items: Array<{ name: string; familiarity: Familiarity }>, placeholder: string, addLabel: string): void {
 		const list = dom.append(parent, $('.familiarity-list'));
-		const render = () => {
+		const render = (focusIndex?: number) => {
 			dom.clearNode(list);
 			items.forEach((item, index) => {
 				const row = dom.append(list, $('.familiarity-row'));
@@ -116,6 +116,16 @@ export class KnowledgeProfileEditor extends EditorPane {
 				name.value = item.name;
 				name.placeholder = placeholder;
 				this.formStore.add(dom.addDisposableListener(name, dom.EventType.INPUT, () => { items[index] = { ...items[index], name: name.value }; }));
+				// Enter moves on to a new row, like adding the next item to a list.
+				this.formStore.add(dom.addDisposableListener(name, dom.EventType.KEY_DOWN, (event: KeyboardEvent) => {
+					if (event.key === 'Enter' && name.value.trim()) {
+						event.preventDefault();
+						addRow();
+					}
+				}));
+				if (index === focusIndex) {
+					setTimeout(() => name.focus(), 0);
+				}
 				const select = dom.append(row, $('select')) as HTMLSelectElement;
 				for (const [id, label] of FAMILIARITY) {
 					const option = dom.append(select, $('option')) as HTMLOptionElement;
@@ -130,8 +140,15 @@ export class KnowledgeProfileEditor extends EditorPane {
 				this.formStore.add(dom.addDisposableListener(remove, dom.EventType.CLICK, () => { items.splice(index, 1); render(); }));
 			});
 			const add = dom.append(list, $('button.secondary')) as HTMLButtonElement;
-			add.textContent = localize('add', "Add");
-			this.formStore.add(dom.addDisposableListener(add, dom.EventType.CLICK, () => { items.push({ name: '', familiarity: 'some' }); render(); }));
+			add.textContent = addLabel;
+			this.formStore.add(dom.addDisposableListener(add, dom.EventType.CLICK, () => addRow()));
+		};
+		// Reuses a trailing blank row rather than stacking empty ones, and puts the cursor in it.
+		const addRow = () => {
+			if (items.at(-1)?.name.trim() !== '') {
+				items.push({ name: '', familiarity: 'some' });
+			}
+			render(items.length - 1);
 		};
 		render();
 	}
@@ -156,9 +173,9 @@ export class KnowledgeProfileEditor extends EditorPane {
 		this.formStore.add(dom.addDisposableListener(yearsInput, dom.EventType.INPUT, () => { draft.yearsProgramming = Math.max(0, Number(yearsInput.value) || 0); }));
 
 		const languages = draft.languages as Array<{ name: string; familiarity: Familiarity }>;
-		this.familiarityList(this.section(localize('languages', "Languages"), localize('languagesHelp', "What you work with, and how well you know it.")), languages, localize('languagePlaceholder', "TypeScript"));
+		this.familiarityList(this.section(localize('languages', "Languages"), localize('languagesHelp', "What you work with, and how well you know it.")), languages, localize('languagePlaceholder', "e.g. TypeScript"), localize('addLanguage', "Add language"));
 		const concepts = draft.concepts as Array<{ name: string; familiarity: Familiarity }>;
-		this.familiarityList(this.section(localize('concepts', "Concepts"), localize('conceptsHelp', "Ideas in your codebase, such as caching, concurrency or networking.")), concepts, localize('conceptPlaceholder', "Promises and async/await"));
+		this.familiarityList(this.section(localize('concepts', "Concepts"), localize('conceptsHelp', "Ideas in your codebase, such as caching, concurrency or networking.")), concepts, localize('conceptPlaceholder', "e.g. promises and async/await"), localize('addConcept', "Add concept"));
 
 		const focus = this.section(localize('focus', "Focus"), '');
 		dom.append(focus, $('label.field')).textContent = localize('followClosely', "Follow closely");

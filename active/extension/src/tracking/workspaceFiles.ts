@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', '.muse', '.agents', 'dist', 'out', 'build', '.next', 'coverage', '__pycache__', '.venv', 'venv', 'target', '.tools', '.active']);
+const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', '.muse', '.agents', 'dist', 'out', 'build', '.next', 'coverage', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'target', '.tools', '.active', '.gradle', '.parcel-cache', '.turbo', '.cache']);
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES = 8000;
 

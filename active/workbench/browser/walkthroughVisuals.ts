@@ -284,11 +284,21 @@ export function layoutColumns(visual: DiagramVisual): Map<string, number> {
 	return columns;
 }
 
+/** Vertical padding of a diagram (matches the CSS), and how far below the boxes a detouring edge runs. */
+const DIAGRAM_PADDING = 6;
+const DETOUR_GAP = 14;
+const DETOUR_LABEL_ROOM = 34;
+const MIN_COLUMN_GAP = 48;
+/** Width a box needs for a typical label to wrap only between words. */
+const READABLE_COLUMN_WIDTH = 160;
+
 function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: VisualCue): { layout: () => void; update: (cue: VisualCue) => void } {
 	const diagram = dom.append(container, $('.active-visual-diagram'));
 	const columns = layoutColumns(visual);
 	const order = [...new Set([...columns.values()])].sort((a, b) => a - b);
 	const row = dom.append(diagram, $('.diagram-columns'));
+	// A single row of boxes reads as a pipeline, so its boxes share one height.
+	row.classList.toggle('single-row', order.every(column => visual.nodes.filter(node => columns.get(node.id) === column).length === 1));
 	const boxes = new Map<string, HTMLElement>();
 	const columnElements: HTMLElement[] = [];
 	let highlighted = new Set(cue.nodes);
@@ -296,6 +306,10 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 		const columnElement = dom.append(row, $('.diagram-column'));
 		columnElement.style.setProperty('--active-index', String(columnIndex));
 		columnElements.push(columnElement);
+		// A labelled edge between two boxes of this column needs room for its label between them.
+		if (visual.edges.some(edge => edge.label && columns.get(edge.from) === column && columns.get(edge.to) === column)) {
+			columnElement.classList.add('roomy');
+		}
 		for (const node of visual.nodes.filter(candidate => columns.get(candidate.id) === column)) {
 			const box = dom.append(columnElement, $('.diagram-node'));
 			dom.append(box, $('.label')).textContent = node.label;
@@ -335,39 +349,69 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 		if (origin.width === 0) {
 			return;
 		}
+		// Many columns can't keep the full gap: give the boxes a readable width first, and the gaps what's left.
+		if (columnElements.length > 1) {
+			const count = columnElements.length;
+			const fullGap = 120;
+			const gap = Math.max(MIN_COLUMN_GAP, Math.min(fullGap, Math.floor((row.clientWidth - count * READABLE_COLUMN_WIDTH) / (count - 1))));
+			const value = gap < fullGap ? `${gap}px` : '';
+			if (row.style.columnGap !== value) {
+				row.style.columnGap = value;
+			}
+			labels.style.setProperty('--active-gap', `${gap}px`);
+		}
 		svg.setAttribute('width', String(origin.width));
 		svg.setAttribute('height', String(origin.height));
 		if (!drawn) {
 			drawn = true;
 			diagram.classList.add('draw-in');
+			// Boxes are still sliding in; follow them once they've settled.
+			setTimeout(draw, 1300);
 			setTimeout(() => diagram.classList.remove('draw-in'), 2000);
 		}
-		edgeElements.length = 0;
-		dom.clearNode(labels);
-		while (svg.firstChild) {
-			svg.removeChild(svg.firstChild);
+		// Built once and only moved afterwards: recreating the paths would restart their draw-in animation.
+		if (!svg.firstChild) {
+			const defs = document.createElementNS(SVG_NS, 'defs');
+			const marker = document.createElementNS(SVG_NS, 'marker');
+			marker.setAttribute('id', markerId);
+			marker.setAttribute('viewBox', '0 0 10 10');
+			marker.setAttribute('refX', '9');
+			marker.setAttribute('refY', '5');
+			marker.setAttribute('markerWidth', '7');
+			marker.setAttribute('markerHeight', '7');
+			marker.setAttribute('orient', 'auto-start-reverse');
+			const tip = document.createElementNS(SVG_NS, 'path');
+			tip.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+			tip.setAttribute('class', 'arrow-tip');
+			marker.appendChild(tip);
+			defs.appendChild(marker);
+			svg.appendChild(defs);
+			visual.edges.forEach((edge, edgeIndex) => {
+				if (!boxes.has(edge.from) || !boxes.has(edge.to)) {
+					return;
+				}
+				const path = document.createElementNS(SVG_NS, 'path');
+				path.setAttribute('marker-end', `url(#${markerId})`);
+				path.setAttribute('pathLength', '1');
+				path.style.setProperty('--active-index', String(edgeIndex));
+				const active = highlighted.has(edge.from) && highlighted.has(edge.to);
+				path.setAttribute('class', active ? 'edge highlight' : 'edge');
+				svg.appendChild(path);
+				let label: HTMLElement | undefined;
+				if (edge.label) {
+					label = dom.append(labels, $('.edge-label'));
+					label.textContent = edge.label;
+					label.classList.toggle('highlight', active);
+					label.style.setProperty('--active-index', String(edgeIndex));
+				}
+				edgeElements.push({ from: edge.from, to: edge.to, path, label });
+			});
 		}
-		const defs = document.createElementNS(SVG_NS, 'defs');
-		const marker = document.createElementNS(SVG_NS, 'marker');
-		marker.setAttribute('id', markerId);
-		marker.setAttribute('viewBox', '0 0 10 10');
-		marker.setAttribute('refX', '9');
-		marker.setAttribute('refY', '5');
-		marker.setAttribute('markerWidth', '7');
-		marker.setAttribute('markerHeight', '7');
-		marker.setAttribute('orient', 'auto-start-reverse');
-		const tip = document.createElementNS(SVG_NS, 'path');
-		tip.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
-		tip.setAttribute('class', 'arrow-tip');
-		marker.appendChild(tip);
-		defs.appendChild(marker);
-		svg.appendChild(defs);
-		visual.edges.forEach((edge, edgeIndex) => {
-			const from = boxes.get(edge.from)?.getBoundingClientRect();
-			const to = boxes.get(edge.to)?.getBoundingClientRect();
-			if (!from || !to) {
-				return;
-			}
+		let detourDepth = 0;
+		const labelledEdges = visual.edges.filter(edge => edge.label);
+		for (const element of edgeElements) {
+			const from = boxes.get(element.from)!.getBoundingClientRect();
+			const to = boxes.get(element.to)!.getBoundingClientRect();
 			let x1: number;
 			let y1: number;
 			let x2: number;
@@ -386,34 +430,55 @@ function renderDiagram(container: HTMLElement, visual: DiagramVisual, cue: Visua
 				y2 = to.top + to.height / 2 - origin.top;
 			}
 			// Two edges between the same pair run on parallel tracks: forward above, return below.
-			const opposed = visual.edges.some(other => other.from === edge.to && other.to === edge.from);
+			const opposed = visual.edges.some(other => other.from === element.to && other.to === element.from);
 			const returning = opposed && x2 < x1;
 			if (opposed) {
 				const offset = returning ? 9 : -9;
 				y1 += offset;
 				y2 += offset;
 			}
-			const path = document.createElementNS(SVG_NS, 'path');
 			const mid = (x1 + x2) / 2;
-			path.setAttribute('d', Math.abs(x1 - x2) > 4 ? `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}` : `M ${x1} ${y1} L ${x2} ${y2}`);
-			path.setAttribute('marker-end', `url(#${markerId})`);
-			path.setAttribute('pathLength', '1');
-			path.style.setProperty('--active-index', String(edgeIndex));
-			const active = highlighted.has(edge.from) && highlighted.has(edge.to);
-			path.setAttribute('class', active ? 'edge highlight' : 'edge');
-			svg.appendChild(path);
-			let label: HTMLElement | undefined;
-			if (edge.label) {
-				label = dom.append(labels, $('.edge-label'));
-				label.textContent = edge.label;
-				label.classList.toggle('highlight', active);
-				label.classList.toggle('below', returning);
-				label.style.left = `${mid}px`;
-				label.style.top = `${(y1 + y2) / 2}px`;
-				label.style.setProperty('--active-index', String(edgeIndex));
+			// An edge that skips a column would run behind the boxes in between: route it underneath them.
+			const [left, right] = x1 < x2 ? [x1, x2] : [x2, x1];
+			const blockers = [...boxes].filter(([id]) => id !== element.from && id !== element.to).map(([, box]) => box.getBoundingClientRect())
+				.filter(rect => rect.right - origin.left > left + 4 && rect.left - origin.left < right - 4 && rect.bottom - origin.top > Math.min(y1, y2) - 6 && rect.top - origin.top < Math.max(y1, y2) + 6);
+			if (blockers.length) {
+				const under = Math.max(...blockers.map(rect => rect.bottom - origin.top)) + DETOUR_GAP;
+				const direction = x2 > x1 ? 1 : -1;
+				const bend = Math.min(40, Math.abs(x2 - x1) / 4);
+				element.path.setAttribute('d', `M ${x1} ${y1} C ${x1 + direction * bend} ${y1}, ${x1 + direction * bend} ${under}, ${x1 + direction * bend * 2} ${under} L ${x2 - direction * bend * 2} ${under} C ${x2 - direction * bend} ${under}, ${x2 - direction * bend} ${y2}, ${x2} ${y2}`);
+				// Room for the detour and its label below the row of boxes.
+				detourDepth = Math.max(detourDepth, under + DETOUR_LABEL_ROOM - (row.getBoundingClientRect().bottom - origin.top));
+			} else {
+				element.path.setAttribute('d', Math.abs(x1 - x2) > 4 ? `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}` : `M ${x1} ${y1} L ${x2} ${y2}`);
 			}
-			edgeElements.push({ from: edge.from, to: edge.to, path, label });
-		});
+			if (element.label) {
+				const vertical = Math.abs(x1 - x2) <= 4;
+				element.label.classList.toggle('below', !vertical && (returning || blockers.length > 0));
+				// Between stacked boxes there's no room on the line, so the label sits beside it.
+				element.label.classList.toggle('beside', vertical);
+				if (vertical) {
+					element.label.style.left = `${x1 + 8}px`;
+					element.label.style.top = `${(y1 + y2) / 2}px`;
+				} else if (blockers.length) {
+					element.label.style.left = `${mid}px`;
+					element.label.style.top = `${Math.max(...blockers.map(rect => rect.bottom - origin.top)) + DETOUR_GAP}px`;
+				} else {
+					// Labels of edges fanning out of (or into) one box would pile up mid-way; move them toward the far end, where the edges have spread apart.
+					const fansOut = labelledEdges.filter(other => other.from === element.from).length > 1;
+					const fansIn = labelledEdges.filter(other => other.to === element.to).length > 1;
+					const t = fansOut && !fansIn ? 0.72 : fansIn && !fansOut ? 0.28 : 0.5;
+					const u = 1 - t;
+					element.label.style.left = `${u * u * u * x1 + 3 * u * t * mid + t * t * t * x2}px`;
+					element.label.style.top = `${y1 + (y2 - y1) * (3 * t * t - 2 * t * t * t)}px`;
+				}
+			}
+		}
+		// Make room below the boxes for detours so they don't run into the caption.
+		const padding = `${DIAGRAM_PADDING + Math.max(0, Math.ceil(detourDepth))}px`;
+		if (diagram.style.paddingBottom !== padding) {
+			diagram.style.paddingBottom = padding;
+		}
 	};
 	return { layout: draw, update };
 }

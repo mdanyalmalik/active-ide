@@ -11,7 +11,7 @@ import * as vscode from 'vscode';
 import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, ActiveSetting, AgentRunSettings, AskRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
@@ -166,6 +166,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		checkpointMs: () => Math.max(1, config<number>('explain.checkpointMinutes', 5)) * 60_000,
 		chapterMs: () => Math.max(1, config<number>('explain.chapterMinutes', 10)) * 60_000,
 		preferNotes: () => config<boolean>('explain.preferNotesForSmallChanges', true),
+		explanationsEnabled: () => config<string>('explain.mode', 'auto') !== 'off',
 		profile: () => profile,
 		emit,
 		log,
@@ -222,6 +223,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	register(ExtensionCommand.SetupCancel, () => setup.cancel());
 	register(ExtensionCommand.Reconnect, () => active.reconnect());
 	register(ExtensionCommand.NewSession, () => active.newSession());
+	register(ExtensionCommand.Brief, (request: BriefingRequest) => active.brief(request));
 	register(ExtensionCommand.ResumeSession, (sessionId: string) => active.resumeSession(sessionId));
 	register(ExtensionCommand.Elaborate, (request: ElaborateRequest) => active.elaborate(request));
 	register(ExtensionCommand.SetupRestart, () => {

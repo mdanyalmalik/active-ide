@@ -134,6 +134,9 @@ async function runExplanation(session, turnId, prompt) {
 		} else {
 			reply = template?.text ?? `About ${scene ? `"${scene}"` : 'this change'}: ${scenario.defaultAnswer ?? 'the captured code shows how the change works.'}`;
 		}
+	} else if (prompt.startsWith('RETURN BRIEFING')) {
+		const tasks = [...prompt.matchAll(/^\d+\. TASK: (.+)$/gm)].map(match => match[1]);
+		reply = JSON.stringify({ headline: `${tasks.length} tasks finished while you were away`, done: tasks.map(task => `Done: ${task}`), attention: [], problems: [], next: 'Start with the latest walkthrough.' });
 	} else if (prompt.startsWith('CHAPTER CHECK')) {
 		// ACTIVE_SCRIPTED_CHAPTERS makes the explainer explain finished work mid-turn.
 		reply = JSON.stringify({ decision: process.env.ACTIVE_SCRIPTED_CHAPTERS ? 'chapter' : 'wait', reason: 'scripted' });

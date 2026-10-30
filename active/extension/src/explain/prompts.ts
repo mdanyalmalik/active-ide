@@ -179,7 +179,7 @@ function lengthGuidance(context: PlanningContext): string {
 	return `LENGTH (your decision)
 Decide how much this change deserves for this developer, from their profile, the size and kind of change, and how they asked:
 - "skip": nothing here is worth their attention (mechanical, or entirely in areas they skim or know well). Give a one-line "reason".
-- "note": one or two sentences in chat are enough (a small, self-explanatory change). Put them in "note".
+- "note": one or two sentences in chat are enough (a small, self-explanatory change). Put them in "note". The note appears right under the coding agent's own final message, so it must add something that message doesn't say for this developer (why it matters, a caveat, what to check). If it would only restate the agent's summary, choose "skip" with the reason "the agent's summary covers it".
 - "walkthrough": as many scenes as the change needs for them, no more: one scene is fine for a focused change; a large or subtle change in an area they follow closely can take many. Never pad to reach a count, and don't give tests or routine follow-ups their own scenes unless they matter to this developer.
 ${context.preferNotes ? 'Lean toward "note" for small changes and short, specific requests: when the request names one specific change (for example "change the default to 8") and the diff does exactly that, plus tests or docs that confirm it, choose "note" unless something in it is surprising or touches what they follow closely. Tests that just confirm the change are worth a clause in the note, not a scene.' : ''}`.trim();
 }
@@ -213,6 +213,51 @@ export function buildCheckpointPrompt(context: CheckpointContext): string {
 		`EARLIER CHAPTERS\n${context.earlierChapters.join('\n') || '(none)'}`,
 		`SINCE THE LAST CHAPTER (${context.minutesSinceLastChapter} min)\nAgent progress:\n${context.progress.map(message => `- ${message.replace(/\s+/g, ' ').slice(0, 300)}`).join('\n') || '(none)'}\nFiles changed:\n${context.files.map(file => `- ${file.path} (+${file.added} -${file.removed})`).join('\n') || '(none)'}\nCommands and tests:\n${context.tools.filter(tool => tool.command).map(tool => `- \`${tool.command}\` → ${tool.status}`).join('\n') || '(none)'}`,
 	].join('\n\n');
+}
+
+export interface BriefingTurn {
+	readonly task: string;
+	readonly outcome: string;
+	/** "Walkthrough: …", "Chapter 2: …", "Explained in a short note.", "Not explained: …". */
+	readonly explanation: string;
+	readonly summary?: string;
+	readonly finalMessage?: string;
+	readonly notes: readonly string[];
+	readonly failedCommands: readonly string[];
+	readonly pendingChecks: readonly string[];
+	readonly files: ReadonlyArray<{ readonly path: string; readonly added: number; readonly removed: number }>;
+}
+
+export interface BriefingContext {
+	readonly profile: KnowledgeProfile;
+	readonly minutesAway: number;
+	readonly turns: readonly BriefingTurn[];
+	/** The task still running, with its latest progress. */
+	readonly running?: { readonly task: string; readonly progress: readonly string[] };
+	/** Approvals or questions waiting on the developer. */
+	readonly waiting: readonly string[];
+}
+
+/** The return briefing: what happened while the developer was away, in a minute's reading. */
+export function buildBriefingPrompt(context: BriefingContext): string {
+	const turns = context.turns.map((turn, index) => [
+		`${index + 1}. TASK: ${turn.task}`,
+		`   outcome: ${turn.outcome}; explanation: ${turn.explanation}`,
+		turn.summary ? `   walkthrough summary: ${turn.summary}` : '',
+		turn.notes.length ? `   notes: ${turn.notes.join(' | ')}` : '',
+		turn.finalMessage ? `   agent's final message: ${turn.finalMessage.replace(/\s+/g, ' ').slice(0, 600)}` : '',
+		turn.failedCommands.length ? `   failed commands: ${turn.failedCommands.join(', ')}` : '',
+		turn.pendingChecks.length ? `   checks still pending: ${turn.pendingChecks.join(', ')}` : '',
+		turn.files.length ? `   files: ${turn.files.map(file => `${file.path} (+${file.added} -${file.removed})`).join(', ')}` : '',
+	].filter(Boolean).join('\n')).join('\n');
+	return [
+		`RETURN BRIEFING. The developer was away for ${context.minutesAway} minutes while a coding agent worked. Write the short briefing they read when they come back: what got done that matters, what needs them, what's unresolved, and where to pick up. They can open the detailed walkthroughs separately, so don't retell them; one line per point, in plain words, at the level of their profile. Mention only what the material below supports. Leave a list empty rather than padding it.`,
+		`Reply with only JSON: {"headline": string, "done": [string], "attention": [string], "problems": [string], "next": string}`,
+		`DEVELOPER PROFILE\n${describeProfile(context.profile)}`,
+		`WHAT HAPPENED (oldest first)\n${turns || '(no finished tasks)'}`,
+		context.running ? `STILL RUNNING\nTASK: ${context.running.task}\nlatest progress: ${context.running.progress.join(' | ') || '(none)'}` : '',
+		context.waiting.length ? `WAITING ON THE DEVELOPER\n${context.waiting.map(item => `- ${item}`).join('\n')}` : '',
+	].filter(Boolean).join('\n\n');
 }
 
 export function buildRepairPrompt(errors: readonly string[]): string {
