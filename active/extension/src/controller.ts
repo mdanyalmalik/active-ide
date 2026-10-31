@@ -9,6 +9,7 @@ import { CONDENSE_TARGET_CHARS, condensedOf, ExplainerMemory, MemoryInput } from
 import { ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner } from './explain/planner';
 import { buildBriefingPrompt, buildElaborationPrompt, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
+import type { DiagramSnapshot } from './diagram/diagramAgent';
 import { HistoryStore } from './history/historyStore';
 import { extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
 import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
@@ -49,6 +50,8 @@ export interface ControllerOptions {
 	/** The coding session last open in this folder, resumed on startup; and a way to record the current one. */
 	readonly lastSessionId?: () => string | undefined;
 	readonly rememberSession?: (sessionId: string) => void;
+	/** The diagram agent hears about every checkpoint and the end of every turn (on its own timeline). */
+	readonly onDiagramCheckpoint?: (snapshot: DiagramSnapshot) => void;
 }
 
 interface LogicalTurn {
@@ -178,6 +181,8 @@ export class ActiveController implements AgentSessionListener {
 	private models: readonly AgentModelInfo[] = [];
 	/** The model each live session was last switched to, so a settings change only switches what changed. */
 	private readonly appliedModels = new WeakMap<AgentSession, string>();
+	/** Other read-only agents on the explanation host (the diagram agent), reset with it. */
+	private readonly sideAgents: ExplanationAgent[] = [];
 
 	constructor(private readonly options: ControllerOptions, private readonly tracker: ChangeTracker, private readonly history: HistoryStore) {
 		this.explainer = new ExplanationAgent(async listener => {
@@ -339,6 +344,37 @@ export class ActiveController implements AgentSessionListener {
 		return lower ?? REASONING_EFFORTS.find(tier => supported.includes(tier));
 	}
 
+	/**
+	 * Another agent with its own read-only session on the explanation host (the diagram agent), using the
+	 * explanation model. Its session is dropped when the hosts restart.
+	 */
+	createSideAgent(): ExplanationAgent {
+		const agent = new ExplanationAgent(async listener => {
+			this.explanationHost ??= await this.options.startExplanationHost();
+			const session = await this.explanationHost.startSession({ workspaceRoot: this.options.workspaceRoot, readOnly: true, listener });
+			await this.applyModel(session, 'explanation');
+			return session;
+		}, undefined, () => this.effortFor('explanation'));
+		this.sideAgents.push(agent);
+		return agent;
+	}
+
+	/** A note in chat from the diagram agent: the map changed (one click opens it; nothing switches by itself). */
+	diagramNote(text: string, mapVersion: number, turnId?: string): void {
+		this.upsertChat({ id: entryId('diagram'), turnId, role: 'diagram', text, at: Date.now(), mapVersion });
+	}
+
+	private tellDiagram(turn: LogicalTurn, changes: readonly NetFileChange[], final: boolean): void {
+		this.options.onDiagramCheckpoint?.({
+			turnId: turn.id,
+			turnIndex: turn.index,
+			task: turn.task,
+			changes: changes.filter(change => !change.userOnly).map(change => ({ path: change.path, added: change.added, removed: change.removed, baseline: change.baseline, final: change.final })),
+			progress: [...turn.agentMessages.values()],
+			final,
+		});
+	}
+
 	/** Restarts the agent hosts, e.g. after installing or signing in. */
 	async reconnect(): Promise<void> {
 		const hosts = [this.codingHost, this.explanationHost];
@@ -346,6 +382,9 @@ export class ActiveController implements AgentSessionListener {
 		this.codingHost = undefined;
 		this.explanationHost = undefined;
 		this.explainer.reset();
+		for (const agent of this.sideAgents) {
+			agent.reset();
+		}
 		for (const host of hosts) {
 			await host?.dispose().catch(() => undefined);
 		}
@@ -662,6 +701,9 @@ export class ActiveController implements AgentSessionListener {
 	 * `chapterMs` has passed since the last chapter (or the start of the turn).
 	 */
 	private checkpoint(turn: LogicalTurn): void {
+		if (!turn.codingDone && this.turn === turn) {
+			this.tellDiagram(turn, this.tracker.currentNetChanges(), false);
+		}
 		if (turn.codingDone || this.turn !== turn || this.options.explanationsEnabled?.() === false) {
 			return;
 		}
@@ -1155,6 +1197,7 @@ export class ActiveController implements AgentSessionListener {
 			this.options.emit({ type: 'turnChanges', turnId: turn.id, files: agentFiles });
 		}
 		this.setStatus('idle');
+		this.tellDiagram(turn, changes, true);
 
 		const next = this.queuedTasks.shift();
 		const files = this.capture(changes);

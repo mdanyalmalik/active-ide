@@ -42,7 +42,9 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { ExplorerExtensions, IExplorerFileContributionRegistry } from '../../files/browser/explorerFileContrib.js';
 import { ActiveEvent, ExplainMode, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
-import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
+import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput } from './activeInputs.js';
+import { SystemMapEditor } from './systemMapEditor.js';
+import { SystemMapFolderPrompt } from './systemMapPrompt.js';
 import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { ActiveChatEditor } from './chatEditor.js';
 import { ACTIVE_CHANGE_COUNTS_VIEW_ID, ChangeCountsBar, explorerChangeCountsDescriptor } from './explorerStats.js';
@@ -66,6 +68,7 @@ const editorPanes = Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(ActiveChatEditor, ActiveChatEditor.ID, localize('activeChatEditor', "Active Chat")), [new SyncDescriptor(ActiveChatInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(WalkthroughEditor, WalkthroughEditor.ID, localize('walkthroughEditor', "Active Walkthrough")), [new SyncDescriptor(WalkthroughInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(KnowledgeProfileEditor, KnowledgeProfileEditor.ID, localize('profileEditor', "Knowledge Profile")), [new SyncDescriptor(KnowledgeProfileInput)]);
+editorPanes.registerEditorPane(EditorPaneDescriptor.create(SystemMapEditor, SystemMapEditor.ID, localize('systemMapEditor', "System Map")), [new SyncDescriptor(SystemMapInput)]);
 
 // ---------------------------------------------------------------- views
 
@@ -289,6 +292,15 @@ registerAction2(class extends Action2 {
 	}
 	run(accessor: ServicesAccessor): Promise<void> {
 		return accessor.get(IActiveService).openProfile();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.OpenSystemMap, title: localize2('openSystemMap', "Open System Map"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).openSystemMap();
 	}
 });
 
@@ -570,6 +582,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 	private readonly mainIcon: HTMLElement;
 	private readonly chat: HTMLButtonElement;
 	private readonly walkthrough: HTMLButtonElement;
+	private readonly map: HTMLButtonElement;
 
 	constructor(
 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
@@ -583,7 +596,8 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this._register(toDisposable(() => this.stack.remove()));
 		this.menu = dom.append(this.stack, dom.$('.active-fab-menu'));
 		this.menu.setAttribute('role', 'menu');
-		// Top to bottom: the walkthrough sits above chat, nearest the circle.
+		// Top to bottom: the system map, then the walkthrough, then chat nearest the circle.
+		this.map = this.item(Codicon.typeHierarchy, localize('fabSystemMap', "System Map"), () => this.activeService.openSystemMap());
 		this.walkthrough = this.item(Codicon.playCircle, localize('fabWalkthrough', "Walkthrough"), () => this.activeService.openRecentWalkthrough());
 		this.chat = this.item(Codicon.commentDiscussion, localize('fabChat', "Chat"), () => this.activeService.openChat(this.editorService.activeEditor instanceof WalkthroughInput));
 		this.main = dom.append(this.stack, dom.$('button.active-fab-main')) as HTMLButtonElement;
@@ -607,6 +621,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		const update = () => this.update();
 		this._register(editorService.onDidActiveEditorChange(update));
 		this._register(activeService.onDidChangeRecentWalkthrough(update));
+		this._register(activeService.onDidChangeDiagram(update));
 		this._register(activeService.onDidChangePlayer(update));
 		this._register(activeService.onDidChangeHandoff(update));
 		this._register(keybindingService.onDidUpdateKeybindings(update));
@@ -628,7 +643,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 	}
 
 	private choices(): HTMLButtonElement[] {
-		return [this.walkthrough, this.chat].filter(item => !item.classList.contains('hidden'));
+		return [this.map, this.walkthrough, this.chat].filter(item => !item.classList.contains('hidden'));
 	}
 
 	private setOpen(open: boolean): void {
@@ -642,6 +657,8 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		const onWalkthrough = active instanceof WalkthroughInput;
 		this.chat.classList.toggle('hidden', onChat);
 		this.walkthrough.classList.toggle('hidden', onWalkthrough || !!this.activeService.pendingHandoff || !this.activeService.hasRecentWalkthrough);
+		this.map.classList.toggle('hidden', active instanceof SystemMapInput || (!this.activeService.diagramsEnabled && !this.activeService.diagram.current));
+		this.map.title = localize('fabSystemMapTitle', "Open the system map");
 		const choices = this.choices();
 		// The cascade runs from the item nearest the circle upwards.
 		choices.forEach((item, index) => item.style.setProperty('--active-fab-index', String(choices.length - 1 - index)));
@@ -657,11 +674,11 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 			? localize('fabWalkthroughResume', "Return to the walkthrough: {0}", player.walkthrough.title)
 			: localize('fabWalkthroughLatest', "Open the latest walkthrough");
 		// The circle shows the one thing it leads to, or "more" when there's a choice.
-		const icon = choices.length === 1 ? (choices[0] === this.chat ? Codicon.commentDiscussion : Codicon.playCircle) : Codicon.ellipsis;
+		const icon = choices.length === 1 ? (choices[0] === this.chat ? Codicon.commentDiscussion : choices[0] === this.map ? Codicon.typeHierarchy : Codicon.playCircle) : Codicon.ellipsis;
 		this.mainIcon.className = 'icon';
 		this.mainIcon.classList.add(...ThemeIcon.asClassNameArray(icon));
-		this.main.title = choices.length === 1 ? choices[0].title : localize('fabMore', "Chat and walkthrough");
-		this.main.setAttribute('aria-label', choices.length === 1 ? choices[0].textContent ?? '' : localize('fabMoreLabel', "Open chat or the walkthrough"));
+		this.main.title = choices.length === 1 ? choices[0].title : localize('fabMoreMap', "Chat, walkthrough and system map");
+		this.main.setAttribute('aria-label', choices.length === 1 ? choices[0].textContent ?? '' : localize('fabMoreMapLabel', "Open chat, the walkthrough or the system map"));
 		this.setOpen(false);
 	}
 }
@@ -673,3 +690,4 @@ registerWorkbenchContribution2(ActiveStatusBar.ID, ActiveStatusBar, WorkbenchPha
 registerWorkbenchContribution2(AgentQuickDiff.ID, AgentQuickDiff, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentDecorations.ID, AgentDecorations, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(ExplorerGuide.ID, ExplorerGuide, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(SystemMapFolderPrompt.ID, SystemMapFolderPrompt, WorkbenchPhase.AfterRestored);

@@ -144,12 +144,13 @@ demo/                           sample project + scripted scenarios for the test
 ## Tests
 
 ```sh
-cd active/extension && npm test       # 76 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, flows)
+cd active/extension && npm test       # 86 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, the diagram agent, flows)
 scripts/sync.sh && (cd vscode && npm run build-fast -- --client-only && \
   VSCODE_SKIP_PRELAUNCH=1 ./scripts/test.sh --run src/vs/workbench/contrib/active/test/browser/walkthroughPlayer.test.ts \
   --run src/vs/workbench/contrib/active/test/browser/decorationsFilter.test.ts \
-  --run src/vs/workbench/contrib/active/test/browser/explorerGuide.test.ts)
-                                      # 30 tests (walkthrough player, with and without audio, and read-aloud clips with fake audio; the decorations filter; Explorer folder animations)
+  --run src/vs/workbench/contrib/active/test/browser/explorerGuide.test.ts \
+  --run src/vs/workbench/contrib/active/test/browser/systemMapLayout.test.ts)
+                                      # 34 tests (walkthrough player, with and without audio, and read-aloud clips with fake audio; the decorations filter; Explorer folder animations; system map layout)
 ```
 
 These include unit tests for diffing, worthiness (including no accumulation across turns), walkthrough validation, change capture (shell edits, user attribution, pre-existing changes, freezing), history save/replay/delete, and personalization of prompts. An end-to-end test drives the controller through the real `@muse-code/sdk` against the scripted host. It covers the simple, tiny, and multi-file turns, the background timeout, pending checks, immutable captures, and read-only Q&A.

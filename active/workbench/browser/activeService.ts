@@ -27,8 +27,8 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, ActiveSetting, Briefing, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
-import { ActiveChatInput, KnowledgeProfileInput, WalkthroughInput } from './activeInputs.js';
+import { ActiveEvent, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput } from './activeInputs.js';
 import { ClipOutcome, ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
 import { PlaybackPosition, WalkthroughPlayer } from './walkthroughPlayer.js';
@@ -212,6 +212,19 @@ export interface IActiveService {
 	/** Forgets one memory note, or all of them without an id. */
 	forgetMemory(id?: string): Promise<void>;
 	readonly onDidChangeMemory: Event<readonly MemoryNote[]>;
+	/** What Active does: walkthroughs, the system map, or both (asked on first launch). */
+	readonly features: ActiveFeatures;
+	setFeatures(features: ActiveFeatures): Promise<void>;
+	readonly diagramsEnabled: boolean;
+	/** The system map and what the diagram agent is doing. */
+	readonly diagram: DiagramState;
+	readonly onDidChangeDiagram: Event<void>;
+	openSystemMap(): Promise<void>;
+	buildDiagram(): Promise<void>;
+	updateDiagram(): Promise<void>;
+	diagramRevision(version: number): Promise<SystemMapRevision | undefined>;
+	/** This folder's choice for the map (asked the first time a folder without one is opened). */
+	setDiagramFolderMode(mode: DiagramFolderMode): Promise<void>;
 	stopSpeaking(): void;
 	readonly speaking: boolean;
 	readonly onDidChangeSpeaking: Event<void>;
@@ -261,6 +274,10 @@ export class ActiveService extends Disposable implements IActiveService {
 	readonly onDidChangeChecks = this._onDidChangeChecks.event;
 	private readonly _onDidChangeMemory = this._register(new Emitter<readonly MemoryNote[]>());
 	readonly onDidChangeMemory = this._onDidChangeMemory.event;
+	private readonly _onDidChangeDiagram = this._register(new Emitter<void>());
+	readonly onDidChangeDiagram = this._onDidChangeDiagram.event;
+	private _diagram: DiagramState = { status: 'empty', history: [], touched: [] };
+	get diagram(): DiagramState { return this._diagram; }
 	private readonly _onDidChangeElaboration = this._register(new Emitter<Elaboration>());
 	readonly onDidChangeElaboration = this._onDidChangeElaboration.event;
 	private readonly _onDidChangeRecentWalkthrough = this._register(new Emitter<void>());
@@ -326,6 +343,9 @@ export class ActiveService extends Disposable implements IActiveService {
 			}
 			if (event.affectsConfiguration(ActiveSetting.ExplainMode)) {
 				this.onModeChanged();
+			}
+			if (event.affectsConfiguration(ActiveSetting.Features)) {
+				this._onDidChangeDiagram.fire();
 			}
 			if (event.affectsConfiguration(ActiveSetting.NarrationVoice)) {
 				this.narrationCache.clear();
@@ -459,6 +479,10 @@ export class ActiveService extends Disposable implements IActiveService {
 		this._stateLoaded = true;
 		this._history = [...state.history];
 		this._narration = state.narration;
+		if (state.diagram) {
+			this._diagram = state.diagram;
+			this._onDidChangeDiagram.fire();
+		}
 		this.setTurnChanges(state.turnChanges);
 		this.watchGitChanges();
 		this._onDidChangeAgent.fire();
@@ -494,6 +518,10 @@ export class ActiveService extends Disposable implements IActiveService {
 			}
 			case 'memory':
 				this._onDidChangeMemory.fire(event.notes);
+				break;
+			case 'diagram':
+				this._diagram = event.state;
+				this._onDidChangeDiagram.fire();
 				break;
 			case 'chatReset':
 				this._chat.splice(0, this._chat.length, ...event.chat);
@@ -640,6 +668,39 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	async setMode(mode: ExplainMode): Promise<void> {
 		await this.configurationService.updateValue(ActiveSetting.ExplainMode, mode, ConfigurationTarget.USER);
+	}
+
+	get features(): ActiveFeatures {
+		const value = this.configurationService.getValue<string>(ActiveSetting.Features);
+		return value === 'explanations' || value === 'diagrams' ? value : 'both';
+	}
+
+	async setFeatures(features: ActiveFeatures): Promise<void> {
+		await this.configurationService.updateValue(ActiveSetting.Features, features, ConfigurationTarget.USER);
+	}
+
+	get diagramsEnabled(): boolean {
+		return this.features !== 'explanations';
+	}
+
+	async openSystemMap(): Promise<void> {
+		await this.editorService.openEditor(new SystemMapInput(), { pinned: true, revealIfOpened: true });
+	}
+
+	async buildDiagram(): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.DiagramBuild);
+	}
+
+	async updateDiagram(): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.DiagramUpdate);
+	}
+
+	diagramRevision(version: number): Promise<SystemMapRevision | undefined> {
+		return this.commandService.executeCommand<SystemMapRevision>(ExtensionCommand.DiagramRevision, version);
+	}
+
+	async setDiagramFolderMode(mode: DiagramFolderMode): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.DiagramSetFolderMode, mode);
 	}
 
 	/** Entering Away starts the period a briefing covers; leaving it shows the briefing if anything happened. */

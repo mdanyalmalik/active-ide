@@ -131,3 +131,50 @@ export class KnowledgeProfileInput extends EditorInput {
 		return other instanceof KnowledgeProfileInput;
 	}
 }
+
+/** The system map: the diagram agent's view of the project's components and how they connect. */
+export class SystemMapInput extends EditorInput {
+	static readonly ID = 'workbench.input.activeSystemMap';
+	static readonly RESOURCE = URI.from({ scheme: 'active', path: '/system-map' });
+
+	private readonly _onDidChangeSelection = this._register(new Emitter<void>());
+	/** The files of the component clicked on the map changed (Explorer outlines them). */
+	readonly onDidChangeSelection = this._onDidChangeSelection.event;
+	private _selectedFiles: readonly string[] = [];
+
+	override get typeId(): string {
+		return SystemMapInput.ID;
+	}
+
+	override get resource(): URI {
+		return SystemMapInput.RESOURCE;
+	}
+
+	override get capabilities(): EditorInputCapabilities {
+		return EditorInputCapabilities.Readonly | EditorInputCapabilities.Singleton;
+	}
+
+	/** Workspace-relative paths of the files the selected component or connection cites. */
+	get selectedFiles(): readonly string[] {
+		return this._selectedFiles;
+	}
+
+	select(files: readonly string[]): void {
+		if (files.length !== this._selectedFiles.length || files.some((file, index) => file !== this._selectedFiles[index])) {
+			this._selectedFiles = files;
+			this._onDidChangeSelection.fire();
+		}
+	}
+
+	override getName(): string {
+		return localize('systemMap', "System Map");
+	}
+
+	override getIcon(): ThemeIcon {
+		return Codicon.typeHierarchy;
+	}
+
+	override matches(other: EditorInput | IUntypedEditorInput): boolean {
+		return other instanceof SystemMapInput;
+	}
+}

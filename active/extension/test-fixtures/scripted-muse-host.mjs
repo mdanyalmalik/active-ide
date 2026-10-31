@@ -18,7 +18,7 @@
 
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 
@@ -133,6 +133,30 @@ async function runExplanation(session, turnId, prompt) {
 			].join('\n\n');
 		} else {
 			reply = template?.text ?? `About ${scene ? `"${scene}"` : 'this change'}: ${scenario.defaultAnswer ?? 'the captured code shows how the change works.'}`;
+		}
+	} else if (prompt.includes('SYSTEM MAP SURVEY') || prompt.includes('SYSTEM MAP UPDATE') || prompt.startsWith('SYSTEM MAP REPAIR')) {
+		// The diagram agent: a map read from the project's files and imports (this is a test double).
+		await sleep(1500);
+		const map = deriveSystemMap(session.workspaceRoot);
+		if (prompt.includes('SYSTEM MAP UPDATE')) {
+			const current = /The current map:\n([\s\S]*?)\n\n(?:Decide|What makes)/.exec(prompt)?.[1];
+			let before = [];
+			try {
+				before = JSON.parse(current ?? '{}').components ?? [];
+			} catch {
+				before = [];
+			}
+			const known = before.map(component => component.id);
+			const filesOf = component => (component?.files ?? []).map(file => file.path).sort().join();
+			const added = map.components.filter(component => !known.includes(component.id)).map(component => component.id);
+			const removed = known.filter(id => !map.components.some(component => component.id === id));
+			const moved = map.components.filter(component => known.includes(component.id) && filesOf(component) !== filesOf(before.find(old => old.id === component.id))).map(component => component.id);
+			const parts = [added.length && `Added ${added.join(', ')}`, removed.length && `removed ${removed.join(', ')}`, moved.length && `${moved.join(', ')} now covers different files`].filter(Boolean);
+			reply = JSON.stringify(parts.length
+				? { update: true, reason: `${parts.join('; ')}.`, changed: [...added, ...moved], map }
+				: { update: false, reason: 'scripted: no new or removed parts' });
+		} else {
+			reply = JSON.stringify(map);
 		}
 	} else if (prompt.startsWith('MEMORY CONDENSING')) {
 		// A deterministic stand-in: one note per scope saying how many notes it merged.
@@ -356,3 +380,64 @@ input.on('line', line => {
 	}
 });
 input.on('close', () => process.exit(0));
+
+
+/** A plausible system map for a small JavaScript project: one component per source file, tests together, edges from imports. */
+function deriveSystemMap(root) {
+	const files = [];
+	const walk = dir => {
+		for (const name of readdirSync(path.join(root, dir))) {
+			if (['node_modules', '.git', '.vscode'].includes(name) || name.startsWith('a-folder-')) {
+				continue;
+			}
+			const relative = dir ? `${dir}/${name}` : name;
+			if (statSync(path.join(root, relative)).isDirectory()) {
+				walk(relative);
+			} else if (/\.(m?js|ts)$/.test(name)) {
+				files.push(relative);
+			}
+		}
+	};
+	walk('');
+	const idOf = file => /(^|\/)test\//.test(file) || /\.test\./.test(file) ? 'tests' : file.replace(/\.(m?js|ts)$/, '').split('/').pop().replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+	const components = new Map();
+	const connections = new Map();
+	for (const file of files) {
+		const text = readFileSync(path.join(root, file), 'utf8');
+		const lines = text.split('\n');
+		const id = idOf(file);
+		const exports = [...text.matchAll(/export\s+(?:async\s+)?(?:function|class|const)\s+(\w+)/g)].map(match => match[1]);
+		const name = id === 'tests' ? 'Tests' : id.replace(/(^|-)(\w)/g, (_, dash, letter) => `${dash ? ' ' : ''}${letter.toUpperCase()}`);
+		const component = components.get(id) ?? { id, name, summary: '', description: '', files: [] };
+		component.files.push({ path: file, startLine: 1, endLine: lines.length, why: exports.length ? `defines ${exports.slice(0, 3).join(', ')}` : 'the code' });
+		component.summary = id === 'tests' ? 'Checks the behaviour of the other parts' : exports.length ? `Provides ${exports.slice(0, 2).join(' and ')}` : `The code in ${file}`;
+		component.description = id === 'tests'
+			? `The test suite (${component.files.length} file${component.files.length === 1 ? '' : 's'}). Each test sets up a small scenario and checks what the code under test does.`
+			: `${name} lives in ${file}.${exports.length ? ` It exports ${exports.join(', ')}, which the rest of the project uses.` : ''} Read it top to bottom: it is short and self-contained.`;
+		components.set(id, component);
+		lines.forEach((line, index) => {
+			const target = /from\s+['"](\.{1,2}\/[^'"]+)['"]/.exec(line)?.[1];
+			if (!target) {
+				return;
+			}
+			const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(file), target)).replace(/^\.\//, '');
+			const to = idOf(resolved);
+			if (to === id || !files.some(candidate => candidate === resolved || candidate.replace(/\.(m?js|ts)$/, '') === resolved.replace(/\.(m?js|ts)$/, ''))) {
+				return;
+			}
+			const names = /import\s+\{([^}]+)\}/.exec(line)?.[1].split(',').map(part => part.trim()).filter(Boolean) ?? [];
+			const key = `${id}>${to}`;
+			const existing = connections.get(key);
+			if (existing) {
+				existing.evidence.push({ path: file, startLine: index + 1, endLine: index + 1 });
+			} else {
+				connections.set(key, { from: id, to, label: id === 'tests' ? 'tests' : names.length ? `uses ${names.slice(0, 2).join(', ')}` : 'imports', detail: `${file} imports ${resolved} on line ${index + 1}.`, evidence: [{ path: file, startLine: index + 1, endLine: index + 1 }] });
+			}
+		});
+	}
+	return {
+		overview: `A small JavaScript project of ${files.length} files: ${[...components.values()].filter(component => component.id !== 'tests').map(component => component.name).join(', ')}${components.has('tests') ? ', with tests' : ''}.`,
+		components: [...components.values()],
+		connections: [...connections.values()],
+	};
+}

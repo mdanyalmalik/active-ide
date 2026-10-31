@@ -16,6 +16,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IWorkspaceTrustManagementService } from '../../../../platform/workspace/common/workspaceTrust.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
+import type { ActiveFeatures } from '../common/activeProtocol.js';
 import { IActiveService, VOICE_OFF } from './activeService.js';
 import { renderSetupPanel, SetupPanelViewState } from './setupPanel.js';
 
@@ -23,6 +24,8 @@ const $ = dom.$;
 const HIDE_KEY = 'active.welcome.hidden';
 /** The developer answered "Narrate walkthroughs?" (here or by choosing a voice elsewhere). */
 const VOICE_CHOSEN_KEY = 'active.welcome.voiceChosen';
+/** The developer answered "What should Active do?". */
+const FEATURES_CHOSEN_KEY = 'active.welcome.featuresChosen';
 /** How long setup must look incomplete before the dialog opens. */
 const OPEN_DELAY_MS = 2500;
 
@@ -69,9 +72,19 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 		void activeService.initialize().then(evaluate);
 	}
 
-	/** Asked once: an explicit voice (or Off) chosen anywhere counts as an answer. */
+	/** Asked once: an explicit voice (or Off) chosen anywhere counts as an answer. Not asked without explanations. */
 	private get voiceChosen(): boolean {
-		return this.storageService.getBoolean(VOICE_CHOSEN_KEY, StorageScope.PROFILE, false) || this.activeService.narrationVoice !== 'default';
+		return this.activeService.features === 'diagrams' || this.storageService.getBoolean(VOICE_CHOSEN_KEY, StorageScope.PROFILE, false) || this.activeService.narrationVoice !== 'default';
+	}
+
+	private get featuresChosen(): boolean {
+		return this.storageService.getBoolean(FEATURES_CHOSEN_KEY, StorageScope.PROFILE, false) || this.activeService.features !== 'both';
+	}
+
+	private async chooseFeatures(features: ActiveFeatures): Promise<void> {
+		this.storageService.store(FEATURES_CHOSEN_KEY, true, StorageScope.PROFILE, StorageTarget.USER);
+		await this.activeService.setFeatures(features);
+		this.render();
 	}
 
 	private async chooseVoice(voice: string): Promise<void> {
@@ -95,7 +108,7 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 		if (this.shown || (!this.activeService.needsTrust && (agent.status === 'starting' || !this.activeService.stateLoaded))) {
 			return;
 		}
-		if (!this.activeService.needsTrust && this.agentReady && this.activeService.profile.configured && this.voiceChosen) {
+		if (!this.activeService.needsTrust && this.agentReady && this.activeService.profile.configured && this.voiceChosen && this.featuresChosen) {
 			clearTimeout(this.openTimer);
 			this.openTimer = undefined;
 			return;
@@ -104,7 +117,7 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 		// open if setup still looks incomplete a little later.
 		this.openTimer ??= setTimeout(() => {
 			this.openTimer = undefined;
-			if (!this.shown && (this.activeService.needsTrust || !this.agentReady || !this.activeService.profile.configured || !this.voiceChosen)) {
+			if (!this.shown && (this.activeService.needsTrust || !this.agentReady || !this.activeService.profile.configured || !this.voiceChosen || !this.featuresChosen)) {
 				this.shown = true;
 				this.open();
 			}
@@ -227,8 +240,11 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 			void this.activeService.openProfile();
 		});
 
-		// Step 3: the voice
-		this.renderVoiceStep(box, click);
+		// Step 3: what Active does; step 4: the voice (for explanations)
+		this.renderFeaturesStep(box, click);
+		if (this.activeService.features !== 'diagrams') {
+			this.renderVoiceStep(box, click);
+		}
 
 		// Footer
 		const footer = dom.append(box, $('.welcome-footer'));
@@ -238,10 +254,39 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 		checkbox.checked = this.storageService.getBoolean(HIDE_KEY, StorageScope.PROFILE, false);
 		dom.append(hide, $('span')).textContent = localize('dontShow', "Don't show again");
 		this.contentStore.add(dom.addDisposableListener(checkbox, dom.EventType.CHANGE, () => this.storageService.store(HIDE_KEY, checkbox.checked, StorageScope.PROFILE, StorageTarget.USER)));
-		const allDone = !needsTrust && this.agentReady && profileDone && this.voiceChosen;
+		const allDone = !needsTrust && this.agentReady && profileDone && this.voiceChosen && this.featuresChosen;
 		const done = dom.append(footer, $(allDone ? 'button.primary' : 'button.secondary')) as HTMLButtonElement;
 		done.textContent = allDone ? localize('getStarted', "Get Started") : localize('later', "Later");
 		click(done, () => this.close());
+	}
+
+	/** "What should Active do?": walkthroughs of each change, the system map, or both. */
+	private renderFeaturesStep(box: HTMLElement, click: (element: HTMLElement, run: () => unknown) => void): void {
+		const chosen = this.featuresChosen;
+		const features = this.activeService.features;
+		const step = dom.append(box, $('.welcome-step'));
+		const row = dom.append(step, $('.welcome-step-row'));
+		this.stepIcon(row, chosen, Codicon.layers);
+		const text = dom.append(row, $('.welcome-step-text'));
+		dom.append(text, $('.welcome-step-title')).textContent = localize('featuresStepTitle', "What should Active do?");
+		dom.append(text, $('.welcome-step-detail')).textContent = !chosen
+			? localize('featuresStepDetail', "Explain each change as the coding agent works, keep a map of how the system fits together, or both.")
+			: features === 'explanations'
+				? localize('featuresExplanationsDetail', "Explanations: a walkthrough of each change.")
+				: features === 'diagrams'
+					? localize('featuresDiagramsDetail', "System diagrams: a map of the project's parts, kept up to date.")
+					: localize('featuresBothDetail', "Both: walkthroughs of each change and a system map.");
+		const choice = dom.append(step, $('.welcome-choice.wide'));
+		const option = (label: string, value: ActiveFeatures) => {
+			const selected = chosen && features === value;
+			const button = dom.append(choice, $(selected ? 'button.primary' : 'button.secondary')) as HTMLButtonElement;
+			button.textContent = label;
+			button.setAttribute('aria-pressed', String(selected));
+			click(button, () => this.chooseFeatures(value));
+		};
+		option(localize('featuresExplanations', "Explanations"), 'explanations');
+		option(localize('featuresDiagrams', "System Diagrams"), 'diagrams');
+		option(localize('featuresBoth', "Both"), 'both');
 	}
 
 	/** "Narrate walkthroughs?" Yes or No, and with Yes, which voice (each one can be previewed). */

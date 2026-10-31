@@ -391,7 +391,7 @@ export interface ApprovalRequest {
 export interface ChatEntry {
 	readonly id: string;
 	readonly turnId?: string;
-	readonly role: 'user' | 'agent' | 'tool' | 'approval' | 'system' | 'explainer' | 'question';
+	readonly role: 'user' | 'agent' | 'tool' | 'approval' | 'system' | 'explainer' | 'question' | 'diagram';
 	readonly text: string;
 	readonly status?: string;
 	readonly phase?: string;
@@ -399,6 +399,8 @@ export interface ChatEntry {
 	readonly at: number;
 	/** For a note: the history record holding its inline version (a one-scene walkthrough at the change). */
 	readonly recordId?: string;
+	/** For a system map update: the map version it produced. */
+	readonly mapVersion?: number;
 }
 
 export type WalkthroughStage = 'idle' | 'collecting' | 'drafting' | 'waitingForBackground' | 'finalizing' | 'ready' | 'notExplained' | 'failed';
@@ -441,6 +443,7 @@ export interface InitialState {
 	readonly turnChanges: ReadonlyArray<FileChangeStat>;
 	readonly narration: NarrationStatus;
 	readonly pendingWalkthrough?: Walkthrough;
+	readonly diagram?: DiagramState;
 }
 
 /** Setting ids shared by the workbench (which registers them) and the extension (which applies them). */
@@ -452,7 +455,11 @@ export const enum ActiveSetting {
 	NarrationVoice = 'active.narration.voice',
 	NarrationSpeed = 'active.narration.speed',
 	ExplainMode = 'active.explain.mode',
+	/** What Active does around the coding agent: walkthroughs, the system map, or both. */
+	Features = 'active.features',
 }
+
+export type ActiveFeatures = 'both' | 'explanations' | 'diagrams';
 
 /** `auto`: explanations pop up when ready; `away`: they wait for a return briefing; `off`: none are made. */
 export type ExplainMode = 'auto' | 'away' | 'off';
@@ -530,6 +537,7 @@ export type ActiveEvent =
 	| { readonly type: 'profile'; readonly profile: KnowledgeProfile }
 	| { readonly type: 'models'; readonly models: ReadonlyArray<AgentModelInfo> }
 	| { readonly type: 'memory'; readonly notes: ReadonlyArray<MemoryNote> }
+	| { readonly type: 'diagram'; readonly state: DiagramState }
 	/** The whole transcript changed (a session was resumed or a new one started). */
 	| { readonly type: 'chatReset'; readonly chat: ReadonlyArray<ChatEntry> };
 
@@ -561,6 +569,14 @@ export const enum ExtensionCommand {
 	MemoryGet = 'active.ext.memoryGet',
 	/** Forgets one note (by id), or all of them when called without one. */
 	MemoryDelete = 'active.ext.memoryDelete',
+	/** Builds the system map (the first time, or again from scratch). */
+	DiagramBuild = 'active.ext.diagramBuild',
+	/** Asks the diagram agent to look for changes now. */
+	DiagramUpdate = 'active.ext.diagramUpdate',
+	/** One saved version of the system map: `SystemMapRevision`, or `undefined`. */
+	DiagramRevision = 'active.ext.diagramRevision',
+	/** Records this folder's choice (`DiagramFolderMode`); `auto` and `manual` build the map if there isn't one. */
+	DiagramSetFolderMode = 'active.ext.diagramSetFolderMode',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
@@ -974,4 +990,168 @@ export function extractJsonObject(text: string): unknown {
 		}
 	}
 	return undefined;
+}
+
+// ------------------------------------------------------------------ system map
+
+/** A file (or lines of one) that a component or connection lives in. */
+export interface SystemFileRef {
+	readonly path: string;
+	readonly startLine?: number;
+	readonly endLine?: number;
+	/** What this file contributes, in a few words. */
+	readonly why?: string;
+}
+
+/** One part of the system, as the diagram agent sees it. */
+export interface SystemComponent {
+	readonly id: string;
+	readonly name: string;
+	/** One line, shown in the box. */
+	readonly summary: string;
+	/** A short explanation, shown when the box is clicked. */
+	readonly description: string;
+	readonly files: ReadonlyArray<SystemFileRef>;
+}
+
+/** How two components relate (calls, data, events...). */
+export interface SystemConnection {
+	readonly from: string;
+	readonly to: string;
+	readonly label: string;
+	readonly detail?: string;
+	/** Where in the code the connection is made. */
+	readonly evidence: ReadonlyArray<SystemFileRef>;
+}
+
+export interface SystemMap {
+	/** A sentence or two on what the system is. */
+	readonly overview: string;
+	readonly components: ReadonlyArray<SystemComponent>;
+	readonly connections: ReadonlyArray<SystemConnection>;
+}
+
+/** A saved version of the map and why it changed. */
+export interface SystemMapRevision {
+	readonly version: number;
+	readonly at: number;
+	readonly turnId?: string;
+	readonly turnIndex?: number;
+	/** What changed, in a sentence (the first version says it was built). */
+	readonly reason: string;
+	/** Components added or changed by this version. */
+	readonly changed: readonly string[];
+	readonly map: SystemMap;
+}
+
+export type DiagramStatus = 'off' | 'empty' | 'building' | 'updating' | 'ready' | 'failed';
+
+/** This folder's choice: build the map and keep it updated, build it and update only on request, or no map. */
+export type DiagramFolderMode = 'auto' | 'manual' | 'off';
+
+export interface DiagramState {
+	readonly status: DiagramStatus;
+	readonly detail?: string;
+	readonly current?: SystemMapRevision;
+	/** Every saved version, newest first (without the maps). */
+	readonly history: ReadonlyArray<Omit<SystemMapRevision, 'map'>>;
+	/** Components whose files the latest turn changed (found from the files alone, no model involved). */
+	readonly touched: readonly string[];
+	readonly touchedTurnIndex?: number;
+	/** `undefined` until the developer has been asked in this folder. */
+	readonly folderMode?: DiagramFolderMode;
+}
+
+/**
+ * Checks a system map from the diagram agent: ids are unique and well formed, connections join components
+ * that exist, every component cites at least one file. `fileExists` checks cited paths. Errors explain each
+ * problem so the agent can repair its answer; usable parts are kept.
+ */
+export function parseSystemMap(value: unknown, fileExists: (path: string) => boolean, errors: string[]): SystemMap | undefined {
+	const input = value as { overview?: unknown; components?: unknown; connections?: unknown } | undefined;
+	if (!input || typeof input !== 'object' || !Array.isArray(input.components)) {
+		errors.push('expected {"overview", "components": [...], "connections": [...]}');
+		return undefined;
+	}
+	const refs = (raw: unknown, path: string): SystemFileRef[] => {
+		if (!Array.isArray(raw)) {
+			return [];
+		}
+		return raw.flatMap((entry, index) => {
+			const item = (typeof entry === 'string' ? { path: entry } : entry) as { path?: unknown; startLine?: unknown; endLine?: unknown; why?: unknown };
+			const file = typeof item?.path === 'string' ? item.path.replace(/^\.\//, '').trim() : '';
+			if (!file) {
+				errors.push(`${path}[${index}].path: expected a workspace-relative file path`);
+				return [];
+			}
+			if (!fileExists(file)) {
+				errors.push(`${path}[${index}].path: ${file} doesn't exist`);
+				return [];
+			}
+			const start = typeof item.startLine === 'number' && item.startLine >= 1 ? Math.floor(item.startLine) : undefined;
+			const end = typeof item.endLine === 'number' && start !== undefined && item.endLine >= start ? Math.floor(item.endLine) : start;
+			return [{ path: file, ...(start !== undefined ? { startLine: start, endLine: end } : {}), ...(isString(item.why, 160) && item.why.trim() ? { why: item.why.trim() } : {}) }];
+		});
+	};
+	const components: SystemComponent[] = [];
+	const ids = new Set<string>();
+	input.components.forEach((entry, index) => {
+		const item = entry as { id?: unknown; name?: unknown; summary?: unknown; description?: unknown; files?: unknown };
+		const path = `components[${index}]`;
+		const id = typeof item?.id === 'string' ? item.id.trim() : '';
+		if (!/^[a-z0-9][a-z0-9-_.]{0,60}$/i.test(id)) {
+			errors.push(`${path}.id: expected a short id (letters, digits, - _ .)`);
+			return;
+		}
+		if (ids.has(id)) {
+			errors.push(`${path}.id: ${id} is used twice`);
+			return;
+		}
+		if (!isString(item.name, 80) || !item.name.trim()) {
+			errors.push(`${path}.name: expected a short name`);
+			return;
+		}
+		const files = refs(item.files, `${path}.files`);
+		if (!files.length) {
+			errors.push(`${path}.files: cite at least one existing file`);
+			return;
+		}
+		ids.add(id);
+		components.push({
+			id,
+			name: item.name.trim(),
+			summary: isString(item.summary, 200) ? item.summary.trim() : '',
+			description: isString(item.description, 2000) ? item.description.trim() : '',
+			files,
+		});
+	});
+	const connections: SystemConnection[] = [];
+	(Array.isArray(input.connections) ? input.connections : []).forEach((entry, index) => {
+		const item = entry as { from?: unknown; to?: unknown; label?: unknown; detail?: unknown; evidence?: unknown };
+		const path = `connections[${index}]`;
+		if (typeof item?.from !== 'string' || !ids.has(item.from) || typeof item.to !== 'string' || !ids.has(item.to)) {
+			errors.push(`${path}: from and to must be ids of components in the map`);
+			return;
+		}
+		if (item.from === item.to) {
+			errors.push(`${path}: a connection joins two different components`);
+			return;
+		}
+		if (connections.some(connection => connection.from === item.from && connection.to === item.to)) {
+			errors.push(`${path}: ${item.from} → ${item.to} is listed twice (merge them)`);
+			return;
+		}
+		connections.push({
+			from: item.from,
+			to: item.to,
+			label: isString(item.label, 60) ? item.label.trim() : '',
+			...(isString(item.detail, 600) && item.detail.trim() ? { detail: item.detail.trim() } : {}),
+			evidence: refs(item.evidence, `${path}.evidence`),
+		});
+	});
+	if (!components.length) {
+		errors.push('the map has no usable components');
+		return undefined;
+	}
+	return { overview: isString(input.overview, 600) ? input.overview.trim() : '', components, connections };
 }

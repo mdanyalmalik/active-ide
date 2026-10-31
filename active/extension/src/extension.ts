@@ -10,9 +10,10 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
+import { DiagramAgent } from './diagram/diagramAgent';
 import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, ActiveSetting, AgentRunSettings, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
@@ -154,6 +155,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	};
 
+	// The diagram agent hears about checkpoints from the controller, which is created first.
+	let diagram: DiagramAgent | undefined;
 	const active = new ActiveController({
 		provider: providerInfo,
 		needsSetup: () => setup.evaluate(),
@@ -169,7 +172,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		preferNotes: () => config<boolean>('explain.preferNotesForSmallChanges', true),
 		// The explainer's own memory: personal notes follow the developer across folders, project notes stay with this one.
 		memory: new ExplainerMemory({ personal: path.join(storage, 'explainer-memory.json'), project: path.join(storage, 'explainer-memory', `${workspaceKey}.json`) }),
-		explanationsEnabled: () => config<string>('explain.mode', 'auto') !== 'off',
+		explanationsEnabled: () => config<string>('explain.mode', 'auto') !== 'off' && config<string>('features', 'both') !== 'diagrams',
+		onDiagramCheckpoint: snapshot => void diagram?.checkpoint(snapshot).catch(error => log(`diagram checkpoint failed: ${error}`)),
 		profile: () => profile,
 		emit,
 		log,
@@ -181,6 +185,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	}, tracker, history);
 	controller = active;
 	context.subscriptions.push({ dispose: () => void active.dispose() });
+
+	// The diagram agent: its own read-only session, keeping this folder's system map.
+	const diagramSession = active.createSideAgent();
+	const diagramAgent = diagram = new DiagramAgent({
+		session: { ask: prompt => diagramSession.ask(prompt) },
+		storePath: path.join(storage, 'system-map', `${workspaceKey}.json`),
+		fileExists: async relative => !relative.includes('..') && existsSync(path.join(root, relative)),
+		listFiles: async () => {
+			const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.venv/**,**/__pycache__/**}', 600);
+			const relative = found.map(uri => files.relative(uri.fsPath)).filter((file): file is string => !!file && !isIgnoredPath(file)).sort();
+			return { files: relative.slice(0, 400), truncated: relative.length > 400 };
+		},
+		emit: state => emit({ type: 'diagram', state }),
+		announce: (text, version, turnId) => active.diagramNote(text, version, turnId),
+		log: line => log(line),
+		enabled: () => config<string>('features', 'both') !== 'explanations',
+		checkMs: () => Math.max(0, config<number>('diagram.checkMinutes', 2)) * 60_000,
+	});
+	context.subscriptions.push({ dispose: () => diagramAgent.dispose() });
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
 		if ([ActiveSetting.CodingModel, ActiveSetting.ExplanationModel].some(key => event.affectsConfiguration(key))) {
 			void active.applyRunSettings();
@@ -213,7 +236,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	}));
 
-	register(ExtensionCommand.Init, async () => ({ ...(await active.initialState()), narration: narrator.currentStatus, profile }));
+	register(ExtensionCommand.Init, async () => ({ ...(await active.initialState()), narration: narrator.currentStatus, profile, diagram: await diagramAgent.state() }));
+	register(ExtensionCommand.DiagramBuild, () => diagramAgent.build());
+	register(ExtensionCommand.DiagramUpdate, () => diagramAgent.updateNow());
+	register(ExtensionCommand.DiagramRevision, (version: number) => diagramAgent.revision(version));
+	register(ExtensionCommand.DiagramSetFolderMode, (mode: DiagramFolderMode) => diagramAgent.setFolderMode(mode));
 	register(ExtensionCommand.SubmitTask, (text: string) => active.submitTask(text));
 	register(ExtensionCommand.Ask, (request: AskRequest) => active.ask(request));
 	register(ExtensionCommand.DecideApproval, (request: { approvalId: string; choiceId: string }) => active.decideApproval(request.approvalId, request.choiceId));

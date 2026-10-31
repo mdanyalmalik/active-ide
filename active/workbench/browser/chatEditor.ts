@@ -670,6 +670,16 @@ export class ActiveChatEditor extends EditorPane {
 			case 'system':
 				dom.append(node, $('.text')).textContent = entry.text;
 				break;
+			case 'diagram': {
+				// The map changed: said here, one click away, without leaving chat.
+				eyebrow(entry.mapVersion !== undefined ? localize('diagramUpdateVersion', "Active · system map v{0}", entry.mapVersion) : localize('diagramUpdate', "Active · system map"));
+				dom.append(node, $('.text')).textContent = entry.text;
+				const actions = dom.append(node, $('.note-actions'));
+				const open = dom.append(actions, $('button.link')) as HTMLButtonElement;
+				open.textContent = localize('openSystemMap', "Open System Map");
+				slot.store.add(dom.addDisposableListener(open, dom.EventType.CLICK, () => void this.activeService.openSystemMap()));
+				break;
+			}
 		}
 		if (reveal) {
 			this.intro.classList.toggle('compact', true);

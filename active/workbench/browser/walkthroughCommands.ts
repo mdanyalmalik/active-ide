@@ -26,4 +26,5 @@ export const enum ActiveCommandIds {
 	PickCodingEffort = 'active.pickCodingEffort',
 	OpenRecentWalkthrough = 'active.openRecentWalkthrough',
 	WalkthroughHistory = 'active.walkthroughHistory',
+	OpenSystemMap = 'active.openSystemMap',
 }

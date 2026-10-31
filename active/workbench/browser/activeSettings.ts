@@ -149,6 +149,25 @@ const general: IConfigurationNode = {
 			minimum: 0,
 			description: localize('backgroundTimeout', "How long to wait for background tasks (tests, builds) after a coding turn before explaining. Unfinished checks are marked pending and keep running."),
 		},
+		'active.features': {
+			type: 'string',
+			enum: ['both', 'explanations', 'diagrams'],
+			enumItemLabels: [localize('featuresBothLabel', "Both"), localize('featuresExplanationsLabel', "Explanations"), localize('featuresDiagramsLabel', "System Diagrams")],
+			enumDescriptions: [
+				localize('featuresBoth', "Walkthroughs of each change, and a system map kept up to date."),
+				localize('featuresExplanations', "Only walkthroughs of each change; no system map."),
+				localize('featuresDiagrams', "Only the system map; changes aren't explained."),
+			],
+			default: 'both',
+			markdownDescription: localize('features', "What Active does while the coding agent works. Asked on first launch."),
+			scope: ConfigurationScope.APPLICATION,
+		},
+		'active.diagram.checkMinutes': {
+			type: 'number',
+			default: 2,
+			minimum: 0,
+			description: localize('diagramCheckMinutes', "How often (at most) the diagram agent checks whether the system map needs updating while the coding agent works. It also checks at the end of every turn that changed files."),
+		},
 		'active.explain.mode': {
 			type: 'string',
 			enum: ['auto', 'away', 'off'],

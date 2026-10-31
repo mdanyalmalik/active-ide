@@ -19,7 +19,7 @@ import { ExplorerView } from '../../files/browser/views/explorerView.js';
 import { ExplorerDelegate } from '../../files/browser/views/explorerViewer.js';
 import { VIEW_ID as EXPLORER_VIEW_ID } from '../../files/common/files.js';
 import { ExplorerItem } from '../../files/common/explorerModel.js';
-import { WalkthroughInput } from './activeInputs.js';
+import { SystemMapInput, WalkthroughInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
 
 type ExplorerTree = ExplorerView['activeTree'];
@@ -350,12 +350,24 @@ class FileOutline extends Disposable {
 /** What the guide keeps for the Explorer tree it is attached to. */
 class Attachment extends Disposable {
 	readonly motion: TreeMotion;
-	readonly outline: FileOutline;
+	/** One outline per file being shown (a walkthrough shows one; a system map component can cite several). */
+	private readonly outlines: FileOutline[] = [];
 
-	constructor(readonly tree: ExplorerTree, readonly view: ExplorerView, rows: HTMLElement, reduced: () => boolean) {
+	constructor(readonly tree: ExplorerTree, readonly view: ExplorerView, private readonly rows: HTMLElement, reduced: () => boolean) {
 		super();
 		this.motion = this._register(new TreeMotion(rows, reduced));
-		this.outline = this._register(new FileOutline(rows));
+	}
+
+	outline(index: number): FileOutline {
+		while (this.outlines.length <= index) {
+			this.outlines.push(this._register(new FileOutline(this.rows)));
+		}
+		return this.outlines[index];
+	}
+
+	/** Hides the outlines from `from` on. */
+	hideOutlines(from = 0): void {
+		this.outlines.slice(from).forEach(outline => outline.hide());
 	}
 }
 
@@ -374,7 +386,9 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 	private readonly playerListener = this._register(new MutableDisposable());
 	private wasPlaying = false;
 	private input: WalkthroughInput | undefined;
-	private target: URI | undefined;
+	/** The files Explorer outlines: the walkthrough's file, or the files of the system map's selected component. */
+	private targets: readonly URI[] = [];
+	private mapInput: SystemMapInput | undefined;
 	/** Bumped by every new target and every click in Explorer: older guide work stops at its next step. */
 	private generation = 0;
 	/** Folders the guide opened, to close again when they're no longer needed. */
@@ -385,7 +399,7 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 	private incomplete = false;
 	/** While the guide opens and closes folders on the way, the outline waits where it is, then slides. */
 	private moving = 0;
-	private readonly retry = this._register(new RunOnceScheduler(() => this.incomplete && this.target && void this.guide(this.target), 150));
+	private readonly retry = this._register(new RunOnceScheduler(() => this.incomplete && this.targets.length && void this.guide(this.targets), 150));
 
 	constructor(
 		@IEditorService private readonly editorService: IEditorService,
@@ -424,13 +438,15 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 	private update(): void {
 		const active = this.editorService.activeEditor;
 		const input = active instanceof WalkthroughInput ? active : undefined;
-		if (input !== this.input) {
+		const mapInput = active instanceof SystemMapInput ? active : undefined;
+		if (input !== this.input || mapInput !== this.mapInput) {
 			this.input = input;
-			this.inputListener.value = input?.onDidChangeFile(() => this.update());
+			this.mapInput = mapInput;
+			this.inputListener.value = input?.onDidChangeFile(() => this.update()) ?? mapInput?.onDidChangeSelection(() => this.update());
 		}
 		const folder = this.workspaceService.getWorkspace().folders[0];
-		const target = input?.file && folder ? folder.toResource(input.file) : undefined;
-		void this.guide(target);
+		const files = input?.file ? [input.file] : mapInput?.selectedFiles ?? [];
+		void this.guide(folder ? files.map(file => folder.toResource(file)) : []);
 	}
 
 	private explorer(): Attachment | undefined {
@@ -472,7 +488,7 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 
 	private onDeveloperAction(attachment: Attachment): void {
 		attachment.motion.capture();
-		if (!this.input) {
+		if (!this.input && !this.mapInput) {
 			return;
 		}
 		this.generation++;
@@ -480,31 +496,33 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 		this.retry.cancel();
 		this.stopScroll();
 		const player = this.activeService.player;
-		if (player && player.walkthrough.id === this.input.walkthrough.id && (player.state === 'speaking' || player.state === 'loading')) {
+		if (player && player.walkthrough.id === this.input?.walkthrough.id && (player.state === 'speaking' || player.state === 'loading')) {
 			player.pause();
 		}
 	}
 
-	private async guide(target: URI | undefined): Promise<void> {
+	private async guide(targets: readonly URI[]): Promise<void> {
 		const generation = ++this.generation;
-		this.target = target;
-		this.incomplete = !!target;
+		this.targets = targets;
+		this.incomplete = targets.length > 0;
 		const attachment = this.explorer();
 		if (!attachment) {
 			return;
 		}
 		const visible = attachment.view.isBodyVisible();
-		if (!target || !visible) {
-			attachment.outline.hide();
-			if (!target) {
+		if (!targets.length || !visible) {
+			attachment.hideOutlines();
+			if (!targets.length) {
 				await this.closeUnneeded(attachment, undefined, generation);
 			}
 			return;
 		}
 		const extUri = this.uriIdentityService.extUri;
 		const needed = new ResourceSet();
-		for (let folder = extUri.dirname(target); !extUri.isEqual(folder, extUri.dirname(folder)); folder = extUri.dirname(folder)) {
-			needed.add(folder);
+		for (const target of targets) {
+			for (let folder = extUri.dirname(target); !extUri.isEqual(folder, extUri.dirname(folder)); folder = extUri.dirname(folder)) {
+				needed.add(folder);
+			}
 		}
 		let item: ExplorerItem | undefined;
 		this.moving++;
@@ -517,7 +535,13 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 			if (generation !== this.generation) {
 				return;
 			}
-			item = await this.openTo(attachment.tree, target, generation);
+			for (const target of targets) {
+				const found = await this.openTo(attachment.tree, target, generation);
+				if (generation !== this.generation) {
+					return;
+				}
+				item ??= found;
+			}
 		} finally {
 			this.moving--;
 			if (generation !== this.generation) {
@@ -529,7 +553,7 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 			return;
 		}
 		if (!item) {
-			attachment.outline.hide();
+			attachment.hideOutlines();
 			return;
 		}
 		this.incomplete = false;
@@ -621,17 +645,19 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 		if (!attachment) {
 			return;
 		}
-		const target = this.target;
-		const item = target ? this.explorerService.findClosest(target) : undefined;
-		const top = item && this.uriIdentityService.extUri.isEqual(item.resource, target) && attachment.tree.hasNode(item) ? attachment.tree.getElementTop(item) : undefined;
-		if (top === undefined && this.moving) {
-			return;
-		}
-		if (top === undefined || !attachment.view.isBodyVisible()) {
-			attachment.outline.hide();
-		} else {
-			attachment.outline.show(top, ExplorerDelegate.ITEM_HEIGHT);
-		}
+		this.targets.forEach((target, index) => {
+			const item = this.explorerService.findClosest(target);
+			const top = item && this.uriIdentityService.extUri.isEqual(item.resource, target) && attachment.tree.hasNode(item) ? attachment.tree.getElementTop(item) : undefined;
+			if (top === undefined && this.moving) {
+				return;
+			}
+			if (top === undefined || !attachment.view.isBodyVisible()) {
+				attachment.outline(index).hide();
+			} else {
+				attachment.outline(index).show(top, ExplorerDelegate.ITEM_HEIGHT);
+			}
+		});
+		attachment.hideOutlines(this.targets.length);
 	}
 
 	/** Scrolls the file into the middle of the list if it's out of view, smoothly unless motion is reduced. */
