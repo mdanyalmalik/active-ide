@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { CapturedFile, KnowledgeProfile, PendingCheck, ToolOutcome, Walkthrough, WalkthroughDraft } from '../shared/activeProtocol';
+import type { CapturedFile, KnowledgeProfile, MapSelection, PendingCheck, SystemMap, ToolOutcome, Walkthrough, WalkthroughDraft } from '../shared/activeProtocol';
 import { diffLines, splitLines, unifiedDiff } from '../tracking/lineDiff';
 
 export interface PlanningContext {
@@ -326,6 +326,34 @@ export function buildQuestionPrompt(question: string, walkthrough: Walkthrough |
 		}
 		parts.push(`Captured files: ${Object.values(walkthrough.files).map(file => `${file.path} (+${file.added} -${file.removed})`).join(', ')}\n${Object.values(walkthrough.files).map(file => unifiedDiff(file.path, file.baseline, file.final)).join('\n').slice(0, 20000)}`);
 	}
+	parts.push(`QUESTION\n${question}`);
+	return parts.join('\n\n');
+}
+
+/** A question about boxes and arrows the developer picked on the system map. */
+export function buildMapQuestionPrompt(question: string, map: SystemMap, selection: MapSelection, profile: KnowledgeProfile, memory?: string): string {
+	const parts = [`You are answering a developer's question inside Active, about the system map: a diagram of the project's components and how they connect, kept by a diagram agent. You only read; never modify files. Answer conversationally and concisely in plain text (short code snippets are fine). Read the files the picked parts cite before answering, and ground claims in the code; say so when something is not observed. Name files with their paths so the developer can find them.`, `DEVELOPER PROFILE\n${describeProfile(profile)}`];
+	const remembered = memorySection(memory, false);
+	if (remembered) {
+		parts.push(remembered);
+	}
+	const name = (id: string) => map.components.find(component => component.id === id)?.name ?? id;
+	const refs = (files: ReadonlyArray<{ path: string; startLine?: number; endLine?: number }>) => files.map(ref => `${ref.path}${ref.startLine ? `:${ref.startLine}${ref.endLine && ref.endLine !== ref.startLine ? `-${ref.endLine}` : ''}` : ''}`).join(', ');
+	const picked: string[] = [];
+	for (const id of selection.components) {
+		const component = map.components.find(candidate => candidate.id === id);
+		if (component) {
+			picked.push(`Component "${component.name}" (${component.id}): ${component.summary}\n  ${component.description}\n  Code: ${refs(component.files)}`);
+		}
+	}
+	for (const link of selection.connections) {
+		const connection = map.connections.find(candidate => candidate.from === link.from && candidate.to === link.to);
+		if (connection) {
+			picked.push(`Connection ${name(connection.from)} → ${name(connection.to)}: ${connection.label}${connection.detail ? `. ${connection.detail}` : ''}${connection.evidence.length ? `\n  Where: ${refs(connection.evidence)}` : ''}`);
+		}
+	}
+	parts.push(`WHAT THE DEVELOPER PICKED ON THE MAP\n${picked.join('\n') || '(nothing that is still on the map)'}`);
+	parts.push(`THE WHOLE MAP (for context)\n${map.overview}\nComponents: ${map.components.map(component => `${component.name} (${component.summary})`).join('; ')}\nConnections: ${map.connections.map(connection => `${name(connection.from)} → ${name(connection.to)} (${connection.label})`).join('; ')}`);
 	parts.push(`QUESTION\n${question}`);
 	return parts.join('\n\n');
 }

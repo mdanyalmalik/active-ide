@@ -18,7 +18,7 @@
 
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 
@@ -121,7 +121,12 @@ async function runExplanation(session, turnId, prompt) {
 		const question = prompt.split('QUESTION\n')[1] ?? '';
 		const scene = /THE DEVELOPER PAUSED ON: "([^"]+)"/.exec(prompt)?.[1];
 		const template = scenario.answers?.find(answer => question.toLowerCase().includes(answer.match));
-		if (question.startsWith('MORE DETAIL:')) {
+		const picked = /WHAT THE DEVELOPER PICKED ON THE MAP\n([\s\S]*?)\n\nTHE WHOLE MAP/.exec(prompt)?.[1];
+		if (picked) {
+			// A question from the system map: say what was picked, so tests can see it arrived (this is a test double).
+			const parts = [...picked.matchAll(/^(?:Component "([^"]+)"|Connection ([^:]+):)/gm)].map(match => match[1] ?? match[2]);
+			reply = `On the map you picked ${parts.join(', ')}. ${picked.match(/Code: ([^\n]+)/)?.[1] ? `The code is in ${picked.match(/Code: ([^\n]+)/)[1]}.` : ''}`.trim();
+		} else if (question.startsWith('MORE DETAIL:')) {
 			// A deeper pass over the scene, assembled from what the prompt shows (this is a test double).
 			const narration = /\nNarration: ([^\n]+)/.exec(prompt)?.[1] ?? '';
 			const code = (/\nFocused code:\n([\s\S]*?)\n\nCaptured files:/.exec(prompt)?.[1] ?? '').split('\n').map(line => line.split('│')[1]?.trim()).filter(Boolean);
@@ -157,6 +162,44 @@ async function runExplanation(session, turnId, prompt) {
 				: { update: false, reason: 'scripted: no new or removed parts' });
 		} else {
 			reply = JSON.stringify(map);
+		}
+	} else if (prompt.includes('SYSTEM MAP EDIT')) {
+		// A change the developer described (this is a test double): "rename X to Y" renames a component; "merge X and Y"
+		// folds Y into X; anything else is declined with a reason.
+		await sleep(1500);
+		const request = /In their words:\n([\s\S]*?)\n\nThe current map:/.exec(prompt)?.[1] ?? '';
+		let map;
+		try {
+			map = JSON.parse(/The current map:\n([\s\S]*?)\n\nMake the change/.exec(prompt)?.[1] ?? '{}');
+		} catch {
+			map = undefined;
+		}
+		// Like a model reading the project, drop citations of files that no longer exist.
+		const exists = file => existsSync(path.join(session.workspaceRoot, file.path));
+		if (map) {
+			map.components = map.components.map(component => ({ ...component, files: component.files.filter(exists) })).filter(component => component.files.length);
+			map.connections = map.connections.filter(connection => map.components.some(c => c.id === connection.from) && map.components.some(c => c.id === connection.to)).map(connection => ({ ...connection, evidence: (connection.evidence ?? []).filter(exists) }));
+		}
+		const find = name => map?.components.find(component => [component.id, component.name].some(value => value.toLowerCase() === name.trim().toLowerCase()));
+		const rename = /rename\s+(.+?)\s+to\s+(.+)/i.exec(request);
+		const merge = /merge\s+(.+?)\s+(?:and|into|with)\s+(.+)/i.exec(request);
+		if (rename && find(rename[1])) {
+			const target = find(rename[1]);
+			const name = rename[2].replace(/["'.]/g, '').trim();
+			target.name = name;
+			reply = JSON.stringify({ update: true, reason: `Renamed ${rename[1].trim()} to ${name}.`, changed: [target.id], map });
+		} else if (merge && find(merge[1]) && find(merge[2])) {
+			const keep = find(merge[1]);
+			const fold = find(merge[2]);
+			keep.files = [...keep.files, ...fold.files];
+			keep.description = `${keep.description} It also covers what ${fold.name} did.`;
+			map.components = map.components.filter(component => component !== fold);
+			map.connections = map.connections
+				.map(connection => ({ ...connection, from: connection.from === fold.id ? keep.id : connection.from, to: connection.to === fold.id ? keep.id : connection.to }))
+				.filter((connection, index, all) => connection.from !== connection.to && all.findIndex(other => other.from === connection.from && other.to === connection.to) === index);
+			reply = JSON.stringify({ update: true, reason: `Merged ${fold.name} into ${keep.name}.`, changed: [keep.id], map });
+		} else {
+			reply = JSON.stringify({ update: false, reason: "scripted: I can only rename (\"rename X to Y\") or merge (\"merge X and Y\") in this test." });
 		}
 	} else if (prompt.startsWith('MEMORY CONDENSING')) {
 		// A deterministic stand-in: one note per scope saying how many notes it merged.

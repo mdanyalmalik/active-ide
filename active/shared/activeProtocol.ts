@@ -401,6 +401,10 @@ export interface ChatEntry {
 	readonly recordId?: string;
 	/** For a system map update: the map version it produced. */
 	readonly mapVersion?: number;
+	/** A question's subject when it isn't a walkthrough: the parts of the system map it was asked about. */
+	readonly about?: string;
+	/** The developer's message describes a change to the system map. */
+	readonly mapEdit?: boolean;
 }
 
 export type WalkthroughStage = 'idle' | 'collecting' | 'drafting' | 'waitingForBackground' | 'finalizing' | 'ready' | 'notExplained' | 'failed';
@@ -457,6 +461,7 @@ export const enum ActiveSetting {
 	ExplainMode = 'active.explain.mode',
 	/** What Active does around the coding agent: walkthroughs, the system map, or both. */
 	Features = 'active.features',
+	DiagramCheckMinutes = 'active.diagram.checkMinutes',
 }
 
 export type ActiveFeatures = 'both' | 'explanations' | 'diagrams';
@@ -577,6 +582,10 @@ export const enum ExtensionCommand {
 	DiagramRevision = 'active.ext.diagramRevision',
 	/** Records this folder's choice (`DiagramFolderMode`); `auto` and `manual` build the map if there isn't one. */
 	DiagramSetFolderMode = 'active.ext.diagramSetFolderMode',
+	/** The developer described a change to the system map (a string); the diagram agent makes it and replies in chat. */
+	DiagramEdit = 'active.ext.diagramEdit',
+	/** The developer edited text on the map themselves (`SystemMapTextEdit`); saved as a new version, no model involved. */
+	DiagramReviseText = 'active.ext.diagramReviseText',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
@@ -607,6 +616,16 @@ export interface AskRequest {
 	readonly walkthroughId?: string;
 	readonly sceneId?: string;
 	readonly segment?: number;
+	/** Asked from the system map about these boxes and arrows. */
+	readonly map?: MapSelection;
+}
+
+/** Boxes and arrows picked on the system map (at least one). */
+export interface MapSelection {
+	readonly components: readonly string[];
+	readonly connections: ReadonlyArray<{ readonly from: string; readonly to: string }>;
+	/** The map version they were picked from. */
+	readonly version?: number;
 }
 
 export interface SynthesizeResult {
@@ -1042,6 +1061,16 @@ export interface SystemMapRevision {
 	/** Components added or changed by this version. */
 	readonly changed: readonly string[];
 	readonly map: SystemMap;
+	/** The developer's description, when this version is a change they asked for. */
+	readonly request?: string;
+	/** The developer edited the map's text themselves. */
+	readonly manual?: boolean;
+}
+
+/** Names, summaries, descriptions and labels the developer typed on the map. Absent fields stay as they are. */
+export interface SystemMapTextEdit {
+	readonly components?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly summary?: string; readonly description?: string }>;
+	readonly connections?: ReadonlyArray<{ readonly from: string; readonly to: string; readonly label?: string; readonly detail?: string }>;
 }
 
 export type DiagramStatus = 'off' | 'empty' | 'building' | 'updating' | 'ready' | 'failed';

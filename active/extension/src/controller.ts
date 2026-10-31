@@ -7,12 +7,12 @@ import { createHash } from 'node:crypto';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
 import { CONDENSE_TARGET_CHARS, condensedOf, ExplainerMemory, MemoryInput } from './explain/memory';
 import { ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner } from './explain/planner';
-import { buildBriefingPrompt, buildElaborationPrompt, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
+import { buildBriefingPrompt, buildElaborationPrompt, buildMapQuestionPrompt, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import type { DiagramSnapshot } from './diagram/diagramAgent';
 import { HistoryStore } from './history/historyStore';
 import { extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
-import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
+import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, SystemMap, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 import { diffStats } from './tracking/lineDiff';
 
@@ -30,6 +30,8 @@ export interface ControllerOptions {
 	/** False in the "off" explanation mode: the explanation model isn't asked during or after turns. */
 	readonly explanationsEnabled?: () => boolean;
 	readonly profile: () => KnowledgeProfile;
+	/** The system map version questions from the map are about (the latest, or the one they were picked from). */
+	readonly systemMap?: (version?: number) => Promise<SystemMap | undefined>;
 	readonly emit: (event: ActiveEvent) => void;
 	readonly log: (line: string) => void;
 	/** The coding agent platform in use (Muse Code by default). */
@@ -364,6 +366,22 @@ export class ActiveController implements AgentSessionListener {
 		this.upsertChat({ id: entryId('diagram'), turnId, role: 'diagram', text, at: Date.now(), mapVersion });
 	}
 
+	/**
+	 * The developer described a change to the system map in chat: their message, then the diagram agent's reply
+	 * (the new version, or why it left the map alone) in place of a "changing the map" line.
+	 */
+	async editDiagram(request: string, edit: (request: string) => Promise<{ version?: number; reason: string }>): Promise<void> {
+		this.upsertChat({ id: entryId('question'), role: 'question', text: request, at: Date.now(), mapEdit: true });
+		const replyId = entryId('diagram');
+		this.upsertChat({ id: replyId, role: 'diagram', text: 'Changing the map…', status: 'streaming', at: Date.now() });
+		try {
+			const result = await edit(request);
+			this.upsertChat({ id: replyId, role: 'diagram', text: result.reason, status: 'done', at: Date.now(), mapVersion: result.version });
+		} catch (error) {
+			this.upsertChat({ id: replyId, role: 'diagram', text: `The diagram agent couldn't change the map: ${error instanceof Error ? error.message : String(error)}`, status: 'error', at: Date.now() });
+		}
+	}
+
 	private tellDiagram(turn: LogicalTurn, changes: readonly NetFileChange[], final: boolean): void {
 		this.options.onDiagramCheckpoint?.({
 			turnId: turn.id,
@@ -595,14 +613,25 @@ export class ActiveController implements AgentSessionListener {
 
 	async ask(request: AskRequest): Promise<void> {
 		const walkthrough = request.walkthroughId ? this.walkthroughs.get(request.walkthroughId) ?? (await this.loadWalkthrough(request.walkthroughId)) : undefined;
-		this.upsertChat({ id: entryId('question'), role: 'question', text: request.question, at: Date.now() });
+		const questionId = entryId('question');
+		this.upsertChat({ id: questionId, role: 'question', text: request.question, at: Date.now() });
 		const answerId = entryId('explainer');
 		const update = (text: string, status: string) => this.upsertChat({ id: answerId, role: 'explainer', text, status, at: Date.now() });
 		update('', 'streaming');
 		const memory = await this.options.memory?.describe();
-		void this.recordQuestion(request.question, walkthrough?.scenes.find(scene => scene.id === request.sceneId)?.title ?? walkthrough?.title);
+		const map = request.map && (await this.options.systemMap?.(request.map.version));
+		const topic = map && request.map
+			? [...request.map.components.map(id => map.components.find(component => component.id === id)?.name ?? id), ...request.map.connections.map(link => [link.from, link.to].map(id => map.components.find(component => component.id === id)?.name ?? id).join(' → '))].join(', ')
+			: walkthrough?.scenes.find(scene => scene.id === request.sceneId)?.title ?? walkthrough?.title;
+		if (map && topic) {
+			this.upsertChat({ id: questionId, role: 'question', text: request.question, at: Date.now(), about: topic });
+		}
+		void this.recordQuestion(request.question, topic);
 		try {
-			const reply = await this.explainer.ask(buildQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile(), memory), text => update(text, 'streaming'), true);
+			const prompt = map && request.map
+				? buildMapQuestionPrompt(request.question, map, request.map, this.options.profile(), memory)
+				: buildQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile(), memory);
+			const reply = await this.explainer.ask(prompt, text => update(text, 'streaming'), true);
 			update(reply, 'done');
 		} catch (error) {
 			update(`The explanation session could not answer: ${error instanceof Error ? error.message : String(error)}`, 'error');

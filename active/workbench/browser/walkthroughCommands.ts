@@ -24,6 +24,7 @@ export const enum ActiveCommandIds {
 	PickExplainMode = 'active.pickExplainMode',
 	ResumeChat = 'active.resumeChat',
 	PickCodingEffort = 'active.pickCodingEffort',
+	PickCodingModel = 'active.pickCodingModel',
 	OpenRecentWalkthrough = 'active.openRecentWalkthrough',
 	WalkthroughHistory = 'active.walkthroughHistory',
 	OpenSystemMap = 'active.openSystemMap',

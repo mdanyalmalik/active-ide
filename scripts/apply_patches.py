@@ -134,3 +134,22 @@ if any(product.get(key) != value for key, value in branding.items()):
     product.update(branding)
     product_path.write_text(json.dumps(product, indent="\t") + "\n")
     print("patched product.json")
+
+# 5. App icon (active/branding/icon.svg, built into Active.icns and icon-512.png on Apple's 824-on-1024 grid).
+import shutil
+
+branding_dir = pathlib.Path(__file__).resolve().parent.parent / "active" / "branding"
+icons = [
+    (branding_dir / "Active.icns", root / "resources" / "darwin" / "code.icns"),
+    (branding_dir / "icon-512.png", root / "resources" / "linux" / "code.png"),
+]
+# The dev Electron bundle is built once by setup; give it the icon too so it shows without a rebuild.
+for bundle in (root / ".build" / "electron").glob("*.app"):
+    icons.append((branding_dir / "Active.icns", bundle / "Contents" / "Resources" / f"{bundle.stem}.icns"))
+for source, target in icons:
+    if target.parent.exists() and (not target.exists() or target.read_bytes() != source.read_bytes()):
+        shutil.copyfile(source, target)
+        if target.suffix == ".icns" and ".app" in str(target):
+            # Finder and the Dock cache bundle icons; touching the bundle makes them look again.
+            (target.parents[2]).touch()
+        print(f"copied icon to {target.relative_to(root)}")

@@ -90,13 +90,14 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 - **Default keybindings**, all rebindable in Keyboard Shortcuts:
   - With the walkthrough focused: `Space`/`K` pause or resume, `←`/`J` rewind, `→`/`L` advance, `C` open chat, `O` open file.
   - Anywhere: `⌘K C` open chat about the walkthrough, `⌘K W` return to the walkthrough, `⌘⌥I` open chat.
-- **Settings** (the gear next to the chat input or in a walkthrough's header, **Active: Open Settings**, or the **Active** section at the top of Settings): the model and reasoning effort for the coding agent and for explanations (explanations default to `Low`, which keeps walkthroughs to about 20 seconds), narration voice and speed, and Active's other options. The coding agent's effort is also one click away next to the chat input.
+- **Settings** (the gear next to the chat input or in a walkthrough's header, **Active: Open Settings**, or the **Active** section at the top of Settings): the model and reasoning effort for the coding agent and for explanations (explanations default to `Low`, which keeps walkthroughs to about 20 seconds), narration voice and speed, and Active's other options. The coding agent's model and effort are also one click away next to the chat input.
 - **Chats**: each chat is one Muse Code session. Active reopens the last chat used in a folder, with its transcript, when it starts. **New Chat** and **Chats** (resume an earlier chat from this folder) are in the chat header and the command palette.
 - **Explanation mode** (bottom left of the chat box): **Auto** pops explanations up as work finishes; **Away** holds them and, when you switch back, shows a short briefing (what got done, what needs you, what's unresolved, where to pick up) with the walkthroughs one click away; **Off** makes no explanations. **Active: Catch Me Up** shows the briefing on demand.
-- **Tabs**: chat and each walkthrough are ordinary editor tabs. Switching to a walkthrough's tab resumes that walkthrough where you left it.
+- **Tabs**: chat, each walkthrough, the System Map and the Knowledge Profile are ordinary editor tabs, and they come back when the window reloads (a walkthrough at the scene it was on). Switching to a walkthrough's tab resumes that walkthrough where you left it.
 - **Knowledge Profile** (from the welcome popup, chat, the Active view, or the command palette) sets your background, language and concept familiarity, what to follow closely or skim past, depth, comfort with math, and preferred visuals. It is saved locally.
 - **Quick skips**: pressing Next before half of a scene has been narrated (within 6 seconds of it appearing) is taken as a very slight hint that you already knew its topics; their familiarity moves up a tenth of a step.
 - **History** (the clock icon) lists every turn, including those without walkthroughs. It offers Replay (narration is re-synthesized from the saved script), Details (chat, exposed reasoning summaries, tool outcomes, captured edits, script), Delete, and Delete All. Deleting history never touches project files.
+- **System Map** (**Active: Open System Map**, the floating button, or the link on each update in chat): a separate diagram agent draws the project's components and how they connect. The wheel zooms, dragging pans, and boxes can be dragged. Clicking a box or arrow describes it, lists the code it cites (outlined in Explorer), and offers **Ask About This**, which opens chat set to ask about it. ⌘-click (Ctrl-click) or ⌘-drag picks several boxes and arrows to ask about together. The pencil in a box's or arrow's popup edits its name, summary, description or label in place (saved as a new version at once, and kept by later updates). **Restructure** in the header is for bigger changes: it opens chat set to describe them (split or merge parts, regroup, change the level of detail), and the diagram agent makes the change, still true to the code, and replies with what it did. The pill next to the title shows whether the map is **Auto-updating**, on **Manual updates** (only **Check Now**), or **Updates off**, and clicking it changes that for the folder. Earlier versions are in the History dropdown.
 
 ### Settings
 
@@ -139,12 +140,12 @@ demo/                           sample project + scripted scenarios for the test
   - put Active's settings first in the Settings editor
   - add a filter to the file decorations service (`registerDecorationsFilter`), so the Explorer's "Agent" mode can hide git's change decorations in the Explorer, tabs and breadcrumbs
   - expose the Explorer's tree (`ExplorerView.activeTree`) and a row's position (`AsyncDataTree.getElementTop`), so a walkthrough can outline the file it's showing and open the folders on the way
-  - branding
+  - branding, including the app icon (`python3 active/branding/build_icon.py` builds `icon.svg`, `Active.icns` and `icon-512.png` from `source.svg`)
 
 ## Tests
 
 ```sh
-cd active/extension && npm test       # 86 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, the diagram agent, flows)
+cd active/extension && npm test       # 91 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, the diagram agent, flows)
 scripts/sync.sh && (cd vscode && npm run build-fast -- --client-only && \
   VSCODE_SKIP_PRELAUNCH=1 ./scripts/test.sh --run src/vs/workbench/contrib/active/test/browser/walkthroughPlayer.test.ts \
   --run src/vs/workbench/contrib/active/test/browser/decorationsFilter.test.ts \
@@ -164,6 +165,6 @@ To type-check the workbench contribution: `cd vscode && npx tsc -p src/tsconfig.
 - **Only partly verified against live Muse Code.** `scripts/muse-check.mjs` drives Active's Muse adapter against a signed-in Muse Code 1.4.14 (connection, a coding turn with approvals, and a read-only turn whose write attempts were refused). A full walkthrough through the Active UI with live Muse hasn't been run yet.
 - **Questions while Muse is waiting.** Muse Code's own clarifying questions (`userInput/request`) are cancelled in auto mode.
 - **Hidden browser sign-in reads `muse login` output.** Active looks for the sign-in URL, the code, and the "Press Enter to open it in your browser" prompt, and treats exit code 0 as success. This was checked against Muse Code 1.4.14 up to the approval step. A later release that changes this output could break it; Active then shows a clear error and offers the API-key route. It isn't available on Windows yet, where it falls back to API keys.
-- **Restoring after a reload.** Chat history is not restored into the chat view after a window reload. Everything is in History, and walkthroughs can be replayed from there. Editors for walkthroughs are not restored across restarts.
+- **Restoring after a reload.** Chat history is not restored into the chat view after a window reload. Everything is in History, and walkthroughs can be replayed from there. Open tabs (including walkthroughs) do come back.
 - **Narration speed.** Speed is applied at playback (`playbackRate` with preserved pitch). Catalog voices need a network connection the first time each is used; the built-in voice works offline.
 - **Large repositories.** The workspace mirror tracks up to 8,000 text files of at most 1 MB each.

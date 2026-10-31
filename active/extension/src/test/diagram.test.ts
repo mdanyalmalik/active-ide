@@ -9,7 +9,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
 import { DiagramAgent, DiagramSnapshot, describeChanges, structuralSignals } from '../diagram/diagramAgent';
-import { DiagramState, parseSystemMap, SystemMap } from '../shared/activeProtocol';
+import { buildMapQuestionPrompt } from '../explain/prompts';
+import { DEFAULT_PROFILE, DiagramState, parseSystemMap, SystemMap } from '../shared/activeProtocol';
 
 const FILES = new Set(['src/api.ts', 'src/store.ts', 'src/cli.ts', 'test/api.test.ts']);
 
@@ -86,11 +87,12 @@ describe('Diagram agent: building and keeping the map', () => {
 			await fs.writeFile(storePath, JSON.stringify({ folderMode, revisions: [] }));
 		}
 		const asked: string[] = [];
+		const prompts: string[] = [];
 		const states: DiagramState[] = [];
 		const announced: string[] = [];
 		let now = 1000;
 		const agent = new DiagramAgent({
-			session: { ask: async prompt => { asked.push(prompt.split('\n').find(line => line.startsWith('SYSTEM MAP')) ?? '?'); return replies.shift() ?? '{"update": false, "reason": "none"}'; } },
+			session: { ask: async prompt => { prompts.push(prompt); asked.push(prompt.split('\n').find(line => line.startsWith('SYSTEM MAP')) ?? '?'); return replies.shift() ?? '{"update": false, "reason": "none"}'; } },
 			storePath,
 			fileExists: async file => FILES.has(file),
 			listFiles: async () => ({ files: [...FILES], truncated: false }),
@@ -101,7 +103,7 @@ describe('Diagram agent: building and keeping the map', () => {
 			checkMs: () => 60_000,
 			now: () => now,
 		});
-		return { agent, asked, states, announced, storePath, tick: (ms: number) => { now += ms; } };
+		return { agent, asked, prompts, states, announced, storePath, tick: (ms: number) => { now += ms; } };
 	}
 	const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 	const turn = (index: number, final: boolean): DiagramSnapshot => ({ turnId: `t${index}`, turnIndex: index, task: 'add a cache', progress: [], final, changes: [{ path: 'src/cache.ts', added: 5, removed: 0, baseline: null, final: 'export const cache = new Map();' }] });
@@ -166,11 +168,94 @@ describe('Diagram agent: building and keeping the map', () => {
 		assert.deepStrictEqual({ asked: h.asked, components: state.current?.map.components.map(component => component.id) }, { asked: ['SYSTEM MAP SURVEY', 'SYSTEM MAP REPAIR'], components: ['cli', 'api', 'store'] });
 	});
 
+	test('a change the developer describes becomes a new version, and later updates are told to keep it', async () => {
+		const renamed = { ...MAP, components: MAP.components.map(component => component.id === 'store' ? { ...component, name: 'Results store' } : component) };
+		const h = await harness([JSON.stringify(MAP), JSON.stringify({ update: true, reason: 'Renamed Store to Results store.', changed: ['store'], map: renamed })], 'manual');
+		await h.agent.build();
+		const result = await h.agent.edit('call the store "Results store"');
+		const state = await h.agent.state();
+		assert.deepStrictEqual({ result, request: state.current?.request, name: state.current?.map.components.find(component => component.id === 'store')?.name, announced: h.announced }, {
+			result: { version: 2, reason: 'Renamed Store to Results store.' },
+			request: 'call the store "Results store"',
+			name: 'Results store',
+			announced: [], // the reply goes to chat as the answer to the developer, not as an announcement
+		});
+		assert.deepStrictEqual(JSON.parse(await fs.readFile(h.storePath, 'utf8')).requests, ['call the store "Results store"']);
+		await h.agent.updateNow();
+		assert.match(h.prompts.at(-1)!, /asked for these changes to the map earlier[\s\S]*- call the store "Results store"/);
+	});
+
+	test('a change the agent declines leaves the map alone and says why', async () => {
+		const h = await harness([JSON.stringify(MAP), JSON.stringify({ update: false, reason: 'The map already shows the CLI calling the API.' })], 'manual');
+		await h.agent.build();
+		const result = await h.agent.edit('show that the CLI calls the API');
+		const state = await h.agent.state();
+		assert.deepStrictEqual({ result, version: state.current?.version, asked: h.asked }, {
+			result: { reason: 'The map already shows the CLI calling the API.' },
+			version: 1,
+			asked: ['SYSTEM MAP SURVEY', 'SYSTEM MAP EDIT'],
+		});
+		assert.deepStrictEqual(JSON.parse(await fs.readFile(h.storePath, 'utf8')).requests, []);
+	});
+
+	test('a repaired change that comes back without its wrapper is still the change, with its first reason', async () => {
+		const broken = { ...MAP, components: [...MAP.components, { id: 'ghost', name: 'Ghost', files: ['src/nowhere.ts'] }] };
+		const renamed = { ...MAP, components: MAP.components.map(component => component.id === 'cli' ? { ...component, name: 'Command line' } : component) };
+		const h = await harness([JSON.stringify(MAP), JSON.stringify({ update: true, reason: 'Renamed CLI to Command line.', changed: ['cli'], map: broken }), JSON.stringify(renamed)], 'manual');
+		await h.agent.build();
+		const result = await h.agent.edit('rename CLI to Command line');
+		const state = await h.agent.state();
+		assert.deepStrictEqual({ result, asked: h.asked, name: state.current?.map.components.find(component => component.id === 'cli')?.name }, {
+			result: { version: 2, reason: 'Renamed CLI to Command line.' },
+			asked: ['SYSTEM MAP SURVEY', 'SYSTEM MAP EDIT', 'SYSTEM MAP REPAIR'],
+			name: 'Command line',
+		});
+	});
+
+	test('text the developer edits on the map is saved at once, without the model, and later updates keep it', async () => {
+		const h = await harness([JSON.stringify(MAP)], 'manual');
+		await h.agent.build();
+		const version = await h.agent.reviseText({
+			components: [{ id: 'store', name: 'Results store', description: 'Keeps finished results on disk.' }, { id: 'cli', name: 'CLI' }],
+			connections: [{ from: 'api', to: 'store', label: 'writes results' }],
+		});
+		const state = await h.agent.state();
+		const map = state.current!.map;
+		assert.deepStrictEqual({
+			version, manual: state.current?.manual, reason: state.current?.reason, changed: state.current?.changed,
+			store: map.components.find(component => component.id === 'store'), label: map.connections[1].label, asked: h.asked,
+		}, {
+			version: 2, manual: true,
+			reason: "You renamed Store to Results store, edited Results store's description, edited the API client → Results store connection.",
+			changed: ['store'],
+			store: { id: 'store', name: 'Results store', summary: 'Keeps state', description: 'Keeps finished results on disk.', files: [{ path: 'src/store.ts' }] },
+			label: 'writes results',
+			asked: ['SYSTEM MAP SURVEY'],
+		});
+		// Nothing changed: no new version.
+		assert.strictEqual(await h.agent.reviseText({ components: [{ id: 'cli', name: 'CLI' }] }), undefined);
+		await h.agent.updateNow();
+		assert.match(h.prompts.at(-1)!, /- Call the component "store" "Results store"\./);
+		assert.match(h.prompts.at(-1)!, /"description":"Keeps finished results on disk\."/);
+	});
+
 	test('the components a turn touched are marked from the files alone, without asking the model', async () => {
 		const h = await harness([JSON.stringify(MAP)], 'manual');
 		await h.agent.build();
 		await h.agent.checkpoint({ ...turn(4, true), changes: [{ path: 'src/store.ts', added: 1, removed: 1, baseline: 'a', final: 'b' }] });
 		const state = await h.agent.state();
 		assert.deepStrictEqual({ touched: state.touched, turn: state.touchedTurnIndex, asked: h.asked }, { touched: ['store'], turn: 4, asked: ['SYSTEM MAP SURVEY'] });
+	});
+});
+
+describe('Questions from the system map', () => {
+	test('the prompt carries what was picked, with its code, and the whole map for context', () => {
+		const prompt = buildMapQuestionPrompt('how do these fit together?', MAP, { components: ['api', 'gone'], connections: [{ from: 'cli', to: 'api' }] }, DEFAULT_PROFILE);
+		const picked = prompt.split('WHAT THE DEVELOPER PICKED ON THE MAP\n')[1].split('\n\n')[0];
+		assert.deepStrictEqual(picked.split('\n').filter(line => !line.startsWith('  ')), ['Component "API client" (api): Talks HTTP', 'Connection CLI → API client: requests']);
+		assert.match(picked, /Code: src\/api\.ts:1-30/);
+		assert.match(picked, /Where: src\/cli\.ts:3/);
+		assert.match(prompt, /THE WHOLE MAP \(for context\)\nA CLI over an API client and a store\./);
+		assert.match(prompt, /QUESTION\nhow do these fit together\?$/);
 	});
 });

@@ -8,7 +8,7 @@ import { mainWindow } from '../../../../base/browser/window.js';
 import { RunOnceScheduler, timeout } from '../../../../base/common/async.js';
 import { fromNow } from '../../../../base/common/date.js';
 import { IConfigurationService, ConfigurationTarget } from '../../../../platform/configuration/common/configuration.js';
-import { effortDescription, effortLabel, updateModelChoices } from './activeSettings.js';
+import { effortDescription, effortLabel, KNOWN_MODELS, updateModelChoices } from './activeSettings.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
@@ -27,7 +27,7 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveEvent, MapSelection, SystemMapTextEdit, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput } from './activeInputs.js';
 import { ClipOutcome, ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
@@ -57,12 +57,29 @@ const GIT_POLL_MS = 15_000;
 /** The voice setting's value for "no narration". */
 export const VOICE_OFF = 'off';
 
+/** What chat's Ask mode is about: a place in a walkthrough, or parts of the system map. */
+export type ChatContext = WalkthroughChatContext | MapChatContext | MapEditChatContext;
+
 /** Where the user was in a walkthrough when they asked a question from it. */
-export interface ChatContext {
+export interface WalkthroughChatContext {
+	readonly kind: 'walkthrough';
 	readonly walkthroughId: string;
 	readonly sceneId: string;
 	readonly sceneIndex: number;
 	readonly segment: number;
+	readonly title: string;
+}
+
+/** Describing changes to the system map, for the diagram agent to make. */
+export interface MapEditChatContext {
+	readonly kind: 'mapEdit';
+	readonly title: string;
+}
+
+/** Boxes and arrows picked on the system map to ask about. */
+export interface MapChatContext {
+	readonly kind: 'map';
+	readonly selection: MapSelection;
 	readonly title: string;
 }
 
@@ -111,6 +128,16 @@ export interface IActiveService {
 	/** A finished walkthrough offered to the user (not yet shown because they had navigated elsewhere). */
 	readonly offeredWalkthrough: Walkthrough | undefined;
 	readonly chatContext: ChatContext | undefined;
+	/** Chat should switch to Ask mode about the current context and focus the input. */
+	readonly onDidRequestAsk: Event<void>;
+	/** Opens chat set to ask about these parts of the system map (`title` names them). */
+	askAboutMap(selection: MapSelection, title: string): Promise<void>;
+	/** Opens chat set to describe changes to the system map. */
+	editMapInChat(): Promise<void>;
+	/** Sends a described change to the diagram agent, which replies in chat. */
+	editDiagram(request: string): Promise<void>;
+	/** Saves names, summaries, descriptions or labels typed on the map as a new version (no model involved). */
+	reviseDiagramText(edit: SystemMapTextEdit): Promise<void>;
 	/** A finished walkthrough about to replace chat; chat shows a countdown and can start it or decline. */
 	readonly pendingHandoff: Walkthrough | undefined;
 	/** The folder is in Restricted Mode, so the agent services (which run code in it) are not started. */
@@ -180,6 +207,13 @@ export interface IActiveService {
 	newChat(): Promise<void>;
 	/** Lists this folder's earlier chats and resumes the chosen one. */
 	pickChatToResume(): Promise<void>;
+	/** The models the agent offers (a built-in list until it connects). */
+	readonly models: readonly AgentModelInfo[];
+	readonly onDidChangeModels: Event<void>;
+	/** The coding agent's model: the chosen one, or the agent's default. */
+	readonly codingModel: AgentModelInfo | undefined;
+	setCodingModel(id: string): Promise<void>;
+	pickCodingModel(): Promise<void>;
 	/** The coding agent's reasoning effort setting (`default` or a tier). */
 	readonly codingEffort: string;
 	setCodingEffort(effort: string): Promise<void>;
@@ -192,6 +226,9 @@ export interface IActiveService {
 	readonly canSpeak: boolean;
 	readonly narrationSpeed: number;
 	openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs?: number): Promise<void>;
+	/** Where a walkthrough was up to, so a reloaded window reopens its tab at the same place. */
+	walkthroughPosition(walkthroughId: string): PlaybackPosition | undefined;
+	rememberWalkthroughPosition(walkthroughId: string, position: PlaybackPosition): void;
 	resumeWalkthrough(): Promise<void>;
 	openProfile(): Promise<void>;
 	openCurrentFile(): Promise<void>;
@@ -296,7 +333,9 @@ export class ActiveService extends Disposable implements IActiveService {
 	private _profile: KnowledgeProfile = DEFAULT_PROFILE;
 	private _stateLoaded = false;
 	get stateLoaded(): boolean { return this._stateLoaded; }
-	private _models: readonly AgentModelInfo[] = [];
+	private _models: readonly AgentModelInfo[] = KNOWN_MODELS;
+	private readonly _onDidChangeModels = this._register(new Emitter<void>());
+	readonly onDidChangeModels = this._onDidChangeModels.event;
 	private _history: TurnSummary[] = [];
 	private readonly _turnChanges = new Map<string, FileChangeStat>();
 	private readonly _gitChanges = new Map<string, FileChangeStat>();
@@ -435,6 +474,34 @@ export class ActiveService extends Disposable implements IActiveService {
 	get chatPlayer(): WalkthroughPlayer | undefined { return this.player?.walkthrough.id === this.dismissedPlayer ? undefined : this.player; }
 	get offeredWalkthrough(): Walkthrough | undefined { return this._offered; }
 	get chatContext(): ChatContext | undefined { return this._chatContext; }
+
+	private readonly _onDidRequestAsk = this._register(new Emitter<void>());
+	readonly onDidRequestAsk = this._onDidRequestAsk.event;
+
+	async askAboutMap(selection: MapSelection, title: string): Promise<void> {
+		await this.openChatWith({ kind: 'map', selection, title });
+	}
+
+	async editMapInChat(): Promise<void> {
+		await this.openChatWith({ kind: 'mapEdit', title: localize('systemMapContext', "System Map") });
+	}
+
+	async editDiagram(request: string): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.DiagramEdit, request);
+	}
+
+	async reviseDiagramText(edit: SystemMapTextEdit): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.DiagramReviseText, edit);
+	}
+
+	/** Opens chat with its second mode set to `context` (asking or describing changes), selected and focused. */
+	private async openChatWith(context: MapChatContext | MapEditChatContext): Promise<void> {
+		this._chatContext = context;
+		this._onDidChangePlayer.fire();
+		// Not through openChat(false), which starts chat on a new coding task with no context.
+		await this.withProgrammaticOpen(() => this.editorService.openEditor(new ActiveChatInput(), { pinned: true, revealIfOpened: true }));
+		this._onDidRequestAsk.fire();
+	}
 	get pendingHandoff(): Walkthrough | undefined { return this._pendingHandoff; }
 	get controlsHeight(): number { return this._controlsHeight; }
 	get speaking(): boolean { return this.clipPlayer.speaking; }
@@ -583,8 +650,11 @@ export class ActiveService extends Disposable implements IActiveService {
 				this._onDidChangeProfile.fire();
 				break;
 			case 'models':
-				this._models = event.models;
-				updateModelChoices(event.models);
+				if (event.models.length) {
+					this._models = event.models;
+					updateModelChoices(event.models);
+					this._onDidChangeModels.fire();
+				}
 				break;
 		}
 	}
@@ -917,13 +987,23 @@ export class ActiveService extends Disposable implements IActiveService {
 			player.pause();
 			const scene = player.walkthrough.scenes[player.position.scene];
 			this.positions.set(player.walkthrough.id, player.position);
-			this._chatContext = { walkthroughId: player.walkthrough.id, sceneId: scene.id, sceneIndex: player.position.scene, segment: player.position.segment, title: scene.title };
+			this._chatContext = { kind: 'walkthrough', walkthroughId: player.walkthrough.id, sceneId: scene.id, sceneIndex: player.position.scene, segment: player.position.segment, title: scene.title };
 		} else if (!fromWalkthrough) {
 			this._chatContext = undefined;
 		}
 		this._onDidChangePlayer.fire();
 		// Chat and walkthroughs are ordinary tabs: open or reveal, never replace one another.
 		await this.withProgrammaticOpen(() => this.editorService.openEditor(new ActiveChatInput(), { pinned: true, revealIfOpened: true }));
+	}
+
+	walkthroughPosition(walkthroughId: string): PlaybackPosition | undefined {
+		return this.player?.walkthrough.id === walkthroughId ? this.player.position : this.positions.get(walkthroughId);
+	}
+
+	rememberWalkthroughPosition(walkthroughId: string, position: PlaybackPosition): void {
+		if (!this.positions.has(walkthroughId)) {
+			this.positions.set(walkthroughId, position);
+		}
 	}
 
 	selectWalkthrough(walkthrough: Walkthrough): void {
@@ -1188,10 +1268,47 @@ export class ActiveService extends Disposable implements IActiveService {
 		await this.configurationService.updateValue(ActiveSetting.CodingEffort, effort, ConfigurationTarget.USER);
 	}
 
+	get models(): readonly AgentModelInfo[] {
+		return this._models;
+	}
+
+	get codingModel(): AgentModelInfo | undefined {
+		const id = this.configurationService.getValue<string>(ActiveSetting.CodingModel) || this._models.find(model => model.isDefault)?.id;
+		return this._models.find(model => model.id === id);
+	}
+
+	async setCodingModel(id: string): Promise<void> {
+		const model = this._models.find(candidate => candidate.id === id);
+		// The default model is stored as no choice, so it follows the agent's default.
+		await this.configurationService.updateValue(ActiveSetting.CodingModel, model?.isDefault ? '' : id, ConfigurationTarget.USER);
+		// An effort the new model doesn't offer falls back to the model's default.
+		if (model?.efforts.length && this.codingEffort !== 'default' && !model.efforts.includes(this.codingEffort)) {
+			await this.setCodingEffort('default');
+		}
+	}
+
+	async pickCodingModel(): Promise<void> {
+		const current = this.codingModel?.id;
+		type ModelItem = IQuickPickItem & { id: string };
+		const items: ModelItem[] = this._models.map(model => ({
+			id: model.id,
+			label: model.label,
+			description: [model.isDefault ? localize('defaultModel', "default") : '', model.id === current ? localize('currentModel', "current") : ''].filter(Boolean).join(', ') || undefined,
+			detail: [model.inputCost && model.outputCost ? localize('modelPrice', "${0} in / ${1} out per million tokens", model.inputCost, model.outputCost) : '', model.description ?? ''].filter(Boolean).join('. '),
+		}));
+		const chosen = await this.quickInputService.pick(items, {
+			title: localize('pickModelTitle', "Coding Agent Model"),
+			placeHolder: localize('pickModelPlaceholder', "The model {0} writes code with. Applies from the next task.", this._agent.provider.name),
+			activeItem: items.find(item => item.id === current),
+		});
+		if (chosen) {
+			await this.setCodingModel(chosen.id);
+		}
+	}
+
 	async pickCodingEffort(): Promise<void> {
 		const current = this.codingEffort;
-		const modelId = this.configurationService.getValue<string>(ActiveSetting.CodingModel) || this._models.find(model => model.isDefault)?.id;
-		const model = this._models.find(candidate => candidate.id === modelId);
+		const model = this.codingModel;
 		type EffortItem = IQuickPickItem & { effort: string };
 		const tiers = ['default', ...REASONING_EFFORTS.filter(tier => !model?.efforts.length || model.efforts.includes(tier))];
 		const items: EffortItem[] = tiers.map(effort => ({

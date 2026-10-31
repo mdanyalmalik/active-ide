@@ -11,7 +11,7 @@ import { ActiveSetting, AgentModelInfo, REASONING_EFFORTS } from '../common/acti
 const registry = Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration);
 
 /** Models Muse Code 1.4 offers; replaced by the live list once the agent connects. */
-const KNOWN_MODELS: AgentModelInfo[] = [
+export const KNOWN_MODELS: readonly AgentModelInfo[] = [
 	{ id: 'muse-spark-1.3-contributor', label: 'muse-spark-1.3-contributor', inputCost: '0.10', outputCost: '0.20', isDefault: true, efforts: [...REASONING_EFFORTS], description: 'Discounted tokens: your content may be used for product improvement.' },
 	{ id: 'muse-spark-1.3', label: 'muse-spark-1.3', inputCost: '1.25', outputCost: '4.25', efforts: [...REASONING_EFFORTS] },
 	{ id: 'muse-wonder-1.0', label: 'muse-wonder-1.0', inputCost: '4', outputCost: '20', efforts: [...REASONING_EFFORTS] },
@@ -162,7 +162,7 @@ const general: IConfigurationNode = {
 			markdownDescription: localize('features', "What Active does while the coding agent works. Asked on first launch."),
 			scope: ConfigurationScope.APPLICATION,
 		},
-		'active.diagram.checkMinutes': {
+		[ActiveSetting.DiagramCheckMinutes]: {
 			type: 'number',
 			default: 2,
 			minimum: 0,

@@ -14,7 +14,7 @@ import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
-import { toAction } from '../../../../base/common/actions.js';
+import { Separator, SubmenuAction, toAction } from '../../../../base/common/actions.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -27,7 +27,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { ActiveSetting, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
+import { ActiveSetting, REASONING_EFFORTS, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
 import { effortLabel } from './activeSettings.js';
 import { ActiveChatInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
@@ -131,9 +131,10 @@ export class ActiveChatEditor extends EditorPane {
 		this.modeLabel = dom.append(bar, $('.composer-mode'));
 		this._register(this.activeService.onDidChangeMode(() => this.renderComposerContext()));
 		const tools = dom.append(bar, $('.composer-tools'));
-		// The coding agent's effort, one click from where the task is typed.
+		// The coding agent's model and effort, one click from where the task is typed.
 		this.effortButton = dom.append(tools, $('button.composer-effort')) as HTMLButtonElement;
-		this._register(dom.addDisposableListener(this.effortButton, dom.EventType.CLICK, () => this.activeService.pickCodingEffort()));
+		this._register(dom.addDisposableListener(this.effortButton, dom.EventType.CLICK, () => this.showModelMenu()));
+		this._register(this.activeService.onDidChangeModels(() => this.renderEffort()));
 		const settings = dom.append(tools, $('button.composer-icon')) as HTMLButtonElement;
 		settings.classList.add(...ThemeIcon.asClassNameArray(Codicon.settingsGear));
 		settings.title = localize('chatSettings', "Active Settings: models, effort, voice");
@@ -169,6 +170,14 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(this.activeService.onDidChangeOffer(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangePlayer(() => this.renderChrome()));
 		this._register(this.activeService.onDidChangeHandoff(() => this.renderHandoff()));
+		// Asked from the system map: chat opens set to ask about what was picked.
+		this._register(this.activeService.onDidRequestAsk(() => {
+			if (this.activeService.chatContext) {
+				this.mode = 'ask';
+				this.renderComposerContext();
+				this.textarea.focus();
+			}
+		}));
 		this._register(toDisposable(() => this.stopCountdown()));
 	}
 
@@ -496,16 +505,16 @@ export class ActiveChatEditor extends EditorPane {
 			task.textContent = localize('taskMode', "New Coding Task");
 			task.classList.toggle('selected', this.mode === 'task');
 			const ask = dom.append(this.composerContext, $('button.mode'));
-			ask.textContent = localize('askMode', "Ask About “{0}”", context.title);
+			ask.textContent = context.kind === 'mapEdit' ? localize('mapEditMode', "Describe Changes to the System Map") : localize('askMode', "Ask About “{0}”", context.title);
 			ask.classList.toggle('selected', this.mode === 'ask');
 			this.inputStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => { this.mode = 'ask'; this.renderComposerContext(); }));
 			this.inputStore.add(dom.addDisposableListener(task, dom.EventType.CLICK, () => { this.mode = 'task'; this.renderComposerContext(); }));
 		} else {
 			this.mode = 'task';
 		}
-		this.sendButton.textContent = this.mode === 'ask' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
+		this.sendButton.textContent = this.mode === 'ask' && this.activeService.chatContext?.kind !== 'mapEdit' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
 		this.renderExplainMode();
-		this.textarea.placeholder = this.mode === 'ask' ? localize('askPlaceholder', "Ask about this part…") : localize('taskPlaceholder', "Describe a coding task…");
+		this.textarea.placeholder = this.mode === 'ask' ? (this.activeService.chatContext?.kind === 'mapEdit' ? localize('mapEditPlaceholder', "Describe how to restructure the map: split or merge parts, regroup them, change the level of detail…") : this.activeService.chatContext?.kind === 'map' ? localize('askMapPlaceholder', "Ask about these parts of the system…") : localize('askPlaceholder', "Ask about this part…")) : localize('taskPlaceholder', "Describe a coding task…");
 		this.renderEffort();
 		this.updateSendState();
 	}
@@ -515,7 +524,8 @@ export class ActiveChatEditor extends EditorPane {
 		this.modeStore.clear();
 		dom.clearNode(this.modeLabel);
 		if (this.mode === 'ask') {
-			this.modeLabel.textContent = localize('explanationSession', "Asking about the walkthrough");
+			const kind = this.activeService.chatContext?.kind;
+			this.modeLabel.textContent = kind === 'mapEdit' ? localize('mapEditSession', "Changing the system map") : kind === 'map' ? localize('mapQuestionSession', "Asking about the system map") : localize('explanationSession', "Asking about the walkthrough");
 			return;
 		}
 		const modes: Array<{ id: ExplainMode; label: string; detail: string; icon: ThemeIcon }> = [
@@ -543,14 +553,49 @@ export class ActiveChatEditor extends EditorPane {
 		}));
 	}
 
+	/** The model button: the coding agent's model and effort. */
 	private renderEffort(): void {
 		const effort = this.activeService.codingEffort;
+		const model = this.activeService.codingModel;
 		dom.clearNode(this.effortButton);
-		dom.append(this.effortButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.lightbulb));
-		dom.append(this.effortButton, $('span')).textContent = localize('effortButton', "Effort: {0}", effortLabel(effort));
-		this.effortButton.title = localize('effortTitle', "How much {0} reasons before acting. Higher is slower and costs more.", this.activeService.agent.provider.name);
-		// Effort applies to coding tasks; questions use the explanation model's setting.
+		dom.append(this.effortButton, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.sparkle));
+		dom.append(this.effortButton, $('span')).textContent = localize('modelButton', "{0} · {1}", model?.label ?? localize('defaultModelLabel', "Default model"), this.effortText(effort, model?.defaultEffort));
+		dom.append(this.effortButton, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		this.effortButton.title = localize('modelTitle', "The model {0} writes code with and how much it reasons before acting. Click to change.", this.activeService.agent.provider.name);
+		// These apply to coding tasks; questions use the explanation model's settings.
 		this.effortButton.classList.toggle('hidden', this.mode === 'ask');
+	}
+
+	private effortText(effort: string, modelDefault: string | undefined): string {
+		return effort === 'default' && modelDefault ? localize('effortDefaultIs', "Default ({0})", effortLabel(modelDefault)) : effortLabel(effort);
+	}
+
+	/** Models with their prices, then an Effort submenu with the tiers the chosen model offers. */
+	private showModelMenu(): void {
+		const current = this.activeService.codingModel;
+		const effort = this.activeService.codingEffort;
+		const models = this.activeService.models.map(model => toAction({
+			id: `active.codingModel.${model.id}`,
+			label: model.inputCost && model.outputCost ? localize('modelMenuItem', "{0}  (${1} / ${2})", model.label, model.inputCost, model.outputCost) : model.label,
+			tooltip: model.description,
+			checked: model.id === current?.id,
+			run: () => this.activeService.setCodingModel(model.id),
+		}));
+		const tiers = ['default', ...REASONING_EFFORTS.filter(tier => !current?.efforts.length || current.efforts.includes(tier))];
+		const efforts = tiers.map(tier => toAction({
+			id: `active.codingEffort.${tier}`,
+			label: this.effortText(tier, current?.defaultEffort),
+			checked: tier === effort,
+			run: () => this.activeService.setCodingEffort(tier),
+		}));
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => this.effortButton,
+			getActions: () => [
+				...models,
+				new Separator(),
+				new SubmenuAction('active.codingEffort', localize('effortMenu', "Effort: {0}", this.effortText(effort, current?.defaultEffort)), efforts),
+			],
+		});
 	}
 
 	private renderFooter(): void {
@@ -575,7 +620,11 @@ export class ActiveChatEditor extends EditorPane {
 		this.textarea.value = '';
 		this.updateSendState();
 		const context = this.activeService.chatContext;
-		if (this.mode === 'ask' && context) {
+		if (this.mode === 'ask' && context?.kind === 'mapEdit') {
+			await this.activeService.editDiagram(text);
+		} else if (this.mode === 'ask' && context?.kind === 'map') {
+			await this.activeService.ask({ question: text, map: context.selection });
+		} else if (this.mode === 'ask' && context?.kind === 'walkthrough') {
 			await this.activeService.ask({ question: text, walkthroughId: context.walkthroughId, sceneId: context.sceneId, segment: context.segment });
 		} else {
 			await this.activeService.submitTask(text);
@@ -615,7 +664,7 @@ export class ActiveChatEditor extends EditorPane {
 				dom.append(node, $('.text')).textContent = entry.text;
 				break;
 			case 'question':
-				eyebrow(localize('youAsk', "You · about the walkthrough"));
+				eyebrow(entry.mapEdit ? localize('youMapEdit', "You · change to the system map") : entry.about ? localize('youAskMap', "You · about {0} on the system map", entry.about) : localize('youAsk', "You · about the walkthrough"));
 				dom.append(node, $('.text')).textContent = entry.text;
 				break;
 			case 'agent':
@@ -674,6 +723,9 @@ export class ActiveChatEditor extends EditorPane {
 				// The map changed: said here, one click away, without leaving chat.
 				eyebrow(entry.mapVersion !== undefined ? localize('diagramUpdateVersion', "Active · system map v{0}", entry.mapVersion) : localize('diagramUpdate', "Active · system map"));
 				dom.append(node, $('.text')).textContent = entry.text;
+				if (entry.status === 'streaming') {
+					break; // the diagram agent is still making a change; the link comes with its reply
+				}
 				const actions = dom.append(node, $('.note-actions'));
 				const open = dom.append(actions, $('button.link')) as HTMLButtonElement;
 				open.textContent = localize('openSystemMap', "Open System Map");

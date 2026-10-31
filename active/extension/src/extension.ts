@@ -13,7 +13,7 @@ import { ActiveController } from './controller';
 import { DiagramAgent } from './diagram/diagramAgent';
 import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
@@ -175,6 +175,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		explanationsEnabled: () => config<string>('explain.mode', 'auto') !== 'off' && config<string>('features', 'both') !== 'diagrams',
 		onDiagramCheckpoint: snapshot => void diagram?.checkpoint(snapshot).catch(error => log(`diagram checkpoint failed: ${error}`)),
 		profile: () => profile,
+		systemMap: async version => version === undefined ? (await diagram?.state())?.current?.map : (await diagram?.revision(version))?.map,
 		emit,
 		log,
 		startCodingHost: () => startHost('coding'),
@@ -239,6 +240,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	register(ExtensionCommand.Init, async () => ({ ...(await active.initialState()), narration: narrator.currentStatus, profile, diagram: await diagramAgent.state() }));
 	register(ExtensionCommand.DiagramBuild, () => diagramAgent.build());
 	register(ExtensionCommand.DiagramUpdate, () => diagramAgent.updateNow());
+	register(ExtensionCommand.DiagramReviseText, (edit: SystemMapTextEdit) => diagramAgent.reviseText(edit));
+	register(ExtensionCommand.DiagramEdit, (request: string) => active.editDiagram(request, text => diagramAgent.edit(text)));
 	register(ExtensionCommand.DiagramRevision, (version: number) => diagramAgent.revision(version));
 	register(ExtensionCommand.DiagramSetFolderMode, (mode: DiagramFolderMode) => diagramAgent.setFolderMode(mode));
 	register(ExtensionCommand.SubmitTask, (text: string) => active.submitTask(text));

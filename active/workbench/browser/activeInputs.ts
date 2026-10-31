@@ -49,9 +49,9 @@ export class WalkthroughInput extends EditorInput {
 	readonly onDidChangeFile = this._onDidChangeFile.event;
 	private currentFile: string;
 
-	constructor(readonly walkthrough: Walkthrough) {
+	constructor(readonly walkthrough: Walkthrough, startScene = 0) {
 		super();
-		this.currentFile = walkthrough.scenes[0]?.file ?? '';
+		this.currentFile = walkthrough.scenes[startScene]?.file ?? walkthrough.scenes[0]?.file ?? '';
 	}
 
 	override get typeId(): string {

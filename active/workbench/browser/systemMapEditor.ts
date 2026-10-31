@@ -6,10 +6,14 @@
 import * as dom from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
+import { toAction } from '../../../../base/common/actions.js';
 import { fromNow } from '../../../../base/common/date.js';
+import { isMacintosh } from '../../../../base/common/platform.js';
 import { DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
@@ -19,7 +23,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import type { SystemComponent, SystemConnection, SystemFileRef, SystemMapRevision } from '../common/activeProtocol.js';
+import { ActiveSetting, type DiagramFolderMode, type MapSelection, type SystemComponent, type SystemConnection, type SystemFileRef, type SystemMapRevision } from '../common/activeProtocol.js';
 import { SystemMapInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
 import { connectionPath, layoutMap, MapPoint, mapBounds, NODE_HEIGHT, NODE_WIDTH } from './systemMapLayout.js';
@@ -34,10 +38,13 @@ const DRAG_THRESHOLD = 4;
 
 type Selection = { readonly kind: 'component'; readonly id: string } | { readonly kind: 'connection'; readonly from: string; readonly to: string };
 
+const selectionKey = (selection: Selection) => selection.kind === 'component' ? `c:${selection.id}` : `e:${selection.from}>${selection.to}`;
+
 /**
  * The system map: components as boxes and their connections as arrows, on a canvas that the wheel zooms and a
  * drag pans. Boxes can be dragged (their places are remembered); clicking one opens its description with the
- * files it cites, which Explorer outlines. Older versions of the map can be looked at from History.
+ * files it cites, which Explorer outlines. Older versions of the map can be looked at from History. ⌘-click
+ * (Ctrl-click) or ⌘-drag picks several boxes and arrows; any pick can be asked about in chat.
  */
 export class SystemMapEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.activeSystemMap';
@@ -49,6 +56,8 @@ export class SystemMapEditor extends EditorPane {
 	private edges!: SVGSVGElement;
 	private overview!: HTMLElement;
 	private popup!: HTMLElement;
+	private selectionBar!: HTMLElement;
+	private marquee!: HTMLElement;
 	private state!: HTMLElement;
 	private banner!: HTMLElement;
 	private zoomLabel: HTMLElement | undefined;
@@ -57,6 +66,7 @@ export class SystemMapEditor extends EditorPane {
 	private readonly stateStore = this._register(new DisposableStore());
 	private readonly mapStore = this._register(new DisposableStore());
 	private readonly popupStore = this._register(new DisposableStore());
+	private readonly selectionBarStore = this._register(new DisposableStore());
 	private readonly inputStore = this._register(new DisposableStore());
 
 	/** The version on screen: the latest, unless an older one was picked from History. */
@@ -65,7 +75,10 @@ export class SystemMapEditor extends EditorPane {
 	private positions = new Map<string, MapPoint>();
 	private readonly nodes = new Map<string, HTMLElement>();
 	private readonly edgeElements: Array<{ connection: SystemConnection; path: SVGPathElement; hit: SVGPathElement; label: HTMLElement }> = [];
-	private selection: Selection | undefined;
+	/** What's picked: one box or arrow (shown in the popup), or several (⌘-click, ⌘-drag). */
+	private picked: Selection[] = [];
+	/** The popup is editing the picked box's or arrow's text. */
+	private editing = false;
 	private pan = { x: 40, y: 40 };
 	private scale = 1;
 	/** The view is fitted to the map the first time it has a size. */
@@ -80,6 +93,8 @@ export class SystemMapEditor extends EditorPane {
 		@IActiveService private readonly activeService: IActiveService,
 		@IEditorService private readonly editorService: IEditorService,
 		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
+		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super(SystemMapEditor.ID, group, telemetryService, themeService, storage);
 	}
@@ -105,16 +120,18 @@ export class SystemMapEditor extends EditorPane {
 		this.world.appendChild(this.edges);
 		this.overview = dom.append(this.viewport, $('.map-overview'));
 		this.popup = dom.append(this.viewport, $('.map-popup.hidden'));
+		this.selectionBar = dom.append(this.viewport, $('.map-selection-bar.hidden'));
+		this.marquee = dom.append(this.viewport, $('.map-marquee.hidden'));
 		this.state = dom.append(this.viewport, $('.map-state.hidden'));
 		this.positions = this.loadPositions();
 
 		this._register(this.activeService.onDidChangeDiagram(() => this.onDiagramChanged()));
 		this.registerCanvasInput();
 		this._register(dom.addStandardDisposableListener(this.root, dom.EventType.KEY_DOWN, event => {
-			if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+			if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) {
 				return;
 			}
-			if (event.browserEvent.key === 'Escape' && this.selection) {
+			if (event.browserEvent.key === 'Escape' && this.picked.length) {
 				event.preventDefault();
 				this.select(undefined);
 			} else if (event.browserEvent.key === '0' || event.browserEvent.key === 'f') {
@@ -180,13 +197,16 @@ export class SystemMapEditor extends EditorPane {
 		const title = dom.append(this.header, $('.map-title'));
 		dom.append(title, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchy));
 		dom.append(title, $('span.name')).textContent = localize('systemMapTitle', "System Map");
-		const status = dom.append(this.header, $('.map-status'));
 		const current = diagram.current;
+		if (current || diagram.folderMode) {
+			this.renderUpdateMode();
+		}
+		const status = dom.append(this.header, $('.map-status'));
 		if (diagram.status === 'building') {
 			status.textContent = localize('mapBuilding', "Building the map…");
 			status.classList.add('busy');
 		} else if (diagram.status === 'updating') {
-			status.textContent = localize('mapUpdating', "Checking for changes…");
+			status.textContent = diagram.detail ?? localize('mapUpdating', "Checking for changes…");
 			status.classList.add('busy');
 		} else if (diagram.status === 'failed') {
 			status.textContent = diagram.detail ?? localize('mapFailed', "The last update failed");
@@ -229,7 +249,63 @@ export class SystemMapEditor extends EditorPane {
 		const busy = diagram.status === 'building' || diagram.status === 'updating';
 		if (current) {
 			button(Codicon.refresh, localize('mapCheck', "Check Now"), localize('mapCheckTitle', "Ask the diagram agent to look for changes now"), () => void this.activeService.updateDiagram(), busy || !this.activeService.diagramsEnabled);
+			// Bigger changes are described in chat, where the diagram agent replies with what it did. (Names and
+			// descriptions are edited in place, from a box's popup.)
+			button(Codicon.editSparkle, localize('mapRestructure', "Restructure"), localize('mapRestructureTitle', "Describe bigger changes in chat (split or merge parts, regroup them, change the level of detail) and the diagram agent makes them. To rename a part or change its description, click it and use the pencil."), () => void this.activeService.editMapInChat(), !this.activeService.diagramsEnabled);
 		}
+	}
+
+	/**
+	 * Whether the map keeps itself up to date, always on screen next to the title: Auto-updating (with a live
+	 * dot), Manual, or Off. Clicking it changes the mode for this folder.
+	 */
+	private renderUpdateMode(): void {
+		const diagram = this.activeService.diagram;
+		const enabled = this.activeService.diagramsEnabled;
+		const mode: DiagramFolderMode = !enabled ? 'off' : diagram.folderMode ?? 'off';
+		const minutes = Math.max(1, this.configurationService.getValue<number>(ActiveSetting.DiagramCheckMinutes) ?? 2);
+		const looks: Record<DiagramFolderMode, { label: string; title: string }> = {
+			auto: {
+				label: localize('mapModeAuto', "Auto-updating"),
+				title: localize('mapModeAutoTitle', "The diagram agent keeps this map up to date: it checks while the coding agent works (at most every {0} minutes) and when each task ends. Click to change.", minutes),
+			},
+			manual: {
+				label: localize('mapModeManual', "Manual updates"),
+				title: localize('mapModeManualTitle', "The map only changes when you click Check Now. Click to change."),
+			},
+			off: {
+				label: enabled ? localize('mapModeOff', "Updates off") : localize('mapModeDisabled', "Diagrams off"),
+				title: enabled ? localize('mapModeOffTitle', "The map isn't being updated. Click to change.") : localize('mapModeDisabledTitle', "System diagrams are turned off in Active's settings, so the map isn't being updated. Click to turn them on."),
+			},
+		};
+		const busy = diagram.status === 'building' || diagram.status === 'updating';
+		const button = dom.append(this.header, $('button.map-mode')) as HTMLButtonElement;
+		button.classList.add(mode);
+		button.classList.toggle('busy', mode === 'auto' && busy);
+		dom.append(button, $('span.map-mode-dot'));
+		dom.append(button, $('span.label')).textContent = looks[mode].label;
+		dom.append(button, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		button.title = looks[mode].title;
+		this.headerStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => {
+			if (!enabled) {
+				void this.activeService.setFeatures('both');
+				return;
+			}
+			const choices: Array<{ id: DiagramFolderMode; label: string }> = [
+				{ id: 'auto', label: localize('mapModeChoiceAuto', "Keep Updated Automatically") },
+				{ id: 'manual', label: localize('mapModeChoiceManual', "Update Only When I Click Check Now") },
+				{ id: 'off', label: localize('mapModeChoiceOff', "Stop Updating") },
+			];
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => button,
+				getActions: () => choices.map(choice => toAction({
+					id: `active.mapMode.${choice.id}`,
+					label: choice.label,
+					checked: choice.id === mode,
+					run: () => this.activeService.setDiagramFolderMode(choice.id),
+				})),
+			});
+		}));
 	}
 
 	private renderBanner(): void {
@@ -368,13 +444,8 @@ export class SystemMapEditor extends EditorPane {
 			this.edgeElements.push({ connection, path, hit, label });
 		}
 		this.placeAll();
-		// Keep the selection if it still exists in this version.
-		const selection = this.selection;
-		if (selection && !(selection.kind === 'component' ? this.nodes.has(selection.id) : map.connections.some(connection => connection.from === selection.from && connection.to === selection.to))) {
-			this.select(undefined);
-		} else {
-			this.select(selection);
-		}
+		// Keep whatever is picked that still exists in this version.
+		this.setPicked(this.picked.filter(selection => selection.kind === 'component' ? this.nodes.has(selection.id) : map.connections.some(connection => connection.from === selection.from && connection.to === selection.to)));
 		if (!this.fitted && this.viewport.clientWidth) {
 			this.fit(false);
 		}
@@ -409,6 +480,11 @@ export class SystemMapEditor extends EditorPane {
 		this.placePopup();
 	}
 
+	/** One picked box or arrow: the popup describes it. Several: the selection bar offers to ask about them. */
+	private get selection(): Selection | undefined {
+		return this.picked.length === 1 ? this.picked[0] : undefined;
+	}
+
 	private updateZoomLabel(): void {
 		if (this.zoomLabel) {
 			this.zoomLabel.textContent = `${Math.round(this.scale * 100)}%`;
@@ -434,9 +510,16 @@ export class SystemMapEditor extends EditorPane {
 			if (event.button !== 0 || this.popup.contains(event.target as Node) || this.state.contains(event.target as Node)) {
 				return;
 			}
+			if (this.selectionBar.contains(event.target as Node)) {
+				return;
+			}
 			const target = event.target as Element;
 			const node = target.closest<HTMLElement>('.map-node');
 			const edge = this.edgeElements.find(candidate => candidate.hit === target || candidate.label === target);
+			if (isMacintosh ? event.metaKey : event.ctrlKey) {
+				this.pickWithModifier(event, node ? { kind: 'component', id: node.dataset.id! } : edge ? { kind: 'connection', from: edge.connection.from, to: edge.connection.to } : undefined);
+				return;
+			}
 			const start = { x: event.clientX, y: event.clientY };
 			const origin = node ? this.positions.get(node.dataset.id!) : { ...this.pan };
 			let dragging = false;
@@ -491,6 +574,73 @@ export class SystemMapEditor extends EditorPane {
 		}));
 	}
 
+	/**
+	 * ⌘ held: a click adds the box or arrow under the pointer to what's picked (or takes it out); a drag draws a
+	 * rectangle and adds every box and arrow it touches.
+	 */
+	private pickWithModifier(event: PointerEvent, under: Selection | undefined): void {
+		const base = [...this.picked];
+		const rect = this.viewport.getBoundingClientRect();
+		const start = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+		let dragging = false;
+		this.viewport.setPointerCapture(event.pointerId);
+		this.root.focus();
+		const move = dom.addDisposableListener(this.viewport, dom.EventType.POINTER_MOVE, (moveEvent: PointerEvent) => {
+			const point = { x: moveEvent.clientX - rect.left, y: moveEvent.clientY - rect.top };
+			if (!dragging && Math.hypot(point.x - start.x, point.y - start.y) < DRAG_THRESHOLD) {
+				return;
+			}
+			dragging = true;
+			const box = { left: Math.min(start.x, point.x), top: Math.min(start.y, point.y), right: Math.max(start.x, point.x), bottom: Math.max(start.y, point.y) };
+			this.marquee.classList.remove('hidden');
+			this.marquee.style.transform = `translate(${box.left}px, ${box.top}px)`;
+			this.marquee.style.width = `${box.right - box.left}px`;
+			this.marquee.style.height = `${box.bottom - box.top}px`;
+			const known = new Set(base.map(selectionKey));
+			this.setPicked([...base, ...this.itemsIn(box).filter(item => !known.has(selectionKey(item)))]);
+		});
+		const end = () => {
+			move.dispose();
+			up.dispose();
+			cancel.dispose();
+			this.marquee.classList.add('hidden');
+			if (!dragging && under) {
+				const key = selectionKey(under);
+				this.setPicked(base.some(item => selectionKey(item) === key) ? base.filter(item => selectionKey(item) !== key) : [...base, under]);
+			}
+		};
+		const up = dom.addDisposableListener(this.viewport, dom.EventType.POINTER_UP, end);
+		const cancel = dom.addDisposableListener(this.viewport, 'pointercancel', end);
+	}
+
+	/** The boxes and arrows touching a rectangle given in viewport pixels. */
+	private itemsIn(box: { left: number; top: number; right: number; bottom: number }): Selection[] {
+		const toMap = (x: number, y: number) => ({ x: (x - this.pan.x) / this.scale, y: (y - this.pan.y) / this.scale });
+		const a = toMap(box.left, box.top);
+		const b = toMap(box.right, box.bottom);
+		const inside = (point: { x: number; y: number }) => point.x >= a.x && point.x <= b.x && point.y >= a.y && point.y <= b.y;
+		const items: Selection[] = [];
+		for (const id of this.nodes.keys()) {
+			const point = this.positions.get(id);
+			if (point && point.x < b.x && point.x + NODE_WIDTH > a.x && point.y < b.y && point.y + NODE_HEIGHT > a.y) {
+				items.push({ kind: 'component', id });
+			}
+		}
+		for (const edge of this.edgeElements) {
+			// An arrow counts when any part of its curve is inside.
+			const length = edge.path.getTotalLength?.() ?? 0;
+			let hit = false;
+			for (let step = 0; step <= 12 && length && !hit; step++) {
+				const point = edge.path.getPointAtLength(length * step / 12);
+				hit = inside(point);
+			}
+			if (hit) {
+				items.push({ kind: 'connection', from: edge.connection.from, to: edge.connection.to });
+			}
+		}
+		return items;
+	}
+
 	private zoomBy(factor: number): void {
 		this.zoomAt(factor, this.viewport.clientWidth / 2, this.viewport.clientHeight / 2);
 	}
@@ -528,39 +678,100 @@ export class SystemMapEditor extends EditorPane {
 	// ------------------------------------------------------------------ selection and the popup
 
 	private select(selection: Selection | undefined): void {
-		this.selection = selection;
-		const revision = this.shown;
-		const related = new Set<string>();
-		if (selection?.kind === 'component') {
-			related.add(selection.id);
-			for (const connection of revision?.map.connections ?? []) {
-				if (connection.from === selection.id || connection.to === selection.id) {
-					related.add(connection.from);
-					related.add(connection.to);
-				}
-			}
-		} else if (selection) {
-			related.add(selection.from);
-			related.add(selection.to);
+		this.setPicked(selection ? [selection] : []);
+	}
+
+	private setPicked(picked: Selection[]): void {
+		if (picked.map(selectionKey).join() !== this.picked.map(selectionKey).join()) {
+			this.editing = false;
 		}
+		this.picked = picked;
+		const selection = this.selection;
+		const revision = this.shown;
+		const pickedKeys = new Set(picked.map(selectionKey));
+		// One box: it and its neighbours stay lit. Several things: what's picked, and the ends of picked arrows.
+		const related = new Set<string>();
+		for (const item of picked) {
+			if (item.kind === 'component') {
+				related.add(item.id);
+				if (selection) {
+					for (const connection of revision?.map.connections ?? []) {
+						if (connection.from === item.id || connection.to === item.id) {
+							related.add(connection.from);
+							related.add(connection.to);
+						}
+					}
+				}
+			} else {
+				related.add(item.from);
+				related.add(item.to);
+			}
+		}
+		const any = picked.length > 0;
 		for (const [id, node] of this.nodes) {
-			node.classList.toggle('selected', selection?.kind === 'component' && selection.id === id);
-			node.classList.toggle('dim', !!selection && !related.has(id));
+			node.classList.toggle('selected', pickedKeys.has(`c:${id}`));
+			node.classList.toggle('dim', any && !related.has(id));
 		}
 		for (const edge of this.edgeElements) {
-			const hot = selection?.kind === 'component'
-				? edge.connection.from === selection.id || edge.connection.to === selection.id
-				: !!selection && edge.connection.from === selection.from && edge.connection.to === selection.to;
+			const { from, to } = edge.connection;
+			const hot = pickedKeys.has(`e:${from}>${to}`) || (selection?.kind === 'component' && (from === selection.id || to === selection.id));
 			edge.path.classList.toggle('hot', hot);
-			edge.path.classList.toggle('dim', !!selection && !hot);
+			edge.path.classList.toggle('dim', any && !hot);
 			edge.label.classList.toggle('hot', hot);
-			edge.label.classList.toggle('dim', !!selection && !hot);
+			edge.label.classList.toggle('dim', any && !hot);
 			edge.path.setAttribute('marker-end', hot ? 'url(#active-map-arrow-hot)' : 'url(#active-map-arrow)');
 		}
 		this.renderPopup();
-		// Explorer outlines the files the selection cites.
-		const files = this.selectedFiles();
-		this.input2?.select(files);
+		this.renderSelectionBar();
+		// Explorer outlines the files everything picked cites.
+		this.input2?.select(this.selectedFiles());
+	}
+
+	/** Several things picked: how many, and Ask About These. */
+	private renderSelectionBar(): void {
+		this.selectionBarStore.clear();
+		dom.clearNode(this.selectionBar);
+		const show = this.picked.length > 1;
+		this.selectionBar.classList.toggle('hidden', !show);
+		if (!show) {
+			return;
+		}
+		const components = this.picked.filter(item => item.kind === 'component').length;
+		const connections = this.picked.length - components;
+		const parts = [
+			components === 1 ? localize('mapPickedComponent', "1 component") : components ? localize('mapPickedComponents', "{0} components", components) : '',
+			connections === 1 ? localize('mapPickedConnection', "1 connection") : connections ? localize('mapPickedConnections', "{0} connections", connections) : '',
+		].filter(Boolean);
+		dom.append(this.selectionBar, $('span.count')).textContent = parts.join(localize('mapPickedAnd', " and "));
+		const ask = dom.append(this.selectionBar, $('button.primary')) as HTMLButtonElement;
+		dom.append(ask, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.commentDiscussion));
+		dom.append(ask, $('span')).textContent = localize('mapAskThese', "Ask About These");
+		this.selectionBarStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => void this.askAboutPicked()));
+		const clear = dom.append(this.selectionBar, $('button.secondary')) as HTMLButtonElement;
+		clear.textContent = localize('mapClearPicked', "Clear");
+		clear.title = localize('mapClearPickedTitle', "Clear the selection (Escape)");
+		this.selectionBarStore.add(dom.addDisposableListener(clear, dom.EventType.CLICK, () => this.select(undefined)));
+	}
+
+	/** Opens chat set to ask about what's picked, named the way the developer sees it on the map. */
+	private async askAboutPicked(): Promise<void> {
+		const map = this.shown?.map;
+		if (!map || !this.picked.length) {
+			return;
+		}
+		const name = (id: string) => map.components.find(component => component.id === id)?.name ?? id;
+		// Boxes first, then arrows, however they were picked.
+		const ordered = [...this.picked.filter(item => item.kind === 'component'), ...this.picked.filter(item => item.kind === 'connection')];
+		const names = ordered.map(item => item.kind === 'component' ? name(item.id) : localize('mapConnectionName', "{0} → {1}", name(item.from), name(item.to)));
+		const title = names.length <= 3
+			? (names.length === 1 ? names[0] : localize('mapNamesList', "{0} and {1}", names.slice(0, -1).join(', '), names[names.length - 1]))
+			: localize('mapNamesMore', "{0} and {1} more", names.slice(0, 2).join(', '), names.length - 2);
+		const selection: MapSelection = {
+			components: this.picked.flatMap(item => item.kind === 'component' ? [item.id] : []),
+			connections: this.picked.flatMap(item => item.kind === 'connection' ? [{ from: item.from, to: item.to }] : []),
+			version: this.viewingOld ? this.shown?.version : undefined,
+		};
+		await this.activeService.askAboutMap(selection, title);
 	}
 
 	private selectedComponent(): SystemComponent | undefined {
@@ -574,7 +785,10 @@ export class SystemMapEditor extends EditorPane {
 	}
 
 	private selectedFiles(): string[] {
-		const refs = this.selectedComponent()?.files ?? this.selectedConnection()?.evidence ?? [];
+		const map = this.shown?.map;
+		const refs = this.picked.flatMap(item => item.kind === 'component'
+			? map?.components.find(component => component.id === item.id)?.files ?? []
+			: map?.connections.find(connection => connection.from === item.from && connection.to === item.to)?.evidence ?? []);
 		return [...new Set(refs.map(ref => ref.path))];
 	}
 
@@ -594,7 +808,24 @@ export class SystemMapEditor extends EditorPane {
 		close.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
 		close.title = localize('mapPopupClose', "Close (Escape)");
 		this.popupStore.add(dom.addDisposableListener(close, dom.EventType.CLICK, () => this.select(undefined)));
+		// Names and descriptions are the developer's to edit in place, on the latest version.
+		if (!this.viewingOld) {
+			const pencil = dom.append(head, $('button.popup-close.popup-edit')) as HTMLButtonElement;
+			pencil.classList.add(...ThemeIcon.asClassNameArray(Codicon.edit));
+			pencil.classList.toggle('active', this.editing);
+			pencil.title = component ? localize('mapEditComponent', "Edit the name and description") : localize('mapEditConnection', "Edit the label and detail");
+			this.popupStore.add(dom.addDisposableListener(pencil, dom.EventType.CLICK, () => {
+				this.editing = !this.editing;
+				this.renderPopup();
+			}));
+		}
 		const body = dom.append(this.popup, $('.popup-body'));
+		if (this.editing) {
+			dom.append(head, $('h3')).textContent = component ? localize('mapEditingComponent', "Edit {0}", component.name) : localize('mapEditingConnection', "Edit {0} → {1}", name(connection!.from), name(connection!.to));
+			this.renderEditForm(body, component, connection);
+			this.placePopup();
+			return;
+		}
 		if (component) {
 			dom.append(head, $('h3')).textContent = component.name;
 			if (component.summary) {
@@ -631,7 +862,78 @@ export class SystemMapEditor extends EditorPane {
 			}
 			this.renderFiles(body, localize('mapPopupWhere', "Where in the code"), connection.evidence);
 		}
+		const actions = dom.append(this.popup, $('.popup-actions'));
+		const ask = dom.append(actions, $('button.primary')) as HTMLButtonElement;
+		dom.append(ask, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.commentDiscussion));
+		dom.append(ask, $('span')).textContent = localize('mapAskThis', "Ask About This");
+		ask.title = localize('mapAskThisTitle', "Ask about this in chat");
+		this.popupStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => void this.askAboutPicked()));
+		dom.append(actions, $('span.popup-hint')).textContent = isMacintosh
+			? localize('mapMultiHintMac', "⌘-click or ⌘-drag to pick more")
+			: localize('mapMultiHint', "Ctrl-click or Ctrl-drag to pick more");
 		this.placePopup();
+	}
+
+	/**
+	 * The popup's edit form: a box's name, summary and description, or an arrow's label and detail. Saving makes
+	 * a new version straight away (the diagram agent isn't asked) that later updates keep.
+	 */
+	private renderEditForm(body: HTMLElement, component: SystemComponent | undefined, connection: SystemConnection | undefined): void {
+		const form = dom.append(body, $('.popup-form'));
+		const field = (label: string, value: string, multiline: boolean, max: number) => {
+			const wrap = dom.append(form, $('label.popup-field'));
+			dom.append(wrap, $('span')).textContent = label;
+			const input = dom.append(wrap, $(multiline ? 'textarea' : 'input')) as HTMLInputElement | HTMLTextAreaElement;
+			input.value = value;
+			input.maxLength = max;
+			if (input instanceof HTMLTextAreaElement) {
+				input.rows = Math.min(10, Math.max(4, Math.ceil(value.length / 48)));
+			}
+			return input;
+		};
+		const inputs = component
+			? { name: field(localize('mapFieldName', "Name"), component.name, false, 80), summary: field(localize('mapFieldSummary', "Summary (shown in the box)"), component.summary, false, 160), description: field(localize('mapFieldDescription', "Description"), component.description, true, 2000) }
+			: { label: field(localize('mapFieldLabel', "Label"), connection!.label, false, 80), detail: field(localize('mapFieldDetail', "Detail"), connection!.detail ?? '', true, 1000) };
+		const save = async () => {
+			if (component) {
+				const name = inputs.name!.value.trim();
+				if (!name) {
+					inputs.name!.focus();
+					return;
+				}
+				await this.activeService.reviseDiagramText({ components: [{ id: component.id, name, summary: inputs.summary!.value, description: inputs.description!.value }] });
+			} else if (connection) {
+				await this.activeService.reviseDiagramText({ connections: [{ from: connection.from, to: connection.to, label: inputs.label!.value, detail: inputs.detail!.value }] });
+			}
+			this.editing = false;
+			this.renderPopup();
+		};
+		const cancel = () => {
+			this.editing = false;
+			this.renderPopup();
+			this.root.focus();
+		};
+		this.popupStore.add(dom.addDisposableListener(form, dom.EventType.KEY_DOWN, (event: KeyboardEvent) => {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				event.stopPropagation();
+				cancel();
+			} else if (event.key === 'Enter' && (event.target instanceof HTMLInputElement || event.metaKey || event.ctrlKey)) {
+				// Enter saves from a one-line field; ⌘-Enter from the description.
+				event.preventDefault();
+				void save();
+			}
+		}));
+		const actions = dom.append(form, $('.popup-form-actions'));
+		const saveButton = dom.append(actions, $('button.primary')) as HTMLButtonElement;
+		saveButton.textContent = localize('mapSave', "Save");
+		this.popupStore.add(dom.addDisposableListener(saveButton, dom.EventType.CLICK, () => void save()));
+		const cancelButton = dom.append(actions, $('button.secondary')) as HTMLButtonElement;
+		cancelButton.textContent = localize('mapCancel', "Cancel");
+		this.popupStore.add(dom.addDisposableListener(cancelButton, dom.EventType.CLICK, cancel));
+		dom.append(actions, $('span.popup-hint')).textContent = localize('mapEditHint', "Restructuring (splitting, merging, regrouping) is in the header.");
+		const first = Object.values(inputs)[0] as HTMLInputElement;
+		setTimeout(() => { first.focus(); first.select(); }, 0);
 	}
 
 	private renderFiles(body: HTMLElement, title: string, refs: readonly SystemFileRef[]): void {

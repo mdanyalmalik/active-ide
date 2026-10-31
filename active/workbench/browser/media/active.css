@@ -730,6 +730,11 @@
 	border-color: var(--active-border);
 }
 
+.monaco-workbench .active-chat-composer button.composer-effort .chevron {
+	font-size: 11px;
+	margin-left: -2px;
+}
+
 .monaco-workbench .active-chat-composer button.composer-effort.hidden {
 	display: none;
 }
@@ -2956,6 +2961,66 @@
 	vertical-align: middle;
 }
 
+/* Whether the map keeps itself up to date: always visible next to the title, and clickable to change. */
+.monaco-workbench .active-map .map-mode {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 8px 3px 9px;
+	border-radius: 999px;
+	border: 1px solid var(--active-border);
+	background: transparent;
+	color: var(--active-muted);
+	font-family: inherit;
+	font-size: 11.5px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .active-map .map-mode:hover {
+	color: var(--vscode-foreground);
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-workbench .active-map .map-mode .chevron {
+	font-size: 11px;
+}
+
+.monaco-workbench .active-map .map-mode-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--active-muted);
+	opacity: 0.6;
+}
+
+.monaco-workbench .active-map .map-mode.auto {
+	color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+	border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, var(--vscode-charts-green)) 45%, transparent);
+	background: color-mix(in srgb, var(--vscode-testing-iconPassed, var(--vscode-charts-green)) 10%, transparent);
+}
+
+.monaco-workbench .active-map .map-mode.auto .map-mode-dot {
+	background: currentColor;
+	opacity: 1;
+	box-shadow: 0 0 0 0 currentColor;
+	animation: active-map-live 2.4s ease-out infinite;
+}
+
+/* While it's checking, the dot pulses faster. */
+.monaco-workbench .active-map .map-mode.auto.busy .map-mode-dot {
+	animation-duration: 0.9s;
+}
+
+@keyframes active-map-live {
+	0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 60%, transparent); }
+	70%, 100% { box-shadow: 0 0 0 6px transparent; }
+}
+
+.monaco-workbench .active-map .map-mode.off {
+	border-style: dashed;
+}
+
 .monaco-workbench .active-map .map-status.warning {
 	color: var(--vscode-editorWarning-foreground);
 }
@@ -3378,6 +3443,141 @@
 	gap: 8px;
 }
 
+.monaco-workbench .active-map .map-popup .popup-edit.active {
+	color: var(--active-accent);
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Editing a box's or arrow's text in place. */
+.monaco-workbench .active-map .map-popup .popup-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding-top: 4px;
+}
+
+.monaco-workbench .active-map .map-popup .popup-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 11px;
+	color: var(--active-muted);
+}
+
+.monaco-workbench .active-map .map-popup .popup-field input,
+.monaco-workbench .active-map .map-popup .popup-field textarea {
+	font-family: inherit;
+	font-size: 12.5px;
+	line-height: 1.45;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, var(--active-border));
+	border-radius: 4px;
+	padding: 5px 7px;
+	resize: vertical;
+}
+
+.monaco-workbench .active-map .map-popup .popup-field input:focus,
+.monaco-workbench .active-map .map-popup .popup-field textarea:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.monaco-workbench .active-map .map-popup .popup-form-actions {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.monaco-workbench .active-map .map-popup .popup-form-actions button {
+	font-size: 12px;
+	padding: 4px 12px;
+}
+
+.monaco-workbench .active-map .map-popup .popup-form-actions button.secondary {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: 1px solid var(--active-border);
+}
+
+/* The popup's footer: ask about this box or arrow in chat. */
+.monaco-workbench .active-map .map-popup .popup-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 14px 12px;
+	border-top: 1px solid var(--active-border);
+}
+
+.monaco-workbench .active-map .map-popup .popup-actions button.primary,
+.monaco-workbench .active-map .map-selection-bar button {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	padding: 4px 10px;
+}
+
+.monaco-workbench .active-map .map-popup .popup-hint {
+	color: var(--active-muted);
+	font-size: 11px;
+}
+
+/* Several boxes and arrows picked: a bar at the bottom of the canvas. */
+.monaco-workbench .active-map .map-selection-bar {
+	position: absolute;
+	left: 50%;
+	bottom: 18px;
+	translate: -50% 0;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 10px 8px 14px;
+	border-radius: 10px;
+	border: 1px solid var(--vscode-editorWidget-border, var(--active-border));
+	background: var(--vscode-editorWidget-background);
+	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+	font-size: 12.5px;
+	cursor: default;
+	z-index: 3;
+	animation: active-map-popup-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.monaco-workbench .active-map .map-selection-bar.hidden {
+	display: none;
+}
+
+.monaco-workbench .active-map .map-selection-bar button.secondary {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border: 1px solid var(--active-border);
+}
+
+.monaco-workbench .active-map .map-selection-bar button.secondary:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-workbench .active-map .map-selection-bar .count {
+	font-weight: 600;
+}
+
+/* The rectangle drawn by ⌘-drag. */
+.monaco-workbench .active-map .map-marquee {
+	position: absolute;
+	top: 0;
+	left: 0;
+	border: 1px solid var(--active-accent);
+	background: color-mix(in srgb, var(--active-accent) 12%, transparent);
+	border-radius: 2px;
+	pointer-events: none;
+	z-index: 2;
+}
+
+.monaco-workbench .active-map .map-marquee.hidden {
+	display: none;
+}
+
 .monaco-workbench .active-map .map-state .map-spinner {
 	font-size: 20px;
 	color: var(--active-accent);
@@ -3385,7 +3585,9 @@
 
 @media (prefers-reduced-motion: reduce) {
 	.monaco-workbench .active-map .map-world.easing,
-	.monaco-workbench .active-map .map-popup {
+	.monaco-workbench .active-map .map-popup,
+	.monaco-workbench .active-map .map-selection-bar,
+	.monaco-workbench .active-map .map-mode-dot {
 		transition: none;
 		animation: none;
 	}

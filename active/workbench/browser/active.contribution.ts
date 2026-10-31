@@ -35,13 +35,14 @@ import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/edit
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
-import { EditorExtensions } from '../../../common/editor.js';
+import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewDescriptorService, IViewsRegistry, ViewContainerLocation } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { ExplorerExtensions, IExplorerFileContributionRegistry } from '../../files/browser/explorerFileContrib.js';
-import { ActiveEvent, ExplainMode, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
+import { ActiveEvent, ExplainMode, Walkthrough, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput } from './activeInputs.js';
 import { SystemMapEditor } from './systemMapEditor.js';
 import { SystemMapFolderPrompt } from './systemMapPrompt.js';
@@ -69,6 +70,55 @@ editorPanes.registerEditorPane(EditorPaneDescriptor.create(ActiveChatEditor, Act
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(WalkthroughEditor, WalkthroughEditor.ID, localize('walkthroughEditor', "Active Walkthrough")), [new SyncDescriptor(WalkthroughInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(KnowledgeProfileEditor, KnowledgeProfileEditor.ID, localize('profileEditor', "Knowledge Profile")), [new SyncDescriptor(KnowledgeProfileInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(SystemMapEditor, SystemMapEditor.ID, localize('systemMapEditor', "System Map")), [new SyncDescriptor(SystemMapInput)]);
+
+// Active's tabs come back when the window reloads, like file tabs do.
+class SingletonInputSerializer implements IEditorSerializer {
+	constructor(private readonly create: () => EditorInput) { }
+	canSerialize(): boolean { return true; }
+	serialize(): string { return ''; }
+	deserialize(): EditorInput { return this.create(); }
+}
+
+/** A walkthrough tab keeps its walkthrough (they're small: a few KB of captured code) and where it was up to. */
+class WalkthroughInputSerializer implements IEditorSerializer {
+	private static readonly MAX_LENGTH = 1_000_000;
+
+	constructor(@IActiveService private readonly activeService: IActiveService) { }
+
+	canSerialize(input: EditorInput): boolean {
+		return input instanceof WalkthroughInput;
+	}
+
+	serialize(input: EditorInput): string | undefined {
+		if (!(input instanceof WalkthroughInput)) {
+			return undefined;
+		}
+		const data = JSON.stringify({ walkthrough: input.walkthrough, position: this.activeService.walkthroughPosition(input.walkthrough.id) });
+		return data.length <= WalkthroughInputSerializer.MAX_LENGTH ? data : undefined;
+	}
+
+	deserialize(_instantiationService: IInstantiationService, serialized: string): EditorInput | undefined {
+		try {
+			const { walkthrough, position } = JSON.parse(serialized) as { walkthrough: Walkthrough; position?: { scene: number; segment: number } };
+			if (!walkthrough?.id || !Array.isArray(walkthrough.scenes)) {
+				return undefined;
+			}
+			const restored = position && position.scene >= 0 && position.scene < walkthrough.scenes.length ? position : undefined;
+			if (restored) {
+				this.activeService.rememberWalkthroughPosition(walkthrough.id, restored);
+			}
+			return new WalkthroughInput(walkthrough, restored?.scene);
+		} catch {
+			return undefined;
+		}
+	}
+}
+
+const editorFactory = Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory);
+editorFactory.registerEditorSerializer(ActiveChatInput.ID, class extends SingletonInputSerializer { constructor() { super(() => new ActiveChatInput()); } });
+editorFactory.registerEditorSerializer(KnowledgeProfileInput.ID, class extends SingletonInputSerializer { constructor() { super(() => new KnowledgeProfileInput()); } });
+editorFactory.registerEditorSerializer(SystemMapInput.ID, class extends SingletonInputSerializer { constructor() { super(() => new SystemMapInput()); } });
+editorFactory.registerEditorSerializer(WalkthroughInput.ID, WalkthroughInputSerializer);
 
 // ---------------------------------------------------------------- views
 
@@ -379,6 +429,15 @@ registerAction2(class extends Action2 {
 
 registerAction2(class extends Action2 {
 	constructor() {
+		super({ id: ActiveCommandIds.PickCodingModel, title: localize2('pickCodingModel', "Change Coding Agent Model"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).pickCodingModel();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
 		super({ id: ActiveCommandIds.OpenRecentWalkthrough, title: localize2('openRecentWalkthrough', "Open Latest Walkthrough"), category, f1: true });
 	}
 	run(accessor: ServicesAccessor): Promise<void> {
@@ -470,7 +529,10 @@ class ActiveStartup extends Disposable implements IWorkbenchContribution {
 				layoutService.setPartHidden(true, Parts.PANEL_PART);
 				storageService.store(CHAT_LAYOUT_APPLIED_KEY, true, StorageScope.WORKSPACE, StorageTarget.MACHINE);
 			}
-			void editorService.openEditor(new ActiveChatInput(), { pinned: true });
+			// Tabs restored from the last session (chat among them, if it was open) stay as they were.
+			if (!editorService.editors.length) {
+				void editorService.openEditor(new ActiveChatInput(), { pinned: true });
+			}
 		}
 	}
 }

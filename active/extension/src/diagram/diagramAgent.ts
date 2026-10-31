@@ -5,8 +5,8 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { DiagramFolderMode, DiagramState, DiagramStatus, extractJsonObject, parseSystemMap, SystemMap, SystemMapRevision } from '../shared/activeProtocol';
-import { buildDiagramRecheckPrompt, buildDiagramRepairPrompt, buildDiagramSurveyPrompt, buildDiagramUpdatePrompt, DiagramFileChange } from './prompts';
+import { DiagramFolderMode, DiagramState, DiagramStatus, extractJsonObject, parseSystemMap, SystemMap, SystemMapRevision, SystemMapTextEdit } from '../shared/activeProtocol';
+import { buildDiagramEditPrompt, buildDiagramRecheckPrompt, buildDiagramRepairPrompt, buildDiagramSurveyPrompt, buildDiagramUpdatePrompt, DiagramFileChange } from './prompts';
 
 /** What the diagram agent hears about a turn: at its checkpoints, and when it ends. */
 export interface DiagramSnapshot {
@@ -42,7 +42,15 @@ export interface DiagramAgentOptions {
 	readonly now?: () => number;
 }
 
+/** What came of a change the developer asked for: a new version, or the agent's reason for leaving the map alone. */
+export interface DiagramEditResult {
+	readonly version?: number;
+	readonly reason: string;
+}
+
 const MAX_REVISIONS = 40;
+/** The developer's requests kept for later maps to honour. */
+const MAX_REQUESTS = 20;
 /** Lines that make or change a dependency between files, in the languages a project is likely to use. */
 const DEPENDENCY_LINE = /^\s*(?:import\b|export\s+(?:\*|\{[^}]*\})\s+from\b|from\s+\S+\s+import\b|const\s+\S+\s*=\s*require\(|#include\b|use\s+[\w:]+|using\s+[\w.]+;|require\s*\(|require_relative\b|@import\b)/;
 
@@ -57,6 +65,8 @@ export class DiagramAgent {
 	private revisions: SystemMapRevision[] | undefined;
 	/** This folder's choice, kept with its map; only `auto` updates the map by itself. */
 	private folderMode: DiagramFolderMode | undefined;
+	/** Changes the developer asked for, oldest first; every later build and update is told to keep them. */
+	private requests: string[] = [];
 	private status: DiagramStatus = 'empty';
 	private detail: string | undefined;
 	private touched: string[] = [];
@@ -120,7 +130,7 @@ export class DiagramAgent {
 		await this.setStatus('building');
 		try {
 			const { files, truncated } = await this.options.listFiles();
-			const map = await this.askForMap(buildDiagramSurveyPrompt(files, truncated), value => value);
+			const map = await this.askForMap(buildDiagramSurveyPrompt(files, truncated, this.requests), value => value);
 			if (!map) {
 				await this.setStatus('failed', 'The diagram agent did not return a usable map.');
 				return;
@@ -131,6 +141,71 @@ export class DiagramAgent {
 		} catch (error) {
 			await this.setStatus('failed', `Couldn't build the map: ${message(error)}`);
 		}
+	}
+
+	/**
+	 * The developer edited names, summaries, descriptions or labels on the map. Saved as a new version straight
+	 * away (no model), and remembered so later updates keep the developer's wording.
+	 */
+	reviseText(edit: SystemMapTextEdit): Promise<number | undefined> {
+		let version: number | undefined;
+		return this.exclusive(async () => {
+			const current = (await this.load()).at(-1);
+			if (!current) {
+				return;
+			}
+			const clean = (text: string | undefined, max: number) => text === undefined ? undefined : text.replace(/\s+$/g, '').trim().slice(0, max);
+			const notes: string[] = [];
+			const keep: string[] = [];
+			const changed = new Set<string>();
+			const components = current.map.components.map(component => {
+				const change = edit.components?.find(candidate => candidate.id === component.id);
+				if (!change) {
+					return component;
+				}
+				const name = clean(change.name, 80) || component.name;
+				const summary = clean(change.summary, 160) ?? component.summary;
+				const description = clean(change.description, 2000) ?? component.description;
+				if (name !== component.name) {
+					notes.push(`renamed ${component.name} to ${name}`);
+					keep.push(`Call the component "${component.id}" "${name}".`);
+				}
+				if (summary !== component.summary || description !== component.description) {
+					notes.push(`edited ${name}'s ${summary !== component.summary && description !== component.description ? 'summary and description' : summary !== component.summary ? 'summary' : 'description'}`);
+					keep.push(`For "${component.id}", keep the developer's wording: ${JSON.stringify({ summary, description })}.`);
+				}
+				if (name === component.name && summary === component.summary && description === component.description) {
+					return component;
+				}
+				changed.add(component.id);
+				return { ...component, name, summary, description };
+			});
+			const nameOf = (id: string) => components.find(component => component.id === id)?.name ?? id;
+			const connections = current.map.connections.map(connection => {
+				const change = edit.connections?.find(candidate => candidate.from === connection.from && candidate.to === connection.to);
+				if (!change) {
+					return connection;
+				}
+				const label = clean(change.label, 80) ?? connection.label;
+				const detail = clean(change.detail, 1000) ?? connection.detail;
+				if (label === connection.label && detail === (connection.detail ?? '')) {
+					return connection;
+				}
+				notes.push(`edited the ${nameOf(connection.from)} → ${nameOf(connection.to)} connection`);
+				keep.push(`For the connection "${connection.from}" → "${connection.to}", keep the developer's wording: ${JSON.stringify({ label, detail })}.`);
+				return { ...connection, label, ...(detail ? { detail } : {}) };
+			});
+			if (!notes.length) {
+				return;
+			}
+			const revision: SystemMapRevision = { version: this.nextVersion(), at: this.now, reason: `You ${notes.join(', ')}.`, changed: [...changed], map: { ...current.map, components, connections }, manual: true };
+			// Newer wording for the same thing replaces the older note.
+			const subject = (note: string) => /^(?:Call the component|For) ("[^"]+"(?: → "[^"]+")?)/.exec(note)?.[1] + (note.startsWith('Call') ? ':name' : ':text');
+			this.requests = [...this.requests.filter(earlier => !keep.some(note => subject(note) === subject(earlier))), ...keep].slice(-MAX_REQUESTS);
+			await this.save(revision);
+			await this.setStatus('ready');
+			version = revision.version;
+		}).then(() => version);
 	}
 
 	// ------------------------------------------------------------------ keeping it current
@@ -178,8 +253,29 @@ export class DiagramAgent {
 			if (this.latest?.changes.length) {
 				return this.check({ ...this.latest, final: true }, true);
 			}
-			await this.runUpdate(current, buildDiagramRecheckPrompt(current.map));
+			await this.runUpdate(current, buildDiagramRecheckPrompt(current.map, this.requests));
 		});
+	}
+
+	/**
+	 * The developer described a change to the map. The agent makes it (still true to the code) or says why not;
+	 * either way the reply is for the developer. Requests that changed the map are kept for later versions.
+	 */
+	edit(request: string): Promise<DiagramEditResult> {
+		let result: DiagramEditResult = { reason: '' };
+		return this.exclusive(async () => {
+			const current = (await this.load()).at(-1);
+			if (!current) {
+				result = { reason: "There's no map to change yet. Build it first." };
+				return;
+			}
+			const outcome = await this.runUpdate(current, buildDiagramEditPrompt(current.map, request, this.requests), undefined, request);
+			if (outcome.version !== undefined) {
+				this.requests = [...this.requests.filter(earlier => earlier !== request), request].slice(-MAX_REQUESTS);
+				await this.persist();
+			}
+			result = outcome;
+		}).then(() => result);
 	}
 
 	private async check(snapshot: DiagramSnapshot, force = false): Promise<void> {
@@ -194,30 +290,39 @@ export class DiagramAgent {
 			this.options.log(`diagram: turn ${snapshot.turnIndex} changed no structure, map unchanged`);
 			return;
 		}
-		await this.runUpdate(current, buildDiagramUpdatePrompt(current.map, snapshot.task, changes, snapshot.progress, snapshot.final), snapshot);
+		await this.runUpdate(current, buildDiagramUpdatePrompt(current.map, snapshot.task, changes, snapshot.progress, snapshot.final, this.requests), snapshot);
 	}
 
-	private async runUpdate(current: SystemMapRevision, prompt: string, snapshot?: DiagramSnapshot): Promise<void> {
-		await this.setStatus('updating');
+	/**
+	 * Asks for an updated map and saves it as a new version. A change the developer asked for (`request`) is
+	 * answered in chat by the caller; other new versions are announced here.
+	 */
+	private async runUpdate(current: SystemMapRevision, prompt: string, snapshot?: DiagramSnapshot, request?: string): Promise<DiagramEditResult> {
+		await this.setStatus('updating', request ? 'Making your change…' : undefined);
 		try {
 			let reason = '';
 			let changed: string[] = [];
 			let wantsUpdate = false;
 			const map = await this.askForMap(prompt, value => {
-				const reply = value as { update?: unknown; reason?: unknown; changed?: unknown; map?: unknown } | undefined;
-				reason = typeof reply?.reason === 'string' ? reply.reason.trim().slice(0, 300) : '';
-				changed = Array.isArray(reply?.changed) ? reply.changed.filter((id): id is string => typeof id === 'string') : [];
+				const reply = value as { update?: unknown; reason?: unknown; changed?: unknown; map?: unknown; components?: unknown } | undefined;
+				// A repaired map can come back bare (without the update wrapper): it is still the change, and the
+				// first reply's reason and ids still describe it.
+				if (wantsUpdate && reply?.update === undefined && Array.isArray(reply?.components)) {
+					return reply;
+				}
+				reason = typeof reply?.reason === 'string' ? reply.reason.trim().slice(0, 300) : reason;
+				changed = Array.isArray(reply?.changed) ? reply.changed.filter((id): id is string => typeof id === 'string') : changed;
 				wantsUpdate = reply?.update === true;
 				return wantsUpdate ? reply?.map : null;
 			});
 			if (!wantsUpdate) {
 				this.options.log(`diagram: no update${reason ? ` (${reason})` : ''}`);
 				await this.setStatus('ready');
-				return;
+				return { reason: reason || 'The map already shows this, so I left it as it is.' };
 			}
 			if (!map) {
 				await this.setStatus('failed', 'The diagram agent proposed a change that did not check out; the map is unchanged.');
-				return;
+				return { reason: "The change I came up with didn't check out against the code, so the map is unchanged." };
 			}
 			// What changed, worked out from the maps themselves when the agent didn't say. Line numbers shifting
 			// as code is edited don't count: a component changed if what it is, or which files it is, changed.
@@ -233,15 +338,20 @@ export class DiagramAgent {
 				reason: reason || 'Updated the map.',
 				changed: [...new Set([...changed.filter(id => known.has(id)), ...differs])],
 				map,
+				...(request ? { request } : {}),
 			};
 			await this.save(revision);
-			this.options.announce(revision.reason, revision.version, snapshot?.turnId);
+			if (!request) {
+				this.options.announce(revision.reason, revision.version, snapshot?.turnId);
+			}
 			if (snapshot) {
 				this.markTouched(map, snapshot);
 			}
 			await this.setStatus('ready');
+			return { version: revision.version, reason: revision.reason };
 		} catch (error) {
 			await this.setStatus('failed', `The last map check failed: ${message(error)}`);
+			return { reason: `I couldn't change the map: ${message(error)}` };
 		}
 	}
 
@@ -272,7 +382,7 @@ export class DiagramAgent {
 				// Keep what checked out rather than nothing.
 				return map;
 			}
-			this.options.log(`diagram: map had ${errors.length} problem(s), asking for a repair`);
+			this.options.log(`diagram: map had ${errors.length} problem(s), asking for a repair: ${errors.slice(0, 5).join('; ')}`);
 			reply = await this.options.session.ask(buildDiagramRepairPrompt(errors));
 		}
 		return undefined;
@@ -319,8 +429,9 @@ export class DiagramAgent {
 	private async load(): Promise<SystemMapRevision[]> {
 		if (!this.revisions) {
 			try {
-				const parsed = JSON.parse(await fs.readFile(this.options.storePath, 'utf8')) as { revisions?: SystemMapRevision[]; folderMode?: DiagramFolderMode };
+				const parsed = JSON.parse(await fs.readFile(this.options.storePath, 'utf8')) as { revisions?: SystemMapRevision[]; folderMode?: DiagramFolderMode; requests?: unknown };
 				this.revisions = Array.isArray(parsed.revisions) ? parsed.revisions : [];
+				this.requests = Array.isArray(parsed.requests) ? parsed.requests.filter((request): request is string => typeof request === 'string') : [];
 				this.folderMode = parsed.folderMode === 'auto' || parsed.folderMode === 'manual' || parsed.folderMode === 'off' ? parsed.folderMode : undefined;
 			} catch {
 				this.revisions = [];
@@ -338,7 +449,7 @@ export class DiagramAgent {
 
 	private async persist(): Promise<void> {
 		await fs.mkdir(path.dirname(this.options.storePath), { recursive: true });
-		await fs.writeFile(this.options.storePath, JSON.stringify({ folderMode: this.folderMode, revisions: this.revisions ?? [] }), 'utf8');
+		await fs.writeFile(this.options.storePath, JSON.stringify({ folderMode: this.folderMode, requests: this.requests, revisions: this.revisions ?? [] }), 'utf8');
 	}
 }
 
