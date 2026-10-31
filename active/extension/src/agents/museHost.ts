@@ -319,6 +319,10 @@ class MuseSession implements AgentSession {
 		await this.msp.connection.command('session/setModel', { sessionId: this.sessionId, model: { modelId } });
 	}
 
+	async steer(turnId: string, text: string): Promise<void> {
+		await this.msp.connection.command('turn/steer', { sessionId: this.sessionId, expectedTurnId: turnId, input: [{ type: 'text', text }] });
+	}
+
 	async interruptTurn(turnId: string): Promise<void> {
 		await this.msp.connection.command('turn/interrupt', { sessionId: this.sessionId, turnId });
 	}

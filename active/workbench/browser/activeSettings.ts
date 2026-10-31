@@ -168,6 +168,16 @@ const general: IConfigurationNode = {
 			minimum: 0,
 			description: localize('diagramCheckMinutes', "How often (at most) the diagram agent checks whether the system map needs updating while the coding agent works. It also checks at the end of every turn that changed files."),
 		},
+		[ActiveSetting.DebugAgentTools]: {
+			type: 'boolean',
+			default: true,
+			markdownDescription: localize('debugAgentTools', "Give the coding agent a debugger: it can run a test with temporary logpoints (seeing real values without adding print statements) or pause at breakpoints to read the stack and variables. Runs are hidden from your debug view and never start while you're debugging. JavaScript and TypeScript for now. Turning it on applies after reloading the window; turning it off applies at once."),
+		},
+		[ActiveSetting.DebugSuggestWhenStuck]: {
+			type: 'boolean',
+			default: true,
+			description: localize('debugSuggestWhenStuck', "When the coding agent looks stuck (the same test failing again, several failed runs, or print statements added to see values), suggest the debugger to it, once per task."),
+		},
 		'active.explain.mode': {
 			type: 'string',
 			enum: ['auto', 'away', 'off'],

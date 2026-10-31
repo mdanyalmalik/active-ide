@@ -10,6 +10,8 @@ import { ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner 
 import { buildBriefingPrompt, buildElaborationPrompt, buildMapQuestionPrompt, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import type { DiagramSnapshot } from './diagram/diagramAgent';
+import { describeDebugCall } from './debug/debugTools';
+import { debuggerSuggestion, stuckReason } from './debug/stuck';
 import { HistoryStore } from './history/historyStore';
 import { extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
 import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, SystemMap, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
@@ -54,6 +56,15 @@ export interface ControllerOptions {
 	readonly rememberSession?: (sessionId: string) => void;
 	/** The diagram agent hears about every checkpoint and the end of every turn (on its own timeline). */
 	readonly onDiagramCheckpoint?: (snapshot: DiagramSnapshot) => void;
+	/** The coding agent's debug tools (an Active MCP server on the coding host), when they're on. */
+	readonly debugTools?: {
+		/** The tools are on and the coding host was given them. */
+		readonly available: () => boolean;
+		/** Suggest them (once per turn) when the agent looks stuck. */
+		readonly suggestWhenStuck: () => boolean;
+		/** Ends any debug session the agent left open. */
+		readonly stopAll: () => Promise<void>;
+	};
 }
 
 interface LogicalTurn {
@@ -89,6 +100,8 @@ interface LogicalTurn {
 	/** A checkpoint came while a question was running or too soon after the last: ask when allowed. */
 	checkPending: boolean;
 	checkTimer?: NodeJS.Timeout;
+	/** Active already suggested the debugger this turn. */
+	debugSuggested?: boolean;
 }
 
 /**
@@ -1093,7 +1106,7 @@ export class ActiveController implements AgentSessionListener {
 			}
 			case 'toolCall': {
 				const command = toolCommand(item);
-				const label = item.label ?? (item.tool ? `${item.tool}${command ? ` ${command}` : ''}` : 'Tool');
+				const label = describeDebugCall(item.tool ?? '', item.args) ?? item.label ?? (item.tool ? `${item.tool}${command ? ` ${command}` : ''}` : 'Tool');
 				this.upsertAgentEntry(item.id, { role: 'tool', text: label, status: item.status === 'inProgress' && item.background ? 'background' : item.status, turnId });
 				if (turn) {
 					turn.tools.set(item.id, { id: item.id, tool: item.tool ?? 'tool', label, status: item.status, command, output: item.output?.slice(-4000), background: item.background === true });
@@ -1110,6 +1123,9 @@ export class ActiveController implements AgentSessionListener {
 						// A finished command or test run is a checkpoint (after its edits are recorded); file edits aren't.
 						if (completed && command && turn && COMMAND_TOOLS.test(item.tool ?? '')) {
 							this.checkpoint(turn);
+						}
+						if (completed && turn && item.turnId) {
+							this.maybeSuggestDebugger(turn, item.turnId);
 						}
 					});
 					if (completed && turn && item.outputRef && !item.output) {
@@ -1207,8 +1223,30 @@ export class ActiveController implements AgentSessionListener {
 
 	// ---------------------------------------------------------------- end of turn
 
+	/**
+	 * When the coding agent looks stuck (the same test failing again, several failed runs, print statements added
+	 * to see values) and hasn't used its debugger, Active suggests it, once per turn, into the running turn.
+	 */
+	private maybeSuggestDebugger(turn: LogicalTurn, protocolTurnId: string): void {
+		const tools = this.options.debugTools;
+		if (turn.debugSuggested || turn.codingDone || this.turn !== turn || !tools?.available() || !tools.suggestWhenStuck() || !this.coding?.steer) {
+			return;
+		}
+		const reason = stuckReason([...turn.tools.values()], this.tracker.currentNetChanges().filter(change => !change.userOnly));
+		if (!reason) {
+			return;
+		}
+		turn.debugSuggested = true;
+		this.options.log(`suggesting the debugger to the coding agent: ${reason}`);
+		void this.coding.steer(protocolTurnId, debuggerSuggestion(reason)).then(() => {
+			this.upsertChat({ id: entryId('tool'), turnId: turn.id, role: 'tool', text: `Active suggested the debugger to ${this.options.provider.shortName} (${reason})`, status: 'completed', at: Date.now() });
+		}, error => this.options.log(`couldn't suggest the debugger: ${error instanceof Error ? error.message : String(error)}`));
+	}
+
 	private async finishCoding(turn: LogicalTurn, terminal: string): Promise<void> {
 		turn.codingDone = true;
+		// A debug session the agent left open doesn't outlive its turn.
+		void this.options.debugTools?.stopAll();
 		if (turn.checkTimer) {
 			clearTimeout(turn.checkTimer);
 			turn.checkTimer = undefined;

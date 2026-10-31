@@ -2927,6 +2927,7 @@
 	overflow: hidden;
 }
 
+/* One line at any width: the status and history shrink (with an ellipsis), the title, pill and buttons don't. */
 .monaco-workbench .active-map .map-header {
 	display: flex;
 	align-items: center;
@@ -2934,6 +2935,14 @@
 	padding: 8px 14px;
 	border-bottom: 1px solid var(--active-border);
 	font-size: 12px;
+	flex-shrink: 0;
+	flex-wrap: nowrap;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.monaco-workbench .active-map .map-header > * {
 	flex-shrink: 0;
 }
 
@@ -2945,8 +2954,25 @@
 	font-size: 13px;
 }
 
-.monaco-workbench .active-map .map-status {
+.monaco-workbench .active-map .map-header > .map-status {
 	color: var(--active-muted);
+	flex-shrink: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* Narrower panes (side by side): buttons become icons (their names stay in the tooltips). */
+.monaco-workbench .active-map.narrow .map-action .label,
+.monaco-workbench .active-map.narrow .map-title .name {
+	display: none;
+}
+
+/* Very narrow: the status and the zoom readout go too; the pill and the buttons stay. */
+.monaco-workbench .active-map.very-narrow .map-header > .map-status,
+.monaco-workbench .active-map.very-narrow .map-zoom,
+.monaco-workbench .active-map.very-narrow .map-mode .label {
+	display: none;
 }
 
 .monaco-workbench .active-map .map-status.busy::before {
@@ -3056,6 +3082,12 @@
 	text-align: center;
 	color: var(--active-muted);
 	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .active-map .map-header > .map-history {
+	flex-shrink: 1;
+	min-width: 56px;
+	text-overflow: ellipsis;
 }
 
 .monaco-workbench .active-map .map-history {
@@ -3293,6 +3325,7 @@
 	top: 0;
 	left: 0;
 	width: 340px;
+	max-width: calc(100% - 16px);
 	max-height: calc(100% - 16px);
 	display: flex;
 	flex-direction: column;

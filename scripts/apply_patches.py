@@ -119,6 +119,29 @@ patch(
     "get activeTree(): WorkbenchCompressibleAsyncDataTree",
 )
 
+# Hidden debug sessions (the coding agent's debugging, started with suppressDebugView/Toolbar/Statusbar) stay hidden:
+# js-debug starts a child session per process without those options, so children inherit them from their parent,
+# and a hidden session never opens the Debug Console, an editor at the paused line, or the Run and Debug view.
+for name in ("Statusbar", "Toolbar", "View"):
+    patch(
+        "src/vs/workbench/contrib/debug/browser/debugSession.ts",
+        f"\t\treturn this._options.suppressDebug{name} ?? false;\n",
+        f"\t\treturn this._options.suppressDebug{name} ?? this._options.parentSession?.suppressDebug{name} ?? false; // Active: children of hidden sessions stay hidden\n",
+        f"this._options.parentSession?.suppressDebug{name}",
+    )
+patch(
+    "src/vs/workbench/contrib/debug/browser/debugService.ts",
+    "\t\t\tif (internalConsoleOptions === 'openOnSessionStart' || (this.viewModel.firstSessionStart && internalConsoleOptions === 'openOnFirstSessionStart')) {\n",
+    "\t\t\tif (!session.suppressDebugView && (internalConsoleOptions === 'openOnSessionStart' || (this.viewModel.firstSessionStart && internalConsoleOptions === 'openOnFirstSessionStart'))) { // Active: hidden sessions\n",
+    "if (!session.suppressDebugView && (internalConsoleOptions",
+)
+patch(
+    "src/vs/workbench/contrib/debug/browser/debugSession.ts",
+    "\t\t\t\t\t\tif (focusedThreadDoesNotExist || (!event.preserveFocusHint && thread.getCallStack().length)) {\n",
+    "\t\t\t\t\t\tif (!this.suppressDebugView && (focusedThreadDoesNotExist || (!event.preserveFocusHint && thread.getCallStack().length))) { // Active: a hidden session's pauses don't take focus\n",
+    "if (!this.suppressDebugView && (focusedThreadDoesNotExist",
+)
+
 # 4. Branding.
 product_path = root / "product.json"
 product = json.loads(product_path.read_text())

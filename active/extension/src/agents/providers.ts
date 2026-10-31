@@ -51,6 +51,8 @@ export interface HostOptions {
 	/** Extra environment for the agent process (for example an API key). */
 	readonly env: Readonly<Record<string, string>>;
 	readonly log: (line: string) => void;
+	/** Extra `serve` arguments for the coding host (e.g. Active's MCP server for the debug tools). */
+	readonly codingArgs?: readonly string[];
 }
 
 export interface AgentProvider {
@@ -148,7 +150,7 @@ export class MuseProvider implements AgentProvider {
 	readonly browserSignIn: BrowserSignInSpec = { mode: 'command', args: ['login'] };
 
 	startHost(bin: string, options: HostOptions): Promise<AgentHost> {
-		return MuseHost.spawn(bin, options.cwd, options.log, options.env, options.role === 'explanation' ? EXPLANATION_SERVE_ARGS : []);
+		return MuseHost.spawn(bin, options.cwd, options.log, options.env, options.role === 'explanation' ? EXPLANATION_SERVE_ARGS : options.codingArgs ?? []);
 	}
 
 	isAuthFailure(errorKind: string | undefined, message: string | undefined): boolean {

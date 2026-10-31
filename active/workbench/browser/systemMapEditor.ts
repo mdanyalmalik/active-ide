@@ -83,6 +83,8 @@ export class SystemMapEditor extends EditorPane {
 	private scale = 1;
 	/** The view is fitted to the map the first time it has a size. */
 	private fitted = false;
+	/** The developer zoomed or panned since the last fit (a resize then keeps their view instead of refitting). */
+	private viewMoved = false;
 	private readonly frame = this._register(new MutableDisposable());
 
 	constructor(
@@ -126,6 +128,14 @@ export class SystemMapEditor extends EditorPane {
 		this.positions = this.loadPositions();
 
 		this._register(this.activeService.onDidChangeDiagram(() => this.onDiagramChanged()));
+		// The same map open side by side: a box dragged in one moves in the other.
+		this._register(this.storage.onDidChangeValue(StorageScope.WORKSPACE, POSITIONS_KEY, this._store)(() => {
+			const positions = this.loadPositions();
+			if (JSON.stringify(Object.fromEntries(positions)) !== JSON.stringify(Object.fromEntries(this.positions))) {
+				this.positions = positions;
+				this.placeAll();
+			}
+		}));
 		this.registerCanvasInput();
 		this._register(dom.addStandardDisposableListener(this.root, dom.EventType.KEY_DOWN, event => {
 			if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) {
@@ -162,10 +172,23 @@ export class SystemMapEditor extends EditorPane {
 	}
 
 	override layout(dimension: dom.Dimension): void {
+		const before = { width: this.viewport.clientWidth, height: this.viewport.clientHeight };
 		this.root.style.width = `${dimension.width}px`;
 		this.root.style.height = `${dimension.height}px`;
+		// Side by side with other tabs: the header drops labels, then the status, to stay on one line.
+		this.root.classList.toggle('narrow', dimension.width < 760);
+		this.root.classList.toggle('very-narrow', dimension.width < 480);
 		if (!this.fitted && this.nodes.size && this.viewport.clientWidth) {
 			this.fit(false);
+		} else if (this.nodes.size && before.width && (before.width !== this.viewport.clientWidth || before.height !== this.viewport.clientHeight)) {
+			if (!this.viewMoved) {
+				// Nobody has moved the view since it was fitted: fit it to the new size.
+				this.fit(false);
+			} else {
+				// Keep what was in the middle in the middle.
+				this.pan = { x: this.pan.x + (this.viewport.clientWidth - before.width) / 2, y: this.pan.y + (this.viewport.clientHeight - before.height) / 2 };
+				this.applyView();
+			}
 		}
 		this.placePopup();
 	}
@@ -539,6 +562,7 @@ export class SystemMapEditor extends EditorPane {
 					this.placeAll();
 				} else if (origin) {
 					this.viewport.classList.add('panning');
+					this.viewMoved = true;
 					this.pan = { x: origin.x + dx, y: origin.y + dy };
 					this.applyView();
 				}
@@ -647,6 +671,7 @@ export class SystemMapEditor extends EditorPane {
 
 	/** Zooms keeping the map point under (x, y) (viewport pixels) where it is. */
 	private zoomAt(factor: number, x: number, y: number): void {
+		this.viewMoved = true;
 		const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, this.scale * factor));
 		const ratio = scale / this.scale;
 		this.pan = { x: x - (x - this.pan.x) * ratio, y: y - (y - this.pan.y) * ratio };
@@ -663,6 +688,7 @@ export class SystemMapEditor extends EditorPane {
 			return;
 		}
 		this.fitted = true;
+		this.viewMoved = false;
 		const margin = 48;
 		const scale = Math.min(1.2, Math.max(MIN_SCALE, Math.min((width - margin * 2) / bounds.width, (height - margin * 2) / bounds.height)));
 		this.scale = scale;

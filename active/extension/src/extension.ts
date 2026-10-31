@@ -4,12 +4,16 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createHash } from 'node:crypto';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, promises as fs, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
+import { DebugRunner } from './debug/debugRunner';
+import { callDebugTool, DEBUG_TOOLS, MCP_SERVER_NAME } from './debug/debugTools';
+import { RunningMcpServer, startMcpServer } from './debug/mcpServer';
+import { VscodeDebugBackend } from './debug/vscodeDebugBackend';
 import { DiagramAgent } from './diagram/diagramAgent';
 import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
@@ -142,6 +146,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		log,
 	});
 
+	// The coding agent's debugger: an MCP server only the coding host is given (so the explainer and the diagram
+	// agent never get it). Commands run under VS Code's debugger, hidden from the developer's debug UI.
+	const debugBackend = new VscodeDebugBackend(folder);
+	context.subscriptions.push(debugBackend);
+	const debugRunner = new DebugRunner({
+		backend: debugBackend,
+		workspaceRoot: root,
+		fileExists: async file => (await fs.stat(file).then(stat => stat.isFile(), () => false)),
+		directoryExists: async dir => (await fs.stat(dir).then(stat => stat.isDirectory(), () => false)),
+		log: line => log(line),
+	});
+	context.subscriptions.push({ dispose: () => void debugRunner.stopAll() });
+	const debugToolsOn = () => config<boolean>('debug.agentTools', true);
+	let debugServer: Promise<RunningMcpServer | undefined> | undefined;
+	const debugMcpServer = () => debugServer ??= startMcpServer({
+		name: MCP_SERVER_NAME,
+		version: String(context.extension.packageJSON.version ?? '0'),
+		tools: DEBUG_TOOLS,
+		call: async (name, args) => debugToolsOn() ? callDebugTool(debugRunner, name, args) : { text: 'The developer has turned the debugger off in Active\'s settings. Continue without it.', isError: true },
+		log,
+	}).then(server => {
+		context.subscriptions.push({ dispose: () => void server.close() });
+		return server;
+	}, error => {
+		log(`debug tools unavailable: couldn't start the MCP server: ${error instanceof Error ? error.message : String(error)}`);
+		return undefined;
+	});
+	/** Whether the running coding host was given the debug tools. */
+	let codingHostHasDebugTools = false;
+
 	// Both sessions run in the project; the explanation one under a read-only permission profile.
 	const startHost = async (role: 'coding' | 'explanation') => {
 		const bin = setup.locate();
@@ -149,7 +183,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			throw new Error(`${provider.displayName} is not installed.`);
 		}
 		try {
-			return await provider.startHost(bin, { role, cwd: root, env: await setup.agentEnv(), log: line => log(`[${provider.id}] ${line}`) });
+			const env = await setup.agentEnv();
+			const server = role === 'coding' && debugToolsOn() ? await debugMcpServer() : undefined;
+			if (role === 'coding') {
+				codingHostHasDebugTools = !!server;
+			}
+			// Muse takes secrets in `-c` settings only from the environment, so the token travels there.
+			const codingArgs = server ? ['-c', `mcpServers.${MCP_SERVER_NAME}=${JSON.stringify({ transport: 'streamable_http', url: server.url, headers: { Authorization: '${ACTIVE_MCP_AUTH}' }, mode: 'optional' })}`] : [];
+			return await provider.startHost(bin, { role, cwd: root, env: server ? { ...env, ACTIVE_MCP_AUTH: `Bearer ${server.token}` } : env, log: line => log(`[${provider.id}] ${line}`), codingArgs });
 		} catch (error) {
 			throw new Error(`Could not start ${provider.displayName} (${bin}): ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -173,6 +214,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		// The explainer's own memory: personal notes follow the developer across folders, project notes stay with this one.
 		memory: new ExplainerMemory({ personal: path.join(storage, 'explainer-memory.json'), project: path.join(storage, 'explainer-memory', `${workspaceKey}.json`) }),
 		explanationsEnabled: () => config<string>('explain.mode', 'auto') !== 'off' && config<string>('features', 'both') !== 'diagrams',
+		debugTools: {
+			available: () => debugToolsOn() && codingHostHasDebugTools,
+			suggestWhenStuck: () => config<boolean>('debug.suggestWhenStuck', true),
+			stopAll: () => debugRunner.stopAll(),
+		},
 		onDiagramCheckpoint: snapshot => void diagram?.checkpoint(snapshot).catch(error => log(`diagram checkpoint failed: ${error}`)),
 		profile: () => profile,
 		systemMap: async version => version === undefined ? (await diagram?.state())?.current?.map : (await diagram?.revision(version))?.map,

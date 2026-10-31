@@ -72,6 +72,8 @@ export interface AgentSession {
 	accountSummary?(): Promise<string | undefined>;
 	/** Stops a running turn, when the provider supports it. */
 	interruptTurn?(turnId: string): Promise<void>;
+	/** Adds a message to the running turn `turnId` (the agent reads it at its next step), when the provider supports it. */
+	steer?(turnId: string, text: string): Promise<void>;
 }
 
 export interface AgentSessionOptions {

@@ -461,6 +461,8 @@ export const enum ActiveSetting {
 	ExplainMode = 'active.explain.mode',
 	/** What Active does around the coding agent: walkthroughs, the system map, or both. */
 	Features = 'active.features',
+	DebugAgentTools = 'active.debug.agentTools',
+	DebugSuggestWhenStuck = 'active.debug.suggestWhenStuck',
 	DiagramCheckMinutes = 'active.diagram.checkMinutes',
 }
 

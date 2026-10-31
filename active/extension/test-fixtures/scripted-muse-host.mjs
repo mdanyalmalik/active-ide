@@ -34,6 +34,10 @@ if (!scenarioPath) {
 }
 const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8'));
 const speed = Number(process.env.ACTIVE_SCRIPTED_SPEED ?? '1');
+// Tests of the coding agent's debug tools: record the MCP server Active gave this host, so a probe can call it.
+if (process.env.ACTIVE_SCRIPTED_MCP_FILE && process.argv.some(arg => arg.startsWith('mcpServers.'))) {
+	writeFileSync(process.env.ACTIVE_SCRIPTED_MCP_FILE, JSON.stringify({ args: process.argv.slice(2), auth: process.env.ACTIVE_MCP_AUTH ?? null }));
+}
 
 let cursor = 0;
 const nextCursor = () => `v1:scripted:${++cursor}`;
