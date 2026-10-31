@@ -178,3 +178,71 @@ export class SystemMapInput extends EditorInput {
 		return other instanceof SystemMapInput;
 	}
 }
+
+/**
+ * The Code Trace tab: one tab with its own question box and history, showing one trace at a time (how a behavior
+ * flows through the code, step by step, and what running it showed), or the history when none is picked.
+ */
+export class TraceInput extends EditorInput {
+	static readonly ID = 'workbench.input.activeTrace';
+
+	private readonly _onDidChangeSelection = this._register(new Emitter<void>());
+	readonly onDidChangeSelection = this._onDidChangeSelection.event;
+	private title = '';
+
+	constructor(private selected?: string) {
+		super();
+	}
+
+	override get typeId(): string {
+		return TraceInput.ID;
+	}
+
+	override get resource(): URI {
+		return URI.from({ scheme: 'active', path: '/trace' });
+	}
+
+	override get capabilities(): EditorInputCapabilities {
+		return EditorInputCapabilities.Readonly | EditorInputCapabilities.Singleton;
+	}
+
+	/** The trace on show, or none for the history. */
+	get traceId(): string | undefined {
+		return this.selected;
+	}
+
+	select(traceId: string | undefined): void {
+		if (traceId !== this.selected) {
+			this.selected = traceId;
+			this.setTitle('');
+			this._onDidChangeSelection.fire();
+		}
+	}
+
+	setTitle(title: string): void {
+		if (title !== this.title) {
+			this.title = title;
+			this._onDidChangeLabel.fire();
+		}
+	}
+
+	override getName(): string {
+		return localize('codeTrace', "Code Trace");
+	}
+
+	override getDescription(): string {
+		return this.title;
+	}
+
+	override getTitle(): string {
+		return this.title ? localize('codeTraceTitle', "Code Trace — {0}", this.title) : this.getName();
+	}
+
+	override getIcon(): ThemeIcon {
+		return Codicon.debugAlt;
+	}
+
+	override matches(other: EditorInput | IUntypedEditorInput): boolean {
+		return other instanceof TraceInput;
+	}
+}

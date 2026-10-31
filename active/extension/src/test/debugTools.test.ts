@@ -8,6 +8,7 @@ import { describe, test } from 'node:test';
 import { BackendSession, BreakpointSpec, DebugBackend, DebugBackendEvent, DebugRunner } from '../debug/debugRunner';
 import { callDebugTool, DEBUG_TOOLS, describeDebugCall } from '../debug/debugTools';
 import { startMcpServer } from '../debug/mcpServer';
+import type { LaunchPlan, Toolchain } from '../debug/languages';
 import { debuggerSuggestion, stuckReason } from '../debug/stuck';
 import type { ToolOutcome } from '../shared/activeProtocol';
 
@@ -18,7 +19,7 @@ class FakeBackend implements DebugBackend {
 	developerDebugging = false;
 	added: BreakpointSpec[][] = [];
 	removed = 0;
-	started: Array<{ command: string; cwd: string }> = [];
+	started: Array<{ command: string; cwd: string; language?: string }> = [];
 	stopped = 0;
 	requests: Array<{ target: string; command: string; args: Record<string, unknown> }> = [];
 	emit: ((event: DebugBackendEvent) => void) | undefined;
@@ -34,8 +35,8 @@ class FakeBackend implements DebugBackend {
 		return async () => { this.removed++; };
 	}
 
-	async start(options: { runId: string; command: string; cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession> {
-		this.started.push({ command: options.command, cwd: options.cwd });
+	async start(options: { runId: string; command: string; plan: LaunchPlan; cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession> {
+		this.started.push({ command: options.command, cwd: options.cwd, ...(options.plan.language !== 'javascript' ? { language: options.plan.language } : {}) });
 		this.emit = onEvent;
 		setTimeout(() => this.script(onEvent, this), 0);
 		return {
@@ -51,7 +52,8 @@ class FakeBackend implements DebugBackend {
 	}
 }
 
-const runnerWith = (backend: FakeBackend) => new DebugRunner({ backend, workspaceRoot: ROOT, fileExists: async file => !file.includes('missing'), directoryExists: async dir => dir === ROOT || dir === `${ROOT}/packages/api`, log: () => undefined });
+export const FAKE_TOOLCHAIN: Toolchain = { python: async () => '/usr/bin/python3', dlv: async () => ({ path: '/go/bin/dlv' }), nativeDebugger: () => true, tempDir: async () => '/tmp/active-debug-1' };
+const runnerWith = (backend: FakeBackend) => new DebugRunner({ backend, toolchain: FAKE_TOOLCHAIN, workspaceRoot: ROOT, fileExists: async file => !file.includes('missing'), directoryExists: async dir => dir === ROOT || dir === `${ROOT}/packages/api`, log: () => undefined });
 const logpointMark = (backend: FakeBackend, index: number) => backend.added[0][index].logMessage!.split('#').slice(0, 2).join('#') + '#';
 
 describe('Debug runner: logpoint runs', () => {
@@ -115,13 +117,29 @@ describe('Debug runner: logpoint runs', () => {
 			runner.runWithLogpoints({ logpoints: [{ file: 'src/a.js', line: 1 }] }),
 			runner.runWithLogpoints({ command: 'npm test', logpoints: [{ file: '../elsewhere/a.js', line: 1 }] }),
 			runner.runWithLogpoints({ command: 'npm test', logpoints: [{ file: 'src/missing.js', line: 1 }] }),
-			runner.runWithLogpoints({ command: 'pytest', logpoints: [{ file: 'app/main.py', line: 1 }] }),
+			runner.runWithLogpoints({ command: 'bundle exec rspec', logpoints: [{ file: 'app/main.rb', line: 1 }] }),
 			runner.runWithLogpoints({ command: 'npm test', logpoints: [{ file: 'src/a.js', line: 0 }] }),
 			runner.runWithLogpoints({ command: 'npm test', cwd: '../..', logpoints: [{ file: 'src/a.js', line: 1 }] }),
 		]);
 		assert.deepStrictEqual(refusals.map(result => result.isError), [true, true, true, true, true, true]);
-		assert.match(refusals[3].text, /only JavaScript and TypeScript/);
+		assert.match(refusals[3].text, /works with JavaScript, TypeScript, Python, Go, C, C\+\+ and Rust files, not this one/);
 		assert.deepStrictEqual(backend.started, []);
+	});
+
+	test('each run uses one language\'s debugger: picked from the points\' files, and it must match what the command runs', async () => {
+		const backend = new FakeBackend(emit => emit({ kind: 'terminated' }));
+		const runner = runnerWith(backend);
+		const python = await runner.runWithLogpoints({ command: 'pytest tests/test_limits.py -k retry', logpoints: [{ file: 'app/limits.py', line: 3, message: 'x={x}' }] });
+		const go = await runner.runWithLogpoints({ command: 'go test ./limits -run TestRetry', logpoints: [{ file: 'limits/limits.go', line: 3, message: 'x={x}' }] });
+		const mixed = await runner.runWithLogpoints({ command: 'pytest', logpoints: [{ file: 'app/limits.py', line: 3 }, { file: 'src/a.js', line: 1 }] });
+		const mismatched = await runner.runWithLogpoints({ command: 'npm test', logpoints: [{ file: 'app/limits.py', line: 3 }] });
+		const shell = await runner.runWithLogpoints({ command: 'pytest && echo done', logpoints: [{ file: 'app/limits.py', line: 3 }] });
+		assert.equal(python.isError, undefined);
+		assert.equal(go.isError, undefined);
+		assert.deepStrictEqual(backend.started.map(start => start.language), ['python', 'go']);
+		assert.match(mixed.text, /in Python and JavaScript\/TypeScript files/);
+		assert.match(mismatched.text, /The points are in Python files, but `npm test` runs JavaScript\/TypeScript/);
+		assert.match(shell.text, /needs a shell/);
 	});
 
 	test('a working folder of "null" (as models sometimes send) means the project root; a folder that doesn\'t exist is refused', async () => {

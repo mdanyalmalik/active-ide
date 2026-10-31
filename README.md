@@ -9,7 +9,7 @@ You give Muse Code a task in a chat that fills the work area. The explanation mo
 Requirements: macOS or Linux, git, Python 3.9+ (or `uv`), and about 3 GB of disk space for Code OSS.
 
 ```sh
-scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron, Phonon, Active sources
+scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron, Phonon, debuggers, Active sources
 ```
 
 ### Muse Code (coding and explanation)
@@ -36,6 +36,8 @@ The agent integration is provider-based (`active/extension/src/agents/providers.
 Muse Code is the default (`active.agent.provider: "muse"`). Adding another agent such as Claude or ChatGPT means writing one provider plus a session adapter that implements `AgentHost`/`AgentSession`. The setup flow and every UI label take the provider's name.
 
 ### Phonon 31M (narration)
+
+`scripts/setup-debuggers.sh` downloads the debuggers Active ships, pinned with checksums in `scripts/debuggers.json` (all MIT): debugpy 1.8.21 (the last to support Python 3.8+) into `active/extension/vendor`, and CodeLLDB 1.12.3 for this platform into `vscode/.build/builtInExtensions` (`apply_patches.py` lists it in `product.json`). Delve isn't downloaded: Active runs `go install` for it into its storage on the first Go run.
 
 `scripts/setup-tts.sh` creates `.tools/tts-venv` with Gradium's `ptts` package. On first use, the Apache-2.0 model `gradium/phonon-31m-en` downloads from Hugging Face; after that it runs on the CPU. To use another interpreter, set `active.narration.pythonPath`.
 
@@ -98,7 +100,8 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 - **Quick skips**: pressing Next before half of a scene has been narrated (within 6 seconds of it appearing) is taken as a very slight hint that you already knew its topics; their familiarity moves up a tenth of a step.
 - **History** (the clock icon) lists every turn, including those without walkthroughs. It offers Replay (narration is re-synthesized from the saved script), Details (chat, exposed reasoning summaries, tool outcomes, captured edits, script), Delete, and Delete All. Deleting history never touches project files.
 - **System Map** (**Active: Open System Map**, the floating button, or the link on each update in chat): a separate diagram agent draws the project's components and how they connect. The wheel zooms, dragging pans, and boxes can be dragged. Clicking a box or arrow describes it, lists the code it cites (outlined in Explorer), and offers **Ask About This**, which opens chat set to ask about it. ⌘-click (Ctrl-click) or ⌘-drag picks several boxes and arrows to ask about together. The pencil in a box's or arrow's popup edits its name, summary, description or label in place (saved as a new version at once, and kept by later updates). **Restructure** in the header is for bigger changes: it opens chat set to describe them (split or merge parts, regroup, change the level of detail), and the diagram agent makes the change, still true to the code, and replies with what it did. The pill next to the title shows whether the map is **Auto-updating**, on **Manual updates** (only **Check Now**), or **Updates off**, and clicking it changes that for the folder. Earlier versions are in the History dropdown.
-- **Debugger for the coding agent** (`active.debug.agentTools`, on by default): Muse gets five tools from a small Active MCP server on localhost (token-protected, given only to the coding host). `debug_run_with_logpoints` runs a test with temporary logpoints and returns the values in the order the lines ran, without editing files; `debug_start`, `debug_step`, `debug_evaluate` and `debug_stop` pause at breakpoints to read the stack (async callers included) and variables. Runs use VS Code's built-in JavaScript debugger, hidden from the debug view (a Code OSS patch keeps js-debug's child sessions hidden too), never while you're debugging, and are cleaned up at the end of each turn. When Muse looks stuck (the same test failing twice, three failed runs, or print statements added) Active suggests the debugger once per turn (`active.debug.suggestWhenStuck`). Chat shows the calls in words ("Debugging: ran `npm test` with 2 logpoints"), and their results reach the walkthrough planner as evidence. JavaScript and TypeScript for now.
+- **Debugger for the coding agent** (`active.debug.agentTools`, on by default): Muse gets five tools from a small Active MCP server on localhost (token-protected, given only to the coding host). `debug_run_with_logpoints` runs a test with temporary logpoints and returns the values in the order the lines ran, without editing files; `debug_start`, `debug_step`, `debug_evaluate` and `debug_stop` pause at breakpoints to read the stack (async callers included) and variables. Runs use each language's debugger, hidden from the debug view (a Code OSS patch keeps js-debug's child sessions hidden too), never while you're debugging, and are cleaned up at the end of each turn. When Muse looks stuck (the same test failing twice, three failed runs, or print statements added) Active suggests the debugger once per turn (`active.debug.suggestWhenStuck`). Chat shows the calls in words ("Debugging: ran `npm test` with 2 logpoints"), and their results reach the walkthrough planner as evidence. Languages: JavaScript and TypeScript (VS Code's js-debug), Python (debugpy, shipped in the agent extension and run with the project's own Python or virtual environment), Go (Delve, which Active installs with your Go toolchain the first time it's needed) and C, C++ and Rust (CodeLLDB, shipped as a built-in extension). Outside JavaScript, a command is one plain command (`pytest -k retry`, `go test ./pkg -run TestX`, `cargo test --lib name`, `./build/tests`).
+- **Code traces (preview)** (**Code Trace** in the bottom-right menu): one tab with a question box (and an optional command that runs the path) and the history of past traces. The explainer follows a behavior through the code as steps (checked against the real files), with shapes where the path divides: forks where one path runs depending on a condition (the run shows which was taken; the others are marked not taken), forks where every path runs (several listeners, parallel work), steps that repeat, and paths that end early. Active observes it by running a test, or a small JavaScript or Python driver script the explainer writes (run from a temp folder outside the project), under that language's debugger with a logpoint on each step. The Trace tab shows the steps top to bottom with their code, how each leads to the next, and whether each ran, how often and with what values; a rail lists the steps and follows the scroll. Traces are saved, listed in the history, and the tab comes back after a reload.
 
 ### Settings
 
@@ -142,12 +145,13 @@ demo/                           sample project + scripted scenarios for the test
   - add a filter to the file decorations service (`registerDecorationsFilter`), so the Explorer's "Agent" mode can hide git's change decorations in the Explorer, tabs and breadcrumbs
   - expose the Explorer's tree (`ExplorerView.activeTree`) and a row's position (`AsyncDataTree.getElementTop`), so a walkthrough can outline the file it's showing and open the folders on the way
   - keep the coding agent's hidden debug sessions hidden: js-debug's child sessions inherit `suppressDebugView`/`Toolbar`/`Statusbar` from their parent, and a hidden session never opens the Debug Console or takes focus when it pauses
+  - allow Active's code colouring (`activeCodeTokenizer`) in the workbench's trusted-types list
   - branding, including the app icon (`python3 active/branding/build_icon.py` builds `icon.svg`, `Active.icns` and `icon-512.png` from `source.svg`)
 
 ## Tests
 
 ```sh
-cd active/extension && npm test       # 106 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, the diagram agent, the debug tools, flows)
+cd active/extension && npm test       # 124 tests (extension: prompts, notes, memory, explainer queue, git and agent change counts, the diagram agent, the debug tools and languages, code traces, flows)
 scripts/sync.sh && (cd vscode && npm run build-fast -- --client-only && \
   VSCODE_SKIP_PRELAUNCH=1 ./scripts/test.sh --run src/vs/workbench/contrib/active/test/browser/walkthroughPlayer.test.ts \
   --run src/vs/workbench/contrib/active/test/browser/decorationsFilter.test.ts \

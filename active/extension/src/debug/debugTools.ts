@@ -17,9 +17,9 @@ export const MCP_SERVER_NAME = 'active';
 /** Muse's names for these tools start with this. */
 export const DEBUG_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__debug_`;
 
-const COMMAND = { type: 'string', description: 'The shell command that runs the code, usually a single test, e.g. "npm test -- test/limits.test.js" or "node --test test/limits.test.js". Run as narrow a test as you can.' };
+const COMMAND = { type: 'string', description: 'The command that runs the code, usually a single test: e.g. "npm test -- test/limits.test.js" (JavaScript/TypeScript, any shell command), "pytest tests/test_limits.py -k retry" or "python -m app.cli" (Python), "go test ./internal/limits -run TestRetry" (Go, one package), "cargo test --lib retry" or a built program like "./build/tests" (C, C++, Rust). Outside JavaScript it must be one plain command (no pipes or &&). Run as narrow a test as you can.' };
 const CWD = { type: 'string', description: 'Directory to run it in, relative to the project root. Defaults to the project root.' };
-const FILE = { type: 'string', description: 'Path relative to the project root (JavaScript or TypeScript).' };
+const FILE = { type: 'string', description: 'Path relative to the project root (a JavaScript, TypeScript, Python, Go, C, C++ or Rust file; all points in one run in the same language).' };
 const LINE = { type: 'integer', minimum: 1, description: '1-based line number. Pick a line with a statement on it.' };
 const TIMEOUT = { type: 'number', description: 'Seconds to wait before giving up (default 60, at most 300).' };
 const SESSION = { type: 'string', description: 'The session id debug_start returned.' };
@@ -33,10 +33,10 @@ export const DEBUG_TOOLS: readonly McpTool[] = [
 		name: 'debug_run_with_logpoints',
 		description: [
 			'Run a command (usually a failing test) under the debugger with temporary logpoints, and get back what each logpoint printed, in the order the lines actually ran, plus how often each ran and the program\'s output.',
-			'Use this instead of adding console.log or print statements: it shows real runtime values without editing any files, so there is nothing to clean up afterwards.',
+			'Use this instead of adding console.log, print or printf statements: it shows real runtime values without editing any files, so there is nothing to clean up afterwards.',
 			'Reach for it when a test fails and the cause isn\'t obvious from the error, when a fix didn\'t work, when you\'ve run the same test more than once without learning why it fails, or when you\'re unsure which path the code takes.',
 			'Each message can include expressions in braces, e.g. "retries={retries} wait={opts.wait}". Only read values in them; don\'t call functions with side effects.',
-			'JavaScript and TypeScript only for now. Not available while the developer is debugging.',
+			'Works with JavaScript, TypeScript, Python, Go, C, C++ and Rust. Not available while the developer is debugging.',
 		].join(' '),
 		inputSchema: {
 			type: 'object',
@@ -68,7 +68,7 @@ export const DEBUG_TOOLS: readonly McpTool[] = [
 		description: [
 			'Start a command under the debugger and pause at the first breakpoint it reaches. Returns where it paused, the call stack (including the async callers that scheduled it) and the local variables.',
 			'Use it when you need to look around at a specific moment: read several values, follow a call step by step, or find out who called something. For most questions debug_run_with_logpoints is quicker.',
-			'One session at a time; stop it with debug_stop when you\'re done. JavaScript and TypeScript only for now. Not available while the developer is debugging.',
+			'One session at a time; stop it with debug_stop when you\'re done. Works with JavaScript, TypeScript, Python, Go, C, C++ and Rust. Not available while the developer is debugging.',
 		].join(' '),
 		inputSchema: {
 			type: 'object',

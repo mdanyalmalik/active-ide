@@ -59,6 +59,24 @@
 					]
 				}
 			}
-		}
+		},
+		"debuggers": [
+			{
+				"type": "active-python",
+				"label": "Python (Active)",
+				"languages": [
+					"python"
+				],
+				"hiddenWhen": "true"
+			},
+			{
+				"type": "active-go",
+				"label": "Go (Active)",
+				"languages": [
+					"go"
+				],
+				"hiddenWhen": "true"
+			}
+		]
 	}
 }

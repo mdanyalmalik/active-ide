@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as path from 'node:path';
+import { DEBUG_LANGUAGE_NAMES, DebugLanguage, languageOfCommand, languageOfFile, LaunchPlan, planLaunch, SUPPORTED_LANGUAGES_TEXT, Toolchain } from './languages';
 
 /** What the debugger reports about a run, from the debug adapter's events. `target` is the (child) session it came from. */
 export type DebugBackendEvent =
@@ -34,12 +35,13 @@ export interface DebugBackend {
 	developerIsDebugging(): boolean;
 	/** Adds the breakpoints; resolves with a function that removes exactly these again. */
 	addBreakpoints(points: readonly BreakpointSpec[]): Promise<() => Promise<void>>;
-	/** Runs `command` in `cwd` under the debugger, reporting its events. */
-	start(options: { readonly runId: string; readonly command: string; readonly cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession>;
+	/** Runs `command` in `cwd` under its language's debugger (as `plan` says), reporting its events. */
+	start(options: { readonly runId: string; readonly command: string; readonly plan: LaunchPlan; readonly cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession>;
 }
 
 export interface DebugRunnerOptions {
 	readonly backend: DebugBackend;
+	readonly toolchain: Toolchain;
 	readonly workspaceRoot: string;
 	readonly fileExists: (absolute: string) => Promise<boolean>;
 	readonly directoryExists: (absolute: string) => Promise<boolean>;
@@ -52,8 +54,6 @@ export interface DebugToolResult {
 	readonly isError?: boolean;
 }
 
-/** Files the built-in JavaScript debugger can set breakpoints in. Other languages need their own debug adapter (not wired up yet). */
-const SUPPORTED_FILE = /\.(?:[cm]?[jt]sx?)$/i;
 const MAX_LOGPOINTS = 20;
 const DEFAULT_MAX_HITS = 20;
 const MAX_LOG_LINES = 200;
@@ -62,8 +62,11 @@ const DEFAULT_TIMEOUT_S = 60;
 const MAX_TIMEOUT_S = 300;
 /** An interactive session left alone this long is stopped. */
 const IDLE_LIMIT_MS = 3 * 60_000;
-/** Lines the debugger itself prints into the program's output (attaching, its bootloader, the launch line). */
-const DEBUGGER_NOISE = /^(?:Debugger attached\.|Debugger listening on |Waiting for the debugger to disconnect|For help, see: https:\/\/nodejs\.org\/en\/docs\/inspector|Error in the js-debug bootloader|js-debug\/|\(node:\d+\) Warning: Using the inspector with --test|\(Use `node --trace-warnings)/;
+/**
+ * Lines the debuggers themselves print into the program's output: js-debug (attaching, its bootloader), CodeLLDB
+ * (its console, launching), Delve (building, its prompt).
+ */
+const DEBUGGER_NOISE = /^(?:Debugger attached\.|Debugger listening on |Waiting for the debugger to disconnect|For help, see: https:\/\/nodejs\.org\/en\/docs\/inspector|Error in the js-debug bootloader|js-debug\/|\(node:\d+\) Warning: Using the inspector with --test|\(Use `node --trace-warnings|Console is in 'commands' mode|Launching: |Launched process \d+|Process exited with code|Type 'dlv help'|Building (?:tests of|binary)|Detaching and terminating target process|dlv dap)/;
 /** Marks logpoint output so it can be told apart from the program's own. */
 const MARK = '⁣ACTIVE#';
 
@@ -116,21 +119,56 @@ export class DebugRunner {
 				return error(`Logpoint ${index + 1}: ${checked}`);
 			}
 			const maxHits = typeof point.maxHits === 'number' && point.maxHits > 0 ? Math.min(100, Math.floor(point.maxHits)) : DEFAULT_MAX_HITS;
-			points.push({ file: checked.file, line: checked.line, logMessage: `${MARK}${index}#${message}`, maxHits });
-		}
-		const refused = this.refusal();
-		if (refused) {
-			return refused;
-		}
-		const cwd = await this.resolveCwd(args.cwd);
-		if (typeof cwd !== 'string') {
-			return cwd;
+			points.push({ file: checked.file, line: checked.line, logMessage: message, maxHits });
 		}
 		const started = this.now();
 		const timeoutMs = timeout(args.timeoutSeconds);
+		const run = await this.observe(command, args.cwd, points, timeoutMs);
+		if ('error' in run) {
+			return run.error;
+		}
+		const { hits, timedOut, output, exitCode } = run;
+		const seconds = ((this.now() - started) / 1000).toFixed(1);
+		const lines = [timedOut
+			? `Ran \`${command}\` under the debugger and stopped it after ${Math.round(timeoutMs / 1000)}s (time limit).`
+			: `Ran \`${command}\` under the debugger (${exitCode === undefined ? 'finished' : `exit code ${exitCode}`}, ${seconds}s).`];
+		if (hits.length) {
+			lines.push('', 'Logpoints hit, in the order the lines ran:');
+			hits.forEach((hit, order) => lines.push(`${order + 1}. ${points[hit.index] ? `${points[hit.index].file}:${points[hit.index].line}` : '?'}  ${hit.text}`));
+			if (hits.length >= MAX_LOG_LINES) {
+				lines.push(`(stopped listing after ${MAX_LOG_LINES} lines)`);
+			}
+		} else {
+			lines.push('', 'No logpoint was hit.');
+		}
+		const missed = points.filter((_, index) => !hits.some(hit => hit.index === index));
+		if (missed.length && hits.length) {
+			lines.push('', `Never hit: ${missed.map(point => `${point.file}:${point.line}`).join(', ')}`);
+		}
+		if (output.length) {
+			lines.push('', `Program output (last ${output.length} lines):`, ...output);
+		}
+		return { text: lines.join('\n') };
+	}
+
+	/**
+	 * Runs `command` with logpoints (`logMessage` is what each prints) and collects what they printed, in order,
+	 * with the program's own output. For the debug tools and for code traces; refuses like they do.
+	 */
+	async observe(command: string, cwdArg: unknown, logpoints: readonly BreakpointSpec[], timeoutMs: number): Promise<{ hits: Array<{ index: number; text: string }>; output: string[]; exitCode?: number; timedOut: boolean } | { error: DebugToolResult }> {
+		const refused = this.refusal();
+		if (refused) {
+			return { error: refused };
+		}
+		const cwd = await this.resolveCwd(cwdArg);
+		if (typeof cwd !== 'string') {
+			return { error: cwd };
+		}
+		const points = logpoints.map((point, index) => ({ ...point, logMessage: `${MARK}${index}#${point.logMessage ?? 'hit'}`, maxHits: point.maxHits ?? DEFAULT_MAX_HITS }));
+		const started = this.now();
 		const open = await this.begin(command, cwd, points);
 		if (!open.ok) {
-			return open.result;
+			return { error: open.result };
 		}
 		const session = open.session;
 		const hits: Array<{ index: number; text: string }> = [];
@@ -165,27 +203,12 @@ export class DebugRunner {
 		} finally {
 			await this.end(session);
 		}
-		const seconds = ((this.now() - started) / 1000).toFixed(1);
-		const lines = [timedOut
-			? `Ran \`${command}\` under the debugger and stopped it after ${Math.round(timeoutMs / 1000)}s (time limit).`
-			: `Ran \`${command}\` under the debugger (${session.exitCode === undefined ? 'finished' : `exit code ${session.exitCode}`}, ${seconds}s).`];
-		if (hits.length) {
-			lines.push('', 'Logpoints hit, in the order the lines ran:');
-			hits.forEach((hit, order) => lines.push(`${order + 1}. ${points[hit.index] ? `${points[hit.index].file}:${points[hit.index].line}` : '?'}  ${hit.text}`));
-			if (hits.length >= MAX_LOG_LINES) {
-				lines.push(`(stopped listing after ${MAX_LOG_LINES} lines)`);
-			}
-		} else {
-			lines.push('', 'No logpoint was hit.');
-		}
-		const missed = points.filter((_, index) => !hits.some(hit => hit.index === index));
-		if (missed.length && hits.length) {
-			lines.push('', `Never hit: ${missed.map(point => `${point.file}:${point.line}`).join(', ')}`);
-		}
-		if (session.output.length) {
-			lines.push('', `Program output (last ${session.output.length} lines):`, ...session.output);
-		}
-		return { text: lines.join('\n') };
+		return { hits, output: session.output, timedOut, ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}) };
+	}
+
+	/** Checks a breakpoint location like the tools do: inside the project, a supported language, an existing file. */
+	checkPoint(file: unknown, line: unknown): Promise<{ file: string; line: number } | string> {
+		return this.checkLocation(file, line);
 	}
 
 	/** Starts a command under the debugger and waits for the first breakpoint to pause it. */
@@ -290,13 +313,21 @@ export class DebugRunner {
 	// ------------------------------------------------------------------ internals
 
 	private async begin(command: string, cwd: string, points: readonly BreakpointSpec[]): Promise<{ ok: true; session: OpenSession } | { ok: false; result: DebugToolResult }> {
+		const language = this.languageOf(command, points);
+		if (!language.ok) {
+			return { ok: false, result: error(language.reason) };
+		}
+		const plan = await planLaunch(language.language, command, cwd, this.options.toolchain);
+		if (typeof plan === 'string') {
+			return { ok: false, result: error(`Can't run \`${command}\` under the ${DEBUG_LANGUAGE_NAMES[language.language]} debugger: ${plan}`) };
+		}
 		const id = `d${this.nextId++}`;
 		let removeBreakpoints: () => Promise<void> = async () => undefined;
 		try {
 			removeBreakpoints = await this.options.backend.addBreakpoints(points);
 			const pending: DebugBackendEvent[] = [];
 			let holder: OpenSession | undefined;
-			const session = await this.options.backend.start({ runId: id, command, cwd }, event => {
+			const session = await this.options.backend.start({ runId: id, command, plan, cwd }, event => {
 				const target = holder;
 				if (!target) {
 					pending.push(event);
@@ -316,6 +347,20 @@ export class DebugRunner {
 			await removeBreakpoints().catch(() => undefined);
 			return { ok: false, result: error(`The debugger couldn't start \`${command}\`: ${message(failure)}`) };
 		}
+	}
+
+	/** One debugger per run: the language of the files with breakpoints, or else the one the command runs. */
+	private languageOf(command: string, points: readonly BreakpointSpec[]): { ok: true; language: DebugLanguage } | { ok: false; reason: string } {
+		const languages = [...new Set(points.map(point => languageOfFile(point.file)).filter((language): language is DebugLanguage => !!language))];
+		if (languages.length > 1) {
+			return { ok: false, reason: `One run uses one language's debugger, but these points are in ${languages.map(language => DEBUG_LANGUAGE_NAMES[language]).join(' and ')} files. Use points in one language per run.` };
+		}
+		const fromCommand = languageOfCommand(command);
+		const language = languages[0] ?? fromCommand ?? 'javascript';
+		if (fromCommand && fromCommand !== language) {
+			return { ok: false, reason: `The points are in ${DEBUG_LANGUAGE_NAMES[language]} files, but \`${command}\` runs ${DEBUG_LANGUAGE_NAMES[fromCommand]}. Give a command that runs that code.` };
+		}
+		return { ok: true, language };
 	}
 
 	private receive(session: OpenSession, event: DebugBackendEvent): void {
@@ -496,8 +541,8 @@ export class DebugRunner {
 		if (relative.startsWith('..') || path.isAbsolute(relative)) {
 			return `${file} is outside the project.`;
 		}
-		if (!SUPPORTED_FILE.test(relative)) {
-			return `${relative}: only JavaScript and TypeScript files can be debugged so far.`;
+		if (!languageOfFile(relative)) {
+			return `${relative}: Active's debugger works with ${SUPPORTED_LANGUAGES_TEXT} files, not this one.`;
 		}
 		if (!(await this.options.fileExists(absolute))) {
 			return `${relative} doesn't exist.`;

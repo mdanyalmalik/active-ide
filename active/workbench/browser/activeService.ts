@@ -27,8 +27,8 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, MapSelection, SystemMapTextEdit, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
-import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput } from './activeInputs.js';
+import { ActiveEvent, CodeTrace, MapSelection, SystemMapTextEdit, TraceRequest, TraceSummary, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput, TraceInput } from './activeInputs.js';
 import { ClipOutcome, ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
 import { PlaybackPosition, WalkthroughPlayer } from './walkthroughPlayer.js';
@@ -257,6 +257,18 @@ export interface IActiveService {
 	readonly diagram: DiagramState;
 	readonly onDidChangeDiagram: Event<void>;
 	openSystemMap(): Promise<void>;
+	/** Opens the Code Trace tab (on a trace, when given). */
+	openTraces(traceId?: string): Promise<void>;
+	/** Starts a code trace and shows it in the Code Trace tab, which fills in as the trace is made. */
+	startTrace(request: TraceRequest): Promise<void>;
+	/** Past traces, newest first. */
+	traceHistory(): Promise<TraceSummary[]>;
+	deleteTrace(id: string): Promise<void>;
+	/** A trace by id (loaded from where it was saved when it isn't known yet, e.g. after a reload). */
+	trace(id: string): CodeTrace | undefined;
+	loadTrace(id: string): Promise<CodeTrace | undefined>;
+	/** A trace changed (its id). */
+	readonly onDidChangeTrace: Event<string>;
 	buildDiagram(): Promise<void>;
 	updateDiagram(): Promise<void>;
 	diagramRevision(version: number): Promise<SystemMapRevision | undefined>;
@@ -590,6 +602,10 @@ export class ActiveService extends Disposable implements IActiveService {
 				this._diagram = event.state;
 				this._onDidChangeDiagram.fire();
 				break;
+			case 'trace':
+				this.traces.set(event.trace.id, event.trace);
+				this._onDidChangeTrace.fire(event.trace.id);
+				break;
 			case 'chatReset':
 				this._chat.splice(0, this._chat.length, ...event.chat);
 				// A different chat starts clean: no offers, questions or status left over from the last one.
@@ -755,6 +771,55 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	async openSystemMap(): Promise<void> {
 		await this.editorService.openEditor(new SystemMapInput(), { pinned: true, revealIfOpened: true });
+	}
+
+	private readonly traces = new Map<string, CodeTrace>();
+	private readonly _onDidChangeTrace = this._register(new Emitter<string>());
+	readonly onDidChangeTrace = this._onDidChangeTrace.event;
+
+	async openTraces(traceId?: string): Promise<void> {
+		const open = this.editorService.editors.find((editor): editor is TraceInput => editor instanceof TraceInput);
+		const input = open ?? new TraceInput(traceId);
+		if (traceId) {
+			input.select(traceId);
+		}
+		await this.editorService.openEditor(input, { pinned: true, revealIfOpened: true });
+	}
+
+	async startTrace(request: TraceRequest): Promise<void> {
+		const id = await this.commandService.executeCommand<string>(ExtensionCommand.TraceBuild, request);
+		if (id) {
+			await this.openTraces(id);
+		}
+	}
+
+	async traceHistory(): Promise<TraceSummary[]> {
+		await this.initialize();
+		return (await this.commandService.executeCommand<TraceSummary[]>(ExtensionCommand.TraceList).catch(() => undefined)) ?? [];
+	}
+
+	async deleteTrace(id: string): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.TraceDelete, id);
+		this.traces.delete(id);
+		this._onDidChangeTrace.fire(id);
+	}
+
+	trace(id: string): CodeTrace | undefined {
+		return this.traces.get(id);
+	}
+
+	async loadTrace(id: string): Promise<CodeTrace | undefined> {
+		const known = this.traces.get(id);
+		if (known) {
+			return known;
+		}
+		// A tab restored after a reload asks before the agent extension is up: wait for it, as startup does.
+		await this.initialize();
+		const loaded = await this.commandService.executeCommand<CodeTrace | undefined>(ExtensionCommand.TraceGet, id).catch(() => undefined);
+		if (loaded) {
+			this.traces.set(id, loaded);
+		}
+		return loaded;
 	}
 
 	async buildDiagram(): Promise<void> {

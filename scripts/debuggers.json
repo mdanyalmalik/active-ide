@@ -1,0 +1,27 @@
+{
+	"_comment": "Debuggers Active ships for code traces and the coding agent's debug tools (all MIT). setup-debuggers.sh downloads and checks them; apply_patches.py lists CodeLLDB as a built-in extension.",
+	"debugpy": {
+		"version": "1.8.21",
+		"url": "https://files.pythonhosted.org/packages/95/51/67e7cf11a53e40694f720457d5b3a1cdaaa3d5a9a633e482f225456b93ff/debugpy-1.8.21-py2.py3-none-any.whl",
+		"sha256": "b1e37d333663c8851516a47364ef473da127f9caebe4417e6df6f5825a7e9a92"
+	},
+	"codelldb": {
+		"name": "vadimcn.vscode-lldb",
+		"version": "1.12.3",
+		"repo": "https://github.com/vadimcn/codelldb",
+		"urlTemplate": "https://github.com/vadimcn/codelldb/releases/download/v1.12.3/codelldb-{target}.vsix",
+		"sha256": {
+			"darwin-arm64": "2f114a990e1b368dd1dbd33c80c0e719767af2d228391ec0df0571c957f9ac91",
+			"darwin-x64": "e25cc716b94c62c07fec268ff2785d2b797245b160502baef8b9c970a0c4d8e8",
+			"linux-arm64": "0887f67d440554617894266f80706b700907c36b95e6e49d23b95a0e05318101",
+			"linux-armhf": "20294f0ea876a73c662bb09b1814551a859dc77156564b62c75acf1088ecaf30",
+			"linux-x64": "1cd7f386598022b51a5b93b9ffa23e812b23f519cfe1833384ec4bef4bfd1be1",
+			"win32-x64": "a916e509308dac817732f63ca604a8b93ed29cd16f38a2fa9f0b64ed58e8f51a"
+		}
+	},
+	"delve": {
+		"_comment": "Installed on first use with the developer's own Go toolchain (go install), into Active's storage.",
+		"module": "github.com/go-delve/delve/cmd/dlv",
+		"version": "v1.27.2"
+	}
+}

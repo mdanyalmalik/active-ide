@@ -43,7 +43,8 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { ExplorerExtensions, IExplorerFileContributionRegistry } from '../../files/browser/explorerFileContrib.js';
 import { ActiveEvent, ExplainMode, Walkthrough, WORKBENCH_EVENT_COMMAND } from '../common/activeProtocol.js';
-import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput } from './activeInputs.js';
+import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, TraceInput, WalkthroughInput } from './activeInputs.js';
+import { TraceEditor } from './traceEditor.js';
 import { SystemMapEditor } from './systemMapEditor.js';
 import { SystemMapFolderPrompt } from './systemMapPrompt.js';
 import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, ActiveWalkthroughFocus, IActiveService } from './activeService.js';
@@ -70,6 +71,7 @@ editorPanes.registerEditorPane(EditorPaneDescriptor.create(ActiveChatEditor, Act
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(WalkthroughEditor, WalkthroughEditor.ID, localize('walkthroughEditor', "Active Walkthrough")), [new SyncDescriptor(WalkthroughInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(KnowledgeProfileEditor, KnowledgeProfileEditor.ID, localize('profileEditor', "Knowledge Profile")), [new SyncDescriptor(KnowledgeProfileInput)]);
 editorPanes.registerEditorPane(EditorPaneDescriptor.create(SystemMapEditor, SystemMapEditor.ID, localize('systemMapEditor', "System Map")), [new SyncDescriptor(SystemMapInput)]);
+editorPanes.registerEditorPane(EditorPaneDescriptor.create(TraceEditor, TraceEditor.ID, localize('traceEditor', "Code Trace")), [new SyncDescriptor(TraceInput)]);
 
 // Active's tabs come back when the window reloads, like file tabs do.
 class SingletonInputSerializer implements IEditorSerializer {
@@ -119,6 +121,18 @@ editorFactory.registerEditorSerializer(ActiveChatInput.ID, class extends Singlet
 editorFactory.registerEditorSerializer(KnowledgeProfileInput.ID, class extends SingletonInputSerializer { constructor() { super(() => new KnowledgeProfileInput()); } });
 editorFactory.registerEditorSerializer(SystemMapInput.ID, class extends SingletonInputSerializer { constructor() { super(() => new SystemMapInput()); } });
 editorFactory.registerEditorSerializer(WalkthroughInput.ID, WalkthroughInputSerializer);
+editorFactory.registerEditorSerializer(TraceInput.ID, class implements IEditorSerializer {
+	canSerialize(input: EditorInput): boolean { return input instanceof TraceInput; }
+	serialize(input: EditorInput): string | undefined { return input instanceof TraceInput ? JSON.stringify({ id: input.traceId }) : undefined; }
+	deserialize(_instantiationService: IInstantiationService, serialized: string): EditorInput | undefined {
+		try {
+			const { id } = JSON.parse(serialized) as { id?: string };
+			return new TraceInput(typeof id === 'string' ? id : undefined);
+		} catch {
+			return new TraceInput();
+		}
+	}
+});
 
 // ---------------------------------------------------------------- views
 
@@ -429,6 +443,15 @@ registerAction2(class extends Action2 {
 
 registerAction2(class extends Action2 {
 	constructor() {
+		super({ id: ActiveCommandIds.TraceCodePath, title: localize2('openCodeTrace', "Open Code Trace (Preview)"), category, f1: true });
+	}
+	run(accessor: ServicesAccessor): Promise<void> {
+		return accessor.get(IActiveService).openTraces();
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
 		super({ id: ActiveCommandIds.PickCodingModel, title: localize2('pickCodingModel', "Change Coding Agent Model"), category, f1: true });
 	}
 	run(accessor: ServicesAccessor): Promise<void> {
@@ -572,7 +595,8 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 	private modeEntry() {
 		const active = this.editorService.activeEditor;
 		const mode = this.activeService.mode;
-		const name = mode === 'away' ? localize('modeAway', "Away") : mode === 'off' ? localize('modeOff', "Explanations off") : localize('modeAuto', "Auto");
+		// Labelled, since the mode is one of several things the bottom left could be about now.
+		const name = localize('modeLabel', "Explanations: {0}", mode === 'away' ? localize('modeAway', "Away") : mode === 'off' ? localize('modeOff', "Off") : localize('modeAuto', "Auto"));
 		let text = name;
 		if (active instanceof WalkthroughInput) {
 			const player = this.activeService.player;
@@ -632,8 +656,8 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
  */
 /**
  * One round button at the bottom right of the editor. Hovering (or focusing) it opens a small menu upwards:
- * Walkthrough from chat, Chat from a walkthrough, both anywhere else. With one choice, clicking the circle
- * runs it; with two, clicking opens the menu (for touch and keyboard).
+ * System Map, Code Trace, Walkthrough and Chat, each hidden while its own tab is showing. With one choice,
+ * clicking the circle runs it; with more, clicking opens the menu (for touch and keyboard).
  */
 class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.activeFloatingButtons';
@@ -645,6 +669,8 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 	private readonly chat: HTMLButtonElement;
 	private readonly walkthrough: HTMLButtonElement;
 	private readonly map: HTMLButtonElement;
+	private readonly trace: HTMLButtonElement;
+	private readonly icons = new Map<HTMLButtonElement, ThemeIcon>();
 
 	constructor(
 		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
@@ -658,8 +684,9 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this._register(toDisposable(() => this.stack.remove()));
 		this.menu = dom.append(this.stack, dom.$('.active-fab-menu'));
 		this.menu.setAttribute('role', 'menu');
-		// Top to bottom: the system map, then the walkthrough, then chat nearest the circle.
+		// Top to bottom: the system map, code trace, then the walkthrough, then chat nearest the circle.
 		this.map = this.item(Codicon.typeHierarchy, localize('fabSystemMap', "System Map"), () => this.activeService.openSystemMap());
+		this.trace = this.item(Codicon.debugAlt, localize('fabCodeTrace', "Code Trace"), () => this.activeService.openTraces());
 		this.walkthrough = this.item(Codicon.playCircle, localize('fabWalkthrough', "Walkthrough"), () => this.activeService.openRecentWalkthrough());
 		this.chat = this.item(Codicon.commentDiscussion, localize('fabChat', "Chat"), () => this.activeService.openChat(this.editorService.activeEditor instanceof WalkthroughInput));
 		this.main = dom.append(this.stack, dom.$('button.active-fab-main')) as HTMLButtonElement;
@@ -697,6 +724,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		element.setAttribute('role', 'menuitem');
 		dom.append(element, dom.$('span.label')).textContent = label;
 		dom.append(element, dom.$('span.icon')).classList.add(...ThemeIcon.asClassNameArray(icon));
+		this.icons.set(element, icon);
 		this._register(dom.addDisposableListener(element, dom.EventType.CLICK, () => {
 			this.setOpen(false);
 			run();
@@ -705,7 +733,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 	}
 
 	private choices(): HTMLButtonElement[] {
-		return [this.map, this.walkthrough, this.chat].filter(item => !item.classList.contains('hidden'));
+		return [this.map, this.trace, this.walkthrough, this.chat].filter(item => !item.classList.contains('hidden'));
 	}
 
 	private setOpen(open: boolean): void {
@@ -721,6 +749,8 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this.walkthrough.classList.toggle('hidden', onWalkthrough || !!this.activeService.pendingHandoff || !this.activeService.hasRecentWalkthrough);
 		this.map.classList.toggle('hidden', active instanceof SystemMapInput || (!this.activeService.diagramsEnabled && !this.activeService.diagram.current));
 		this.map.title = localize('fabSystemMapTitle', "Open the system map");
+		this.trace.classList.toggle('hidden', active instanceof TraceInput);
+		this.trace.title = localize('fabCodeTraceTitle', "Trace how something flows through the code");
 		const choices = this.choices();
 		// The cascade runs from the item nearest the circle upwards.
 		choices.forEach((item, index) => item.style.setProperty('--active-fab-index', String(choices.length - 1 - index)));
@@ -736,11 +766,12 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 			? localize('fabWalkthroughResume', "Return to the walkthrough: {0}", player.walkthrough.title)
 			: localize('fabWalkthroughLatest', "Open the latest walkthrough");
 		// The circle shows the one thing it leads to, or "more" when there's a choice.
-		const icon = choices.length === 1 ? (choices[0] === this.chat ? Codicon.commentDiscussion : choices[0] === this.map ? Codicon.typeHierarchy : Codicon.playCircle) : Codicon.ellipsis;
+		const icon = choices.length === 1 ? this.icons.get(choices[0]) ?? Codicon.ellipsis : Codicon.ellipsis;
 		this.mainIcon.className = 'icon';
 		this.mainIcon.classList.add(...ThemeIcon.asClassNameArray(icon));
-		this.main.title = choices.length === 1 ? choices[0].title : localize('fabMoreMap', "Chat, walkthrough and system map");
-		this.main.setAttribute('aria-label', choices.length === 1 ? choices[0].textContent ?? '' : localize('fabMoreMapLabel', "Open chat, the walkthrough or the system map"));
+		const names = choices.map(item => item.textContent ?? '').reverse().join(', ');
+		this.main.title = choices.length === 1 ? choices[0].title : names;
+		this.main.setAttribute('aria-label', choices.length === 1 ? choices[0].textContent ?? '' : localize('fabMoreLabel', "Open: {0}", names));
 		this.setOpen(false);
 	}
 }

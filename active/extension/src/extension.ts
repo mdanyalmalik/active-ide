@@ -10,14 +10,17 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentProvider, BridgeProvider, InstallerSpec, MuseProvider } from './agents/providers';
 import { ActiveController } from './controller';
+import { NATIVE_DEBUGGER_EXTENSION, registerDebugAdapters } from './debug/adapters';
 import { DebugRunner } from './debug/debugRunner';
+import { LocalToolchain } from './debug/toolchain';
 import { callDebugTool, DEBUG_TOOLS, MCP_SERVER_NAME } from './debug/debugTools';
 import { RunningMcpServer, startMcpServer } from './debug/mcpServer';
 import { VscodeDebugBackend } from './debug/vscodeDebugBackend';
 import { DiagramAgent } from './diagram/diagramAgent';
+import { TraceBuilder } from './trace/traceBuilder';
 import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, TraceRequest, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
@@ -148,10 +151,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// The coding agent's debugger: an MCP server only the coding host is given (so the explainer and the diagram
 	// agent never get it). Commands run under VS Code's debugger, hidden from the developer's debug UI.
+	// Each language has its own debugger: js-debug (built in), debugpy (vendored here), Delve (installed on first use
+	// with the developer's Go) and CodeLLDB (a built-in extension).
+	context.subscriptions.push(registerDebugAdapters(path.join(context.extensionPath, 'vendor'), log));
 	const debugBackend = new VscodeDebugBackend(folder);
 	context.subscriptions.push(debugBackend);
 	const debugRunner = new DebugRunner({
 		backend: debugBackend,
+		toolchain: new LocalToolchain({ workspaceRoot: root, toolsDir: path.join(storage, 'tools'), nativeDebugger: () => !!vscode.extensions.getExtension(NATIVE_DEBUGGER_EXTENSION), log }),
 		workspaceRoot: root,
 		fileExists: async file => (await fs.stat(file).then(stat => stat.isFile(), () => false)),
 		directoryExists: async dir => (await fs.stat(dir).then(stat => stat.isDirectory(), () => false)),
@@ -286,6 +293,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	register(ExtensionCommand.Init, async () => ({ ...(await active.initialState()), narration: narrator.currentStatus, profile, diagram: await diagramAgent.state() }));
 	register(ExtensionCommand.DiagramBuild, () => diagramAgent.build());
 	register(ExtensionCommand.DiagramUpdate, () => diagramAgent.updateNow());
+	// Code traces: their own read-only session on the explanation host (so they don't wait behind walkthroughs),
+	// observed with the same debug runner as the coding agent's tools.
+	let traceSession: ReturnType<typeof active.createSideAgent> | undefined;
+	const traces = new TraceBuilder({
+		ask: prompt => (traceSession ??= active.createSideAgent()).ask(prompt),
+		root,
+		listFiles: async () => {
+			const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.venv/**,**/__pycache__/**}', 600);
+			return found.map(uri => files.relative(uri.fsPath)).filter((file): file is string => !!file && !isIgnoredPath(file)).sort().slice(0, 400);
+		},
+		readFile: async relative => {
+			const absolute = path.resolve(root, relative);
+			return absolute.startsWith(root + path.sep) ? fs.readFile(absolute, 'utf8').catch(() => undefined) : undefined;
+		},
+		runner: debugRunner,
+		storeDir: path.join(storage, 'traces', workspaceKey),
+		emit: trace => emit({ type: 'trace', trace }),
+		profile: () => profile,
+		log,
+	});
+	register(ExtensionCommand.TraceBuild, (request: TraceRequest) => traces.build(request));
+	register(ExtensionCommand.TraceGet, (id: string) => traces.get(id));
+	register(ExtensionCommand.TraceList, () => traces.list());
+	register(ExtensionCommand.TraceDelete, (id: string) => traces.delete(id));
 	register(ExtensionCommand.DiagramReviseText, (edit: SystemMapTextEdit) => diagramAgent.reviseText(edit));
 	register(ExtensionCommand.DiagramEdit, (request: string) => active.editDiagram(request, text => diagramAgent.edit(text)));
 	register(ExtensionCommand.DiagramRevision, (version: number) => diagramAgent.revision(version));

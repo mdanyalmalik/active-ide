@@ -3,6 +3,7 @@
 vscode/
 active/extension/node_modules/
 active/extension/out/
+active/extension/vendor/
 active/extension/src/shared/
 test-proj/
 .dev/

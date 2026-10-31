@@ -545,6 +545,7 @@ export type ActiveEvent =
 	| { readonly type: 'models'; readonly models: ReadonlyArray<AgentModelInfo> }
 	| { readonly type: 'memory'; readonly notes: ReadonlyArray<MemoryNote> }
 	| { readonly type: 'diagram'; readonly state: DiagramState }
+	| { readonly type: 'trace'; readonly trace: CodeTrace }
 	/** The whole transcript changed (a session was resumed or a new one started). */
 	| { readonly type: 'chatReset'; readonly chat: ReadonlyArray<ChatEntry> };
 
@@ -588,6 +589,14 @@ export const enum ExtensionCommand {
 	DiagramEdit = 'active.ext.diagramEdit',
 	/** The developer edited text on the map themselves (`SystemMapTextEdit`); saved as a new version, no model involved. */
 	DiagramReviseText = 'active.ext.diagramReviseText',
+	/** Traces how a behavior flows through the code (`TraceRequest`); resolves with the trace id at once and reports progress as `trace` events. */
+	TraceBuild = 'active.ext.traceBuild',
+	/** A saved trace by id: `CodeTrace`, or `undefined`. */
+	TraceGet = 'active.ext.traceGet',
+	/** Past traces, newest first: `TraceSummary[]`. */
+	TraceList = 'active.ext.traceList',
+	/** Forgets a saved trace (its id). */
+	TraceDelete = 'active.ext.traceDelete',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
@@ -1185,4 +1194,321 @@ export function parseSystemMap(value: unknown, fileExists: (path: string) => boo
 		return undefined;
 	}
 	return { overview: isString(input.overview, 600) ? input.overview.trim() : '', components, connections };
+}
+
+// ---------------------------------------------------------------------------
+// Code traces
+// ---------------------------------------------------------------------------
+
+/** How one step of a trace leads to the next. */
+export type TraceHopKind = 'call' | 'await' | 'return' | 'callback' | 'event' | 'state' | 'throw' | 'other';
+export const TRACE_HOP_KINDS: readonly TraceHopKind[] = ['call', 'await', 'return', 'callback', 'event', 'state', 'throw', 'other'];
+
+export interface TraceStep {
+	readonly id: string;
+	/** Workspace-relative path. */
+	readonly file: string;
+	readonly startLine: number;
+	readonly endLine: number;
+	/** The function or method it's in, e.g. "ApiClient.request". */
+	readonly symbol?: string;
+	/** One sentence: what happens here. */
+	readonly summary: string;
+	readonly detail?: string;
+	/** How this step leads to the next one (absent on the last). */
+	readonly hop?: { readonly kind: TraceHopKind; readonly label: string };
+	/** Where a logpoint goes to observe this step, and the values it prints. */
+	readonly probe?: { readonly line: number; readonly values: readonly string[] };
+	/** The step runs repeatedly on this path, e.g. "once per retry" or "for each listener". */
+	readonly repeats?: string;
+	/** The step is on one path of a fork (`forks`), not the main line. */
+	readonly branch?: { readonly fork: string; readonly path: number };
+}
+
+/**
+ * Where the path divides. `either`: one of the paths runs, depending on a condition (if/else, switch, try/catch,
+ * an early return). `all`: every path runs (several listeners for one event, Promise.all, fan-out). A fork's steps
+ * sit together in `steps`, path by path, right after the step before the fork; the main line continues after them.
+ */
+export interface TraceFork {
+	readonly id: string;
+	readonly kind: 'either' | 'all';
+	/** What decides it, or what fans out, e.g. "on the response status" or "the 'saved' event's listeners". */
+	readonly label: string;
+	readonly paths: ReadonlyArray<{
+		readonly label: string;
+		/** The flow ends on this path instead of continuing after the fork, e.g. "throws to the caller". */
+		readonly ends?: string;
+	}>;
+}
+
+/** How a step fared in the run: ran, its line never ran, on a fork path that wasn't taken, or not observed. */
+export type TraceStepState = 'observed' | 'notReached' | 'notTaken' | 'inferred';
+
+/**
+ * Each step's state from the observation. On an `either` fork, when some path ran, the steps of the paths that
+ * didn't run weren't taken (that's expected, not a miss).
+ */
+export function traceStepStates(trace: Pick<CodeTrace, 'steps' | 'forks' | 'observation'>): Record<string, TraceStepState> {
+	const seen = trace.observation?.outcome !== 'failed' ? trace.observation?.steps : undefined;
+	const states: Record<string, TraceStepState> = {};
+	for (const step of trace.steps) {
+		const observed = seen?.[step.id];
+		states[step.id] = !observed ? 'inferred' : observed.hits > 0 ? 'observed' : 'notReached';
+	}
+	for (const fork of trace.forks ?? []) {
+		if (fork.kind !== 'either') {
+			continue;
+		}
+		const pathRan = fork.paths.map((_, index) => trace.steps.some(step => step.branch?.fork === fork.id && step.branch.path === index && states[step.id] === 'observed'));
+		if (pathRan.some(Boolean)) {
+			for (const step of trace.steps) {
+				if (step.branch?.fork === fork.id && !pathRan[step.branch.path] && states[step.id] === 'notReached') {
+					states[step.id] = 'notTaken';
+				}
+			}
+		}
+	}
+	return states;
+}
+
+/** The code of a step as it was when the trace was made (`lines[0]` is line `firstLine`). */
+export interface TraceSnippet {
+	readonly firstLine: number;
+	readonly lines: readonly string[];
+	readonly languageId?: string;
+}
+
+/** What running the code showed about one step. */
+export interface TraceStepObservation {
+	readonly hits: number;
+	/** Position of its first hit among all steps' first hits (0 = ran first), when it ran. */
+	readonly order?: number;
+	/** What its logpoint printed, first few hits. */
+	readonly values: readonly string[];
+}
+
+export interface TraceObservation {
+	/** What was run: a test command, or a driver script the explainer wrote (shown in full). */
+	readonly command: string;
+	readonly script?: string;
+	readonly why?: string;
+	readonly ranAt: number;
+	readonly outcome: 'ran' | 'timedOut' | 'failed';
+	/** Why it couldn't run (`failed`). */
+	readonly error?: string;
+	readonly steps: Readonly<Record<string, TraceStepObservation>>;
+	/** The steps that ran, in the order they first ran, differ from the order the trace shows. */
+	readonly orderDiffers: boolean;
+	readonly output: readonly string[];
+}
+
+export type TraceStatus = 'tracing' | 'observing' | 'ready' | 'failed';
+
+export interface CodeTrace {
+	readonly id: string;
+	readonly question: string;
+	readonly createdAt: number;
+	readonly status: TraceStatus;
+	/** What's happening, or why it failed. */
+	readonly detail?: string;
+	readonly title: string;
+	readonly overview: string;
+	readonly steps: readonly TraceStep[];
+	/** Where the path divides (absent: it's one line). */
+	readonly forks?: readonly TraceFork[];
+	readonly snippets: Readonly<Record<string, TraceSnippet>>;
+	readonly observation?: TraceObservation;
+}
+
+/** A past trace in the history list. */
+export interface TraceSummary {
+	readonly id: string;
+	readonly question: string;
+	readonly title: string;
+	readonly createdAt: number;
+	readonly status: TraceStatus;
+	/** For a ready trace: whether running it confirmed the path (`observed`), or it's from the source alone. */
+	readonly evidence?: 'observed' | 'inferred';
+}
+
+export function summarizeTrace(trace: CodeTrace): TraceSummary {
+	const observed = trace.observation && trace.observation.outcome !== 'failed';
+	return { id: trace.id, question: trace.question, title: trace.title, createdAt: trace.createdAt, status: trace.status, ...(trace.status === 'ready' ? { evidence: observed ? 'observed' as const : 'inferred' as const } : {}) };
+}
+
+export interface TraceRequest {
+	readonly question: string;
+	/** A command to observe it with (otherwise the explainer suggests one, or writes a driver script). */
+	readonly command?: string;
+	/** Don't run anything: the trace stays inferred from the source. */
+	readonly noRun?: boolean;
+}
+
+/** How the explainer proposes running the path: an existing test (`command`) or a small driver script. */
+export interface TraceRunPlan {
+	readonly command?: string;
+	readonly script?: string;
+	/** The driver script's language (JavaScript when not given). */
+	readonly language?: 'javascript' | 'python';
+	readonly why?: string;
+}
+
+const TRACE_MAX_STEPS = 24;
+const TRACE_MAX_FORK_PATHS = 4;
+const TRACE_MAX_PATH_STEPS = 6;
+
+/**
+ * Checks a trace from the explainer: steps cite files that exist, with real line ranges (at most 40 lines);
+ * probes sit inside their step and only read values; forks have 2 to 4 paths of up to 6 steps, one level deep.
+ * `lineCount` gives a file's length (`undefined`: missing). Bad steps are dropped with an error each; probes that
+ * don't fit are dropped silently.
+ */
+export function parseCodeTrace(value: unknown, lineCount: (path: string) => number | undefined, errors: string[]): { title: string; overview: string; steps: TraceStep[]; forks: TraceFork[]; run?: TraceRunPlan } | undefined {
+	if (!isObject(value)) {
+		errors.push('the reply is not a JSON object');
+		return undefined;
+	}
+	const steps: TraceStep[] = [];
+	const forks: TraceFork[] = [];
+	const parseStep = (entry: unknown, where: string, branch?: TraceStep['branch']): TraceStep | undefined => {
+		if (!isObject(entry)) {
+			errors.push(`${where} is not an object`);
+			return undefined;
+		}
+		const file = isString(entry.file, 400) ? entry.file.trim().replace(/^\.\//, '') : '';
+		const lines = file ? lineCount(file) : undefined;
+		if (lines === undefined) {
+			errors.push(`${where}.file: ${file || '(missing)'} doesn't exist`);
+			return undefined;
+		}
+		const start = typeof entry.startLine === 'number' ? Math.floor(entry.startLine) : NaN;
+		const end = typeof entry.endLine === 'number' ? Math.floor(entry.endLine) : start;
+		if (!(start >= 1 && end >= start && end <= lines)) {
+			errors.push(`${where}: lines ${entry.startLine}-${entry.endLine} aren't in ${file} (it has ${lines} lines)`);
+			return undefined;
+		}
+		if (end - start > 40) {
+			errors.push(`${where}: ${end - start + 1} lines is too long for one step (at most 40)`);
+			return undefined;
+		}
+		if (!isString(entry.summary, 400) || !entry.summary.trim()) {
+			errors.push(`${where}.summary is missing`);
+			return undefined;
+		}
+		const hop = isObject(entry.hop) && TRACE_HOP_KINDS.includes(entry.hop.kind as TraceHopKind)
+			? { kind: entry.hop.kind as TraceHopKind, label: isString(entry.hop.label, 120) ? entry.hop.label.trim() : '' }
+			: undefined;
+		let probe: TraceStep['probe'];
+		if (isObject(entry.probe) && typeof entry.probe.line === 'number') {
+			const line = Math.floor(entry.probe.line);
+			// Values are read when the logpoint fires: plain reads only, nothing that calls code.
+			const values = (Array.isArray(entry.probe.values) ? entry.probe.values : [])
+				.filter((expression): expression is string => typeof expression === 'string' && !!expression.trim() && expression.length <= 80 && !/[()=;`{}]|\+\+|--/.test(expression))
+				.slice(0, 4);
+			if (line >= start && line <= end) {
+				probe = { line, values };
+			}
+		}
+		return {
+			id: `s${steps.length + 1}`,
+			file,
+			startLine: start,
+			endLine: end,
+			...(isString(entry.symbol, 120) && entry.symbol.trim() ? { symbol: entry.symbol.trim() } : {}),
+			summary: entry.summary.trim(),
+			...(isString(entry.detail, 800) && entry.detail.trim() ? { detail: entry.detail.trim() } : {}),
+			...(hop ? { hop } : {}),
+			...(probe ? { probe } : {}),
+			...(isString(entry.repeats, 80) && entry.repeats.trim() ? { repeats: entry.repeats.trim() } : {}),
+			...(branch ? { branch } : {}),
+		};
+	};
+	const withoutHop = (step: TraceStep): TraceStep => {
+		const { hop: _hop, ...rest } = step;
+		return rest;
+	};
+	const raw = Array.isArray(value.steps) ? value.steps : [];
+	raw.forEach((entry, index) => {
+		if (steps.length >= TRACE_MAX_STEPS) {
+			return;
+		}
+		if (!isObject(entry) || !isObject(entry.fork)) {
+			const step = parseStep(entry, `steps[${index}]`);
+			if (step) {
+				steps.push(step);
+			}
+			return;
+		}
+		const fork = entry.fork;
+		const where = `steps[${index}].fork`;
+		const kind = fork.kind === 'all' ? 'all' : fork.kind === 'either' ? 'either' : undefined;
+		if (!kind) {
+			errors.push(`${where}.kind must be "either" or "all"`);
+			return;
+		}
+		const id = `f${forks.length + 1}`;
+		const paths: Array<TraceFork['paths'][number]> = [];
+		(Array.isArray(fork.paths) ? fork.paths : []).slice(0, TRACE_MAX_FORK_PATHS).forEach((rawPath, pathIndex) => {
+			if (!isObject(rawPath) || !Array.isArray(rawPath.steps)) {
+				errors.push(`${where}.paths[${pathIndex}] needs "steps"`);
+				return;
+			}
+			if (isObject(rawPath.fork) || rawPath.steps.some(inner => isObject(inner) && isObject(inner.fork))) {
+				errors.push(`${where}.paths[${pathIndex}]: forks can't be nested; follow one path further instead`);
+			}
+			const pathSteps: TraceStep[] = [];
+			rawPath.steps.slice(0, TRACE_MAX_PATH_STEPS).forEach((inner, stepIndex) => {
+				if (isObject(inner) && isObject(inner.fork) || steps.length + pathSteps.length >= TRACE_MAX_STEPS) {
+					return;
+				}
+				const step = parseStep(inner, `${where}.paths[${pathIndex}].steps[${stepIndex}]`, { fork: id, path: paths.length });
+				if (step) {
+					pathSteps.push({ ...step, id: `s${steps.length + pathSteps.length + 1}` });
+				}
+			});
+			if (!pathSteps.length) {
+				return;
+			}
+			// A path's last step leads nowhere inside the path (the fork's end does the joining).
+			pathSteps[pathSteps.length - 1] = withoutHop(pathSteps[pathSteps.length - 1]);
+			steps.push(...pathSteps);
+			paths.push({
+				label: isString(rawPath.label, 120) && rawPath.label.trim() ? rawPath.label.trim() : `Path ${paths.length + 1}`,
+				...(isString(rawPath.ends, 120) && rawPath.ends.trim() ? { ends: rawPath.ends.trim() } : {}),
+			});
+		});
+		if (paths.length < 2) {
+			errors.push(`${where} needs at least two paths with usable steps (otherwise make them plain steps)`);
+			// Keep what was usable, as plain steps on the main line.
+			for (let i = 0; i < steps.length; i++) {
+				if (steps[i].branch?.fork === id) {
+					const { branch: _branch, ...rest } = steps[i];
+					steps[i] = rest;
+				}
+			}
+			return;
+		}
+		forks.push({ id, kind, label: isString(fork.label, 160) ? fork.label.trim() : '', paths });
+	});
+	if (!steps.length) {
+		errors.push('the trace has no usable steps');
+		return undefined;
+	}
+	if (!steps[steps.length - 1].branch) {
+		steps[steps.length - 1] = withoutHop(steps[steps.length - 1]);
+	}
+	const run: TraceRunPlan | undefined = isObject(value.run) ? {
+		...(isString(value.run.command, 400) && value.run.command.trim() ? { command: value.run.command.trim() } : {}),
+		...(isString(value.run.script, 6000) && value.run.script.trim() ? { script: value.run.script } : {}),
+		...(value.run.language === 'python' || value.run.language === 'javascript' ? { language: value.run.language as 'python' | 'javascript' } : {}),
+		...(isString(value.run.why, 300) && value.run.why.trim() ? { why: value.run.why.trim() } : {}),
+	} : undefined;
+	return {
+		title: isString(value.title, 160) && value.title.trim() ? value.title.trim() : 'Code trace',
+		overview: isString(value.overview, 800) ? value.overview.trim() : '',
+		steps,
+		forks,
+		...(run && (run.command || run.script) ? { run } : {}),
+	};
 }

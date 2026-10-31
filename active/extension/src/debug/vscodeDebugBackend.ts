@@ -5,7 +5,9 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { GO_DEBUG_TYPE, NATIVE_DEBUG_TYPE, PYTHON_DEBUG_TYPE } from './adapters';
 import type { BackendSession, BreakpointSpec, DebugBackend, DebugBackendEvent } from './debugRunner';
+import { DEBUG_LANGUAGE_NAMES, LaunchPlan } from './languages';
 
 /** Marks the debug configurations Active starts for the coding agent. */
 const RUN_KEY = '__activeAgentRun';
@@ -17,9 +19,10 @@ interface Run {
 }
 
 /**
- * The coding agent's debugging on VS Code's debugger. Commands run under the built-in JavaScript debugger
- * (js-debug), which also attaches to every Node process they start (test runners, workers), each as a child
- * session. Runs are hidden from the debug view, toolbar and status bar. Adapter events are read with a tracker.
+ * The coding agent's (and code traces') debugging on VS Code's debugger. JavaScript commands run in a shell under
+ * the built-in js-debug, which also attaches to every Node process they start (test runners, workers), each as a
+ * child session; Python runs under debugpy, Go under Delve, C, C++ and Rust under CodeLLDB (see `languages.ts`).
+ * Runs are hidden from the debug view, toolbar and status bar. Adapter events are read with a tracker.
  */
 export class VscodeDebugBackend implements DebugBackend, vscode.Disposable {
 	private readonly runs = new Map<string, Run>();
@@ -77,20 +80,12 @@ export class VscodeDebugBackend implements DebugBackend, vscode.Disposable {
 		return async () => vscode.debug.removeBreakpoints(breakpoints);
 	}
 
-	async start(options: { runId: string; command: string; cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession> {
+	async start(options: { runId: string; command: string; plan: LaunchPlan; cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession> {
 		const run: Run = { onEvent, root: undefined, sessions: new Map() };
 		this.runs.set(options.runId, run);
-		const shell = process.platform === 'win32' ? { runtimeExecutable: process.env.ComSpec ?? 'cmd.exe', runtimeArgs: ['/d', '/s', '/c', options.command] } : { runtimeExecutable: process.env.SHELL || '/bin/sh', runtimeArgs: ['-c', options.command] };
 		const started = await vscode.debug.startDebugging(this.folder, {
-			type: 'pwa-node',
-			request: 'launch',
+			...launchConfiguration(options.plan, options.cwd),
 			name: `Active: ${options.command}`,
-			cwd: options.cwd,
-			...shell,
-			console: 'internalConsole',
-			outputCapture: 'std',
-			autoAttachChildProcesses: true,
-			skipFiles: ['<node_internals>/**'],
 			[RUN_KEY]: options.runId,
 		}, {
 			suppressDebugView: true,
@@ -100,7 +95,7 @@ export class VscodeDebugBackend implements DebugBackend, vscode.Disposable {
 		});
 		if (!started) {
 			this.runs.delete(options.runId);
-			throw new Error('VS Code refused to start the debug session (is the JavaScript debugger available?)');
+			throw new Error(`VS Code refused to start the debug session (is the ${DEBUG_LANGUAGE_NAMES[options.plan.language]} debugger available?)`);
 		}
 		return {
 			request: async (target, command, args) => {
@@ -156,5 +151,31 @@ export class VscodeDebugBackend implements DebugBackend, vscode.Disposable {
 				run.onEvent({ kind: 'exited', target: session.id, exitCode: Number(body.exitCode ?? 0) });
 				break;
 		}
+	}
+}
+
+/** The debug configuration for a planned run, without its name and run marker. */
+export function launchConfiguration(plan: LaunchPlan, cwd: string): vscode.DebugConfiguration {
+	switch (plan.language) {
+		case 'javascript': {
+			const shell = process.platform === 'win32' ? { runtimeExecutable: process.env.ComSpec ?? 'cmd.exe', runtimeArgs: ['/d', '/s', '/c', plan.command] } : { runtimeExecutable: process.env.SHELL || '/bin/sh', runtimeArgs: ['-c', plan.command] };
+			return {
+				type: 'pwa-node',
+				request: 'launch',
+				name: '',
+				cwd,
+				...shell,
+				console: 'internalConsole',
+				outputCapture: 'std',
+				autoAttachChildProcesses: true,
+				skipFiles: ['<node_internals>/**'],
+			};
+		}
+		case 'python':
+			return { type: PYTHON_DEBUG_TYPE, request: 'launch', name: '', ...plan.config };
+		case 'go':
+			return { type: GO_DEBUG_TYPE, request: 'launch', name: '', ...plan.config, dlvPath: plan.dlv };
+		case 'native':
+			return { type: NATIVE_DEBUG_TYPE, request: 'launch', name: '', ...plan.config };
 	}
 }

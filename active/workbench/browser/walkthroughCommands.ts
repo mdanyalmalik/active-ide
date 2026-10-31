@@ -25,6 +25,7 @@ export const enum ActiveCommandIds {
 	ResumeChat = 'active.resumeChat',
 	PickCodingEffort = 'active.pickCodingEffort',
 	PickCodingModel = 'active.pickCodingModel',
+	TraceCodePath = 'active.traceCodePath',
 	OpenRecentWalkthrough = 'active.openRecentWalkthrough',
 	WalkthroughHistory = 'active.walkthroughHistory',
 	OpenSystemMap = 'active.openSystemMap',

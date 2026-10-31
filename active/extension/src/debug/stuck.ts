@@ -11,7 +11,7 @@ const COMMAND_TOOLS = /bash|shell|exec|terminal|command/i;
 /** How a test run or command reports failing, in the common runners' words. */
 const FAILURE_OUTPUT = /\b\d+ (?:failing|failed)\b|^\s*FAIL\b|\bnot ok \d|AssertionError|Test failed|exit(?:ed)? (?:with )?code [1-9]|exit status [1-9]/im;
 /** A line added to print values while debugging. */
-const DEBUG_PRINT = /console\.(?:log|debug|trace|dir)\(|^\s*print\(|\bdebugger;|System\.out\.println\(|fmt\.Print(?:ln|f)?\(|\bdbg!\(/gm;
+const DEBUG_PRINT = /console\.(?:log|debug|trace|dir)\(|^\s*print\(|\bdebugger;|System\.out\.println\(|fmt\.Print(?:ln|f)?\(|\bdbg!\(|\bf?printf\(|std::c(?:out|err)\s*<<|\be?println!\(/gm;
 
 /**
  * Whether the coding agent looks stuck in a way the debugger would help with, judged from the turn so far

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup: Node 24, Code OSS 1.143.1 + dependencies, Electron, Phonon TTS, and Active's sources.
+# One-time setup: Node 24, Code OSS 1.143.1 + dependencies, Electron, Phonon TTS, the shipped debuggers, and Active's sources.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 mkdir -p "$ACTIVE_ROOT/.tools"
@@ -16,6 +16,7 @@ if [ ! -d "$VSCODE_DIR" ]; then
 fi
 
 "$ACTIVE_ROOT/scripts/setup-tts.sh"
+"$ACTIVE_ROOT/scripts/setup-debuggers.sh"
 "$ACTIVE_ROOT/scripts/sync.sh"
 
 cd "$VSCODE_DIR"

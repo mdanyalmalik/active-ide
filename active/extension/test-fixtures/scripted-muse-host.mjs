@@ -167,6 +167,27 @@ async function runExplanation(session, turnId, prompt) {
 		} else {
 			reply = JSON.stringify(map);
 		}
+	} else if (prompt.includes('\nCODE TRACE\n') || prompt.startsWith('CODE TRACE REPAIR')) {
+		// A code trace (this is a test double): a saved reply when ACTIVE_SCRIPTED_TRACE_FILE names one (e.g. a real
+		// model's trace, to observe it in a window), otherwise the demo's duration parsing, run by its test.
+		await sleep(1200);
+		// With ACTIVE_SCRIPTED_TRACE_DIR, a question containing [fixture:name] replays <dir>/name.json.
+		const fixture = /\[fixture:([\w-]+)\]/.exec(prompt)?.[1];
+		const saved = fixture && process.env.ACTIVE_SCRIPTED_TRACE_DIR ? `${process.env.ACTIVE_SCRIPTED_TRACE_DIR}/${fixture}.json` : process.env.ACTIVE_SCRIPTED_TRACE_FILE;
+		if (saved && existsSync(saved)) {
+			reply = readFileSync(saved, 'utf8');
+		} else {
+			reply = JSON.stringify({
+				title: 'Parsing a duration like "30s"',
+				overview: 'The test calls parseDuration, which matches the text against a seconds pattern and converts the number to milliseconds.',
+				steps: [
+					{ file: 'test/duration.test.js', startLine: 5, endLine: 7, symbol: 'test: parses seconds', summary: 'The test asks parseDuration to read "30s".', hop: { kind: 'call', label: "parseDuration('30s')" }, probe: { line: 6, values: [] } },
+					{ file: 'src/duration.js', startLine: 2, endLine: 6, symbol: 'parseDuration', summary: 'Matches the trimmed text against a number followed by "s"; anything else throws.', hop: { kind: 'return', label: 'returns milliseconds' }, probe: { line: 3, values: ['text'] } },
+					{ file: 'src/duration.js', startLine: 7, endLine: 7, symbol: 'parseDuration', summary: 'Turns the captured number into milliseconds.', probe: { line: 7, values: ['match[1]'] } },
+				],
+				run: { command: 'node --test test/duration.test.js', why: 'the duration test runs exactly this path' },
+			});
+		}
 	} else if (prompt.includes('SYSTEM MAP EDIT')) {
 		// A change the developer described (this is a test double): "rename X to Y" renames a component; "merge X and Y"
 		// folds Y into X; anything else is declined with a reason.

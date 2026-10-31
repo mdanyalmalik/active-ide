@@ -30,6 +30,8 @@ patch(
 # 2. Let narration audio (generated in memory, never saved) play from blob: URLs.
 for html in ("src/vs/code/electron-browser/workbench/workbench.html", "src/vs/code/electron-browser/workbench/workbench-dev.html"):
     patch(html, "media-src\n\t\t\t\t\t'self'\n", "media-src\n\t\t\t\t\t'self'\n\t\t\t\t\tblob:\n", "'self'\n\t\t\t\t\tblob:\n\t\t\t\t;\n\t\t\t\tframe-src")
+    # Code traces colour their snippets with the editor's tokenizer, which produces HTML (through this policy only).
+    patch(html, "\t\t\t\t\tchatDebugTokenizer\n", "\t\t\t\t\tchatDebugTokenizer\n\t\t\t\t\tactiveCodeTokenizer\n", "activeCodeTokenizer")
 
 # 3. Walkthrough narration starts automatically when chat hands off to it.
 patch(
@@ -157,6 +159,33 @@ if any(product.get(key) != value for key, value in branding.items()):
     product.update(branding)
     product_path.write_text(json.dumps(product, indent="\t") + "\n")
     print("patched product.json")
+
+# 4b. CodeLLDB (C, C++, Rust debugging for code traces) ships as a built-in extension. setup-debuggers.sh unpacks
+# this platform's build into .build/builtInExtensions (where dev builds load built-ins listed here) and keeps the
+# VSIX it checked, which a packaged build uses.
+import platform as _platform
+
+debuggers = json.loads((pathlib.Path(__file__).resolve().parent / "debuggers.json").read_text())
+lldb = debuggers["codelldb"]
+machine = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64", "armv7l": "armhf"}.get(_platform.machine().lower(), _platform.machine().lower())
+target = f"{ {'darwin': 'darwin', 'linux': 'linux', 'win32': 'win32'}.get(sys.platform, sys.platform)}-{machine}"
+if target in lldb["sha256"]:
+    entry = {
+        "name": lldb["name"],
+        "version": lldb["version"],
+        "sha256": lldb["sha256"][target],
+        "repo": lldb["repo"],
+        "vsix": ".build/active-debuggers/codelldb.vsix",
+        "metadata": {"publisherDisplayName": "Vadim Chugunov"},
+    }
+    listed = product.setdefault("builtInExtensions", [])
+    current = next((item for item in listed if item.get("name") == lldb["name"]), None)
+    if current != entry:
+        if current:
+            listed.remove(current)
+        listed.append(entry)
+        product_path.write_text(json.dumps(product, indent="\t") + "\n")
+        print("patched product.json (CodeLLDB)")
 
 # 5. App icon (active/branding/icon.svg, built into Active.icns and icon-512.png on Apple's 824-on-1024 grid).
 import shutil
