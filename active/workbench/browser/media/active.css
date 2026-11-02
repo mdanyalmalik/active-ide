@@ -4344,3 +4344,45 @@
 .monaco-workbench .active-trace .rail-step.notTaken {
 	opacity: 0.6;
 }
+
+/* "Ask about this" and "Request a change" by a selection in the editor. */
+.monaco-editor .active-selection-actions {
+	display: flex;
+	gap: 6px;
+	margin-bottom: 2px;
+	animation: active-selection-ask-in 120ms ease-out;
+}
+
+.monaco-editor .active-selection-ask {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 2px 9px 2px 7px;
+	border: 1px solid var(--vscode-focusBorder, var(--active-accent));
+	border-radius: 999px;
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-foreground);
+	font-family: var(--vscode-font-family);
+	font-size: 12px;
+	line-height: 18px;
+	white-space: nowrap;
+	cursor: pointer;
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+}
+
+.monaco-editor .active-selection-ask:hover {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border-color: var(--vscode-button-background);
+}
+
+@keyframes active-selection-ask-in {
+	from { opacity: 0; transform: translateY(3px); }
+	to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-editor .active-selection-actions {
+		animation: none;
+	}
+}

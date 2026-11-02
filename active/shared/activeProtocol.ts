@@ -401,8 +401,10 @@ export interface ChatEntry {
 	readonly recordId?: string;
 	/** For a system map update: the map version it produced. */
 	readonly mapVersion?: number;
-	/** A question's subject when it isn't a walkthrough: the parts of the system map it was asked about. */
+	/** What a question or task is about when it isn't a walkthrough: parts of the system map, or code ("client.js loc 3–8"). */
 	readonly about?: string;
+	/** `about` names code (selected in the editor or shown by an explanation card), not parts of the system map. */
+	readonly aboutCode?: boolean;
 	/** The developer's message describes a change to the system map. */
 	readonly mapEdit?: boolean;
 }
@@ -629,6 +631,32 @@ export interface AskRequest {
 	readonly segment?: number;
 	/** Asked from the system map about these boxes and arrows. */
 	readonly map?: MapSelection;
+	/** Asked about code selected in the editor. */
+	readonly code?: CodeSelection;
+}
+
+/** Lines of a file the developer picked (selected in the editor, or shown by an explanation card). */
+export interface CodeSelection {
+	/** Workspace-relative path (absolute when the file is outside the workspace). */
+	readonly file: string;
+	readonly startLine: number;
+	readonly endLine: number;
+	/** The selected text, when it was a selection (capped). */
+	readonly text?: string;
+}
+
+/** How chat names a code selection: "client.js loc 3–8". */
+export function describeCodeSelection(code: CodeSelection): string {
+	const name = code.file.split(/[\\/]/).pop() || code.file;
+	return code.startLine === code.endLine ? `${name} loc ${code.startLine}` : `${name} loc ${code.startLine}–${code.endLine}`;
+}
+
+/** A coding task, optionally about code the developer pointed at (with the explanation they were reading). */
+export interface TaskRequest {
+	readonly text: string;
+	readonly code?: CodeSelection;
+	/** The explanation card the change was requested from: its title and what it said. */
+	readonly explanation?: { readonly title: string; readonly text: string };
 }
 
 /** Boxes and arrows picked on the system map (at least one). */

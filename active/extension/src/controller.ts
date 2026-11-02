@@ -7,14 +7,14 @@ import { createHash } from 'node:crypto';
 import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
 import { CONDENSE_TARGET_CHARS, condensedOf, ExplainerMemory, MemoryInput } from './explain/memory';
 import { ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner } from './explain/planner';
-import { buildBriefingPrompt, buildElaborationPrompt, buildMapQuestionPrompt, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
+import { buildBriefingPrompt, buildCodeQuestionPrompt, buildElaborationPrompt, buildMapQuestionPrompt, composeCodeTask, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import type { DiagramSnapshot } from './diagram/diagramAgent';
 import { describeDebugCall } from './debug/debugTools';
 import { debuggerSuggestion, stuckReason } from './debug/stuck';
 import { HistoryStore } from './history/historyStore';
-import { extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
-import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, SystemMap, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
+import { describeCodeSelection, extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
+import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, SystemMap, TaskRequest, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 import { diffStats } from './tracking/lineDiff';
 
@@ -557,11 +557,14 @@ export class ActiveController implements AgentSessionListener {
 
 	// ---------------------------------------------------------------- user actions
 
-	async submitTask(text: string): Promise<void> {
-		const task = text.trim();
-		if (!task) {
+	/** Starts a coding task; one about code the developer pointed at shows in chat as their words with what it's about. */
+	async submitTask(request: string | TaskRequest): Promise<void> {
+		const { text, code } = typeof request === 'string' ? { text: request, code: undefined } : request;
+		if (!text.trim()) {
 			return;
 		}
+		const task = typeof request === 'string' ? text.trim() : composeCodeTask(request);
+		const shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode'> = code ? { text: text.trim(), about: describeCodeSelection(code), aboutCode: true } : { text: task };
 		if (!this.coding) {
 			await this.connect();
 		}
@@ -571,13 +574,13 @@ export class ActiveController implements AgentSessionListener {
 		}
 		if (this.turn && !this.turn.codingDone) {
 			this.queuedTasks.push(task);
-			this.upsertChat({ id: entryId('user'), role: 'user', text: task, status: 'queued', at: Date.now() });
+			this.upsertChat({ id: entryId('user'), role: 'user', ...shown, status: 'queued', at: Date.now() });
 			return;
 		}
-		await this.beginLogicalTurn(task);
+		await this.beginLogicalTurn(task, false, shown);
 	}
 
-	private async beginLogicalTurn(task: string, agentInitiated = false): Promise<LogicalTurn> {
+	private async beginLogicalTurn(task: string, agentInitiated = false, shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode'> = { text: task }): Promise<LogicalTurn> {
 		const turn: LogicalTurn = {
 			id: `turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
 			index: ++this.turnCounter,
@@ -602,7 +605,7 @@ export class ActiveController implements AgentSessionListener {
 		this.turn = turn;
 		this.backgroundTasks = 0;
 		if (!agentInitiated) {
-			this.upsertChat({ id: entryId('user'), turnId: turn.id, role: 'user', text: task, at: Date.now() });
+			this.upsertChat({ id: entryId('user'), turnId: turn.id, role: 'user', ...shown, at: Date.now() });
 		}
 		// The Explorer keeps the last prompt's counts until this one changes something.
 		await this.tracker.beginTurn(turn.id);
@@ -633,15 +636,17 @@ export class ActiveController implements AgentSessionListener {
 		update('', 'streaming');
 		const memory = await this.options.memory?.describe();
 		const map = request.map && (await this.options.systemMap?.(request.map.version));
-		const topic = map && request.map
+		const topic = request.code ? describeCodeSelection(request.code) : map && request.map
 			? [...request.map.components.map(id => map.components.find(component => component.id === id)?.name ?? id), ...request.map.connections.map(link => [link.from, link.to].map(id => map.components.find(component => component.id === id)?.name ?? id).join(' → '))].join(', ')
 			: walkthrough?.scenes.find(scene => scene.id === request.sceneId)?.title ?? walkthrough?.title;
-		if (map && topic) {
-			this.upsertChat({ id: questionId, role: 'question', text: request.question, at: Date.now(), about: topic });
+		if ((map || request.code) && topic) {
+			this.upsertChat({ id: questionId, role: 'question', text: request.question, at: Date.now(), about: topic, ...(request.code ? { aboutCode: true } : {}) });
 		}
 		void this.recordQuestion(request.question, topic);
 		try {
-			const prompt = map && request.map
+			const prompt = request.code
+				? buildCodeQuestionPrompt(request.question, request.code, this.options.profile(), memory)
+				: map && request.map
 				? buildMapQuestionPrompt(request.question, map, request.map, this.options.profile(), memory)
 				: buildQuestionPrompt(request.question, walkthrough, request.sceneId, this.options.profile(), memory);
 			const reply = await this.explainer.ask(prompt, text => update(text, 'streaming'), true);

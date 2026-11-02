@@ -20,7 +20,7 @@ import { DiagramAgent } from './diagram/diagramAgent';
 import { TraceBuilder } from './trace/traceBuilder';
 import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
-import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, TraceRequest, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, TaskRequest, TraceRequest, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
@@ -321,7 +321,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	register(ExtensionCommand.DiagramEdit, (request: string) => active.editDiagram(request, text => diagramAgent.edit(text)));
 	register(ExtensionCommand.DiagramRevision, (version: number) => diagramAgent.revision(version));
 	register(ExtensionCommand.DiagramSetFolderMode, (mode: DiagramFolderMode) => diagramAgent.setFolderMode(mode));
-	register(ExtensionCommand.SubmitTask, (text: string) => active.submitTask(text));
+	register(ExtensionCommand.SubmitTask, (request: string | TaskRequest) => active.submitTask(request));
 	register(ExtensionCommand.Ask, (request: AskRequest) => active.ask(request));
 	register(ExtensionCommand.DecideApproval, (request: { approvalId: string; choiceId: string }) => active.decideApproval(request.approvalId, request.choiceId));
 	register(ExtensionCommand.HistoryGet, (turnId: string) => active.historyGet(turnId));

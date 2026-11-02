@@ -667,6 +667,12 @@ export class WalkthroughEditor extends EditorPane {
 		dom.append(eyebrow, $('span')).textContent = scene.label;
 		this.renderChangeSummary(eyebrow, scene);
 		const headActions = dom.append(head, $('.card-actions'));
+		// Back to chat, to ask the coding agent for a change, with what this card explains as context.
+		const change = dom.append(headActions, $('button.more-detail.request-change')) as HTMLButtonElement;
+		dom.append(change, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.editSparkle));
+		dom.append(change, $('span')).textContent = localize('requestChange', "Request a change");
+		change.title = localize('requestChangeTitle', "Ask {0} for a change in chat, with this part of the walkthrough as context: a change to this code, or elsewhere based on it", this.activeService.agent.provider.shortName);
+		store.add(dom.addDisposableListener(change, dom.EventType.CLICK, () => void this.requestChange(walkthrough, scene)));
 		const ask = dom.append(headActions, $('button.more-detail.ask')) as HTMLButtonElement;
 		this.askButton = ask;
 		store.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => this.openAsk(walkthrough, scene)));
@@ -792,6 +798,14 @@ export class WalkthroughEditor extends EditorPane {
 			this.resumeAfterDeeper.add(elaboration.requestId);
 		}
 		this.maybeSpeakDeeper();
+	}
+
+	/** Context for a change request: the code a card explains (its highlighted lines, or the whole captured file) and what it says. */
+	private async requestChange(walkthrough: Walkthrough, scene: Scene): Promise<void> {
+		const lines = (walkthrough.files[scene.file]?.final ?? '').split(/\r?\n/).length;
+		const startLine = scene.focus.length ? Math.min(...scene.focus.map(range => range.startLine)) : 1;
+		const endLine = scene.focus.length ? Math.max(...scene.focus.map(range => range.endLine)) : lines;
+		await this.activeService.requestChange({ file: scene.file, startLine, endLine }, { title: scene.title, text: scene.narration.map(segment => segment.text).join(' ') });
 	}
 
 	private openAsk(walkthrough: Walkthrough, scene: Scene): void {

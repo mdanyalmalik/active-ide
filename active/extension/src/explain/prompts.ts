@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { CapturedFile, KnowledgeProfile, MapSelection, PendingCheck, SystemMap, ToolOutcome, Walkthrough, WalkthroughDraft } from '../shared/activeProtocol';
+import type { CapturedFile, CodeSelection, KnowledgeProfile, MapSelection, PendingCheck, SystemMap, TaskRequest, ToolOutcome, Walkthrough, WalkthroughDraft } from '../shared/activeProtocol';
 import { diffLines, splitLines, unifiedDiff } from '../tracking/lineDiff';
 
 export interface PlanningContext {
@@ -331,6 +331,38 @@ export function buildQuestionPrompt(question: string, walkthrough: Walkthrough |
 }
 
 /** A question about boxes and arrows the developer picked on the system map. */
+/** A question about code the developer selected in the editor. */
+export function buildCodeQuestionPrompt(question: string, code: CodeSelection, profile: KnowledgeProfile, memory?: string): string {
+	const parts = [`You are answering a developer's question inside Active, about code they selected in the editor. You only read; never modify files. Answer conversationally and concisely in plain text (short code snippets are fine). Read the file around the selection (and what it calls or is called by, when that matters to the question) before answering, and ground claims in the code; say so when something is not observed. Name files with their paths so the developer can find them.`, `DEVELOPER PROFILE\n${describeProfile(profile)}`];
+	const remembered = memorySection(memory, false);
+	if (remembered) {
+		parts.push(remembered);
+	}
+	parts.push(`THE SELECTION\n${code.file}, lines ${code.startLine}-${code.endLine}${code.text ? `:\n\`\`\`\n${code.text}\n\`\`\`` : ''}`);
+	parts.push(`QUESTION\n${question}`);
+	return parts.join('\n\n');
+}
+
+/**
+ * The task the coding agent gets when the developer asked for a change while pointing at code (a selection, or an
+ * explanation card): their words, then that code and what they were reading, as context. The change may be to that
+ * code or somewhere else based on it, so it's offered as context, not as the place to edit.
+ */
+export function composeCodeTask(request: TaskRequest): string {
+	const lines = [request.text.trim()];
+	if (request.code) {
+		const where = `${request.code.file}, lines ${request.code.startLine}-${request.code.endLine}`;
+		lines.push('', `Context: the developer asked for this while looking at ${where}${request.explanation ? ' in Active\'s walkthrough (the file may have changed since)' : ''}. The change may be to that code or elsewhere based on it; use your judgment.`);
+		if (request.code.text) {
+			lines.push('```', request.code.text, '```');
+		}
+	}
+	if (request.explanation) {
+		lines.push('', `The explanation they were reading ("${request.explanation.title}"): ${request.explanation.text}`);
+	}
+	return lines.join('\n');
+}
+
 export function buildMapQuestionPrompt(question: string, map: SystemMap, selection: MapSelection, profile: KnowledgeProfile, memory?: string): string {
 	const parts = [`You are answering a developer's question inside Active, about the system map: a diagram of the project's components and how they connect, kept by a diagram agent. You only read; never modify files. Answer conversationally and concisely in plain text (short code snippets are fine). Read the files the picked parts cite before answering, and ground claims in the code; say so when something is not observed. Name files with their paths so the developer can find them.`, `DEVELOPER PROFILE\n${describeProfile(profile)}`];
 	const remembered = memorySection(memory, false);

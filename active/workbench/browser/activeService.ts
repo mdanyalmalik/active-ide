@@ -27,7 +27,7 @@ import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
-import { ActiveEvent, CodeTrace, MapSelection, SystemMapTextEdit, TraceRequest, TraceSummary, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
+import { ActiveEvent, CodeTrace, MapSelection, SystemMapTextEdit, TraceRequest, TraceSummary, TaskRequest, CodeSelection, describeCodeSelection, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput, TraceInput } from './activeInputs.js';
 import { ClipOutcome, ClipPlayer } from './clipPlayer.js';
 import { NarrationCache } from './narrationCache.js';
@@ -57,8 +57,30 @@ const GIT_POLL_MS = 15_000;
 /** The voice setting's value for "no narration". */
 export const VOICE_OFF = 'off';
 
-/** What chat's Ask mode is about: a place in a walkthrough, or parts of the system map. */
-export type ChatContext = WalkthroughChatContext | MapChatContext | MapEditChatContext;
+/**
+ * What chat's second mode is about: a place in a walkthrough, parts of the system map, or code (to ask the
+ * explainer about, or to give the coding agent as context for a change).
+ */
+export type ChatContext = WalkthroughChatContext | MapChatContext | MapEditChatContext | CodeChatContext | ChangeChatContext;
+
+/** Code selected in the editor, to ask the explainer about. */
+export interface CodeChatContext {
+	readonly kind: 'code';
+	readonly code: CodeSelection;
+	/** "client.js loc 3–8" */
+	readonly title: string;
+}
+
+/**
+ * Code given to the coding agent as context for a change (which may be to that code, or elsewhere based on it):
+ * selected in the editor, or shown by an explanation card (with what it said).
+ */
+export interface ChangeChatContext {
+	readonly kind: 'change';
+	readonly code: CodeSelection;
+	readonly title: string;
+	readonly explanation?: { readonly title: string; readonly text: string };
+}
 
 /** Where the user was in a walkthrough when they asked a question from it. */
 export interface WalkthroughChatContext {
@@ -134,6 +156,11 @@ export interface IActiveService {
 	askAboutMap(selection: MapSelection, title: string): Promise<void>;
 	/** Opens chat set to describe changes to the system map. */
 	editMapInChat(): Promise<void>;
+	/** Opens chat set to ask the explainer about this code (selected in the editor). */
+	askAboutCode(code: CodeSelection): Promise<void>;
+	/** Opens chat set to ask the coding agent for a change, with this code (selected, or shown by a card) as context. */
+	requestChange(code: CodeSelection, explanation?: { title: string; text: string }): Promise<void>;
+
 	/** Sends a described change to the diagram agent, which replies in chat. */
 	editDiagram(request: string): Promise<void>;
 	/** Saves names, summaries, descriptions or labels typed on the map as a new version (no model involved). */
@@ -165,7 +192,8 @@ export interface IActiveService {
 
 	handleEvent(event: ActiveEvent): void;
 	initialize(): Promise<void>;
-	submitTask(text: string): Promise<void>;
+	/** Starts a coding task (`TaskRequest` when it's about code the developer pointed at). */
+	submitTask(text: string | TaskRequest): Promise<void>;
 	ask(request: AskRequest): Promise<void>;
 	decideApproval(approvalId: string, choiceId: string): Promise<void>;
 	synthesize(text: string, voice?: string): Promise<SynthesizeResult>;
@@ -498,6 +526,20 @@ export class ActiveService extends Disposable implements IActiveService {
 		await this.openChatWith({ kind: 'mapEdit', title: localize('systemMapContext', "System Map") });
 	}
 
+	async askAboutCode(code: CodeSelection): Promise<void> {
+		await this.openChatWith({ kind: 'code', code, title: describeCodeSelection(code) });
+	}
+
+	async requestChange(code: CodeSelection, explanation?: { title: string; text: string }): Promise<void> {
+		// Asked from a walkthrough's card: it pauses there (and can be returned to), as when opening chat from it.
+		const player = this.player;
+		if (player?.playing) {
+			player.pause();
+			this.positions.set(player.walkthrough.id, player.position);
+		}
+		await this.openChatWith({ kind: 'change', code, title: describeCodeSelection(code), ...(explanation ? { explanation } : {}) });
+	}
+
 	async editDiagram(request: string): Promise<void> {
 		await this.commandService.executeCommand(ExtensionCommand.DiagramEdit, request);
 	}
@@ -507,7 +549,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	/** Opens chat with its second mode set to `context` (asking or describing changes), selected and focused. */
-	private async openChatWith(context: MapChatContext | MapEditChatContext): Promise<void> {
+	private async openChatWith(context: MapChatContext | MapEditChatContext | CodeChatContext | ChangeChatContext): Promise<void> {
 		this._chatContext = context;
 		this._onDidChangePlayer.fire();
 		// Not through openChat(false), which starts chat on a new coding task with no context.
@@ -951,7 +993,7 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	// ------------------------------------------------------------- extension calls
 
-	async submitTask(text: string): Promise<void> {
+	async submitTask(text: string | TaskRequest): Promise<void> {
 		if (this._briefing) {
 			this.dismissBriefing();
 		}

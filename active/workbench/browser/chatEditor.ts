@@ -505,16 +505,28 @@ export class ActiveChatEditor extends EditorPane {
 			task.textContent = localize('taskMode', "New Coding Task");
 			task.classList.toggle('selected', this.mode === 'task');
 			const ask = dom.append(this.composerContext, $('button.mode'));
-			ask.textContent = context.kind === 'mapEdit' ? localize('mapEditMode', "Describe Changes to the System Map") : localize('askMode', "Ask About “{0}”", context.title);
+			ask.textContent = context.kind === 'mapEdit' ? localize('mapEditMode', "Describe Changes to the System Map")
+				: context.kind === 'code' ? localize('askCodeMode', "Ask About {0}", context.title)
+					: context.kind === 'change' ? localize('changeMode', "Request a Change · Using {0}", context.title)
+						: localize('askMode', "Ask About “{0}”", context.title);
+			if (context.kind === 'code' || context.kind === 'change') {
+				ask.title = `${context.code.file}:${context.code.startLine}${context.code.endLine !== context.code.startLine ? `-${context.code.endLine}` : ''}`;
+			}
 			ask.classList.toggle('selected', this.mode === 'ask');
 			this.inputStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => { this.mode = 'ask'; this.renderComposerContext(); }));
 			this.inputStore.add(dom.addDisposableListener(task, dom.EventType.CLICK, () => { this.mode = 'task'; this.renderComposerContext(); }));
 		} else {
 			this.mode = 'task';
 		}
-		this.sendButton.textContent = this.mode === 'ask' && this.activeService.chatContext?.kind !== 'mapEdit' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
+		const kind = this.activeService.chatContext?.kind;
+		this.sendButton.textContent = this.mode === 'ask' && kind !== 'mapEdit' && kind !== 'change' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
 		this.renderExplainMode();
-		this.textarea.placeholder = this.mode === 'ask' ? (this.activeService.chatContext?.kind === 'mapEdit' ? localize('mapEditPlaceholder', "Describe how to restructure the map: split or merge parts, regroup them, change the level of detail…") : this.activeService.chatContext?.kind === 'map' ? localize('askMapPlaceholder', "Ask about these parts of the system…") : localize('askPlaceholder', "Ask about this part…")) : localize('taskPlaceholder', "Describe a coding task…");
+		this.textarea.placeholder = this.mode !== 'ask' ? localize('taskPlaceholder', "Describe a coding task…")
+			: kind === 'mapEdit' ? localize('mapEditPlaceholder', "Describe how to restructure the map: split or merge parts, regroup them, change the level of detail…")
+				: kind === 'map' ? localize('askMapPlaceholder', "Ask about these parts of the system…")
+					: kind === 'code' ? localize('askCodePlaceholder', "Ask about this code…")
+						: kind === 'change' ? localize('changePlaceholder', "Describe a change: here, or elsewhere with this code as context…")
+							: localize('askPlaceholder', "Ask about this part…");
 		this.renderEffort();
 		this.updateSendState();
 	}
@@ -523,9 +535,10 @@ export class ActiveChatEditor extends EditorPane {
 	private renderExplainMode(): void {
 		this.modeStore.clear();
 		dom.clearNode(this.modeLabel);
-		if (this.mode === 'ask') {
-			const kind = this.activeService.chatContext?.kind;
-			this.modeLabel.textContent = kind === 'mapEdit' ? localize('mapEditSession', "Changing the system map") : kind === 'map' ? localize('mapQuestionSession', "Asking about the system map") : localize('explanationSession', "Asking about the walkthrough");
+		const kind = this.activeService.chatContext?.kind;
+		// A change request is a coding task, so how its work gets explained still applies.
+		if (this.mode === 'ask' && kind !== 'change') {
+			this.modeLabel.textContent = kind === 'code' ? localize('codeQuestionSession', "Asking about code") : kind === 'mapEdit' ? localize('mapEditSession', "Changing the system map") : kind === 'map' ? localize('mapQuestionSession', "Asking about the system map") : localize('explanationSession', "Asking about the walkthrough");
 			return;
 		}
 		const modes: Array<{ id: ExplainMode; label: string; detail: string; icon: ThemeIcon }> = [
@@ -537,7 +550,8 @@ export class ActiveChatEditor extends EditorPane {
 		const button = dom.append(this.modeLabel, $('button.composer-explain-mode')) as HTMLButtonElement;
 		button.classList.add(current.id);
 		dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(current.icon));
-		dom.append(button, $('span')).textContent = current.label;
+		// Labelled like the status bar's mode, since the chat box has other buttons now.
+		dom.append(button, $('span')).textContent = localize('explainModeButton', "Explanations: {0}", current.label);
 		dom.append(button, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
 		button.title = localize('explainModeTitle', "Explanations: {0}. Click to change.", current.detail);
 		this.modeStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => {
@@ -609,7 +623,8 @@ export class ActiveChatEditor extends EditorPane {
 	private updateSendState(): void {
 		const agent = this.activeService.agent;
 		const empty = !this.textarea.value.trim();
-		this.sendButton.disabled = empty || (this.mode === 'task' && (agent.status === 'starting' || !!agent.setup));
+		const codingTask = this.mode === 'task' || this.activeService.chatContext?.kind === 'change';
+		this.sendButton.disabled = empty || (codingTask && (agent.status === 'starting' || !!agent.setup));
 	}
 
 	private async send(): Promise<void> {
@@ -622,6 +637,10 @@ export class ActiveChatEditor extends EditorPane {
 		const context = this.activeService.chatContext;
 		if (this.mode === 'ask' && context?.kind === 'mapEdit') {
 			await this.activeService.editDiagram(text);
+		} else if (this.mode === 'ask' && context?.kind === 'code') {
+			await this.activeService.ask({ question: text, code: context.code });
+		} else if (this.mode === 'ask' && context?.kind === 'change') {
+			await this.activeService.submitTask({ text, code: context.code, ...(context.explanation ? { explanation: context.explanation } : {}) });
 		} else if (this.mode === 'ask' && context?.kind === 'map') {
 			await this.activeService.ask({ question: text, map: context.selection });
 		} else if (this.mode === 'ask' && context?.kind === 'walkthrough') {
@@ -660,11 +679,13 @@ export class ActiveChatEditor extends EditorPane {
 		const eyebrow = (text: string) => { dom.append(node, $('.eyebrow')).textContent = text; };
 		switch (entry.role) {
 			case 'user':
-				eyebrow(entry.status === 'queued' ? localize('youQueued', "You · queued") : localize('you', "You"));
+				eyebrow(entry.about
+					? (entry.status === 'queued' ? localize('youQueuedChange', "You · task using {0} · queued", entry.about) : localize('youChange', "You · task using {0}", entry.about))
+					: entry.status === 'queued' ? localize('youQueued', "You · queued") : localize('you', "You"));
 				dom.append(node, $('.text')).textContent = entry.text;
 				break;
 			case 'question':
-				eyebrow(entry.mapEdit ? localize('youMapEdit', "You · change to the system map") : entry.about ? localize('youAskMap', "You · about {0} on the system map", entry.about) : localize('youAsk', "You · about the walkthrough"));
+				eyebrow(entry.mapEdit ? localize('youMapEdit', "You · change to the system map") : entry.about && entry.aboutCode ? localize('youAskCode', "You · about {0}", entry.about) : entry.about ? localize('youAskMap', "You · about {0} on the system map", entry.about) : localize('youAsk', "You · about the walkthrough"));
 				dom.append(node, $('.text')).textContent = entry.text;
 				break;
 			case 'agent':
