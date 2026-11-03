@@ -4,10 +4,18 @@
   "cached": "casht",
   "caching": "cashihng",
   "comments": "cawmmehnts",
-  "database": "daytuhbays"
+  "database": "daytuhbays",
+  "queries": "kweereez",
+  "query": "cweery"
  },
  "heteronyms": {
-  "record": ["record", "ricord"],
-  "records": ["records", "ricords"]
+  "record": [
+   "record",
+   "ricord"
+  ],
+  "records": [
+   "records",
+   "ricords"
+  ]
  }
 }
