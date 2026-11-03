@@ -127,6 +127,32 @@ describe('explanations off (scripted MSP host)', () => {
 		assert.equal((await h.history.list())[0].task, 'Support minutes and hours in parseDuration');
 	});
 
+	test('a task sent while a turn runs is queued, then shown once, at its own turn, with who sent it', async () => {
+		const first = h.waitFor(isStage('notExplained'));
+		await h.controller.submitTask('Support minutes and hours in parseDuration');
+		const author = { id: 'g1', name: 'Gabby', colorIndex: 1 };
+		await h.controller.submitTask({ text: 'Fix the typo in the README', author });
+		await first;
+		const second = h.waitFor(isStage('notExplained'));
+		await second;
+		// The chat as the workbench would have it: resets replace it, entries are upserted by id.
+		let chat: ChatEntry[] = [];
+		for (const event of h.events) {
+			if (event.type === 'chatReset') {
+				chat = [...event.chat];
+			} else if (event.type === 'chat') {
+				const index = chat.findIndex(entry => entry.id === event.entry.id);
+				chat = index >= 0 ? chat.map((entry, i) => i === index ? event.entry : entry) : [...chat, event.entry];
+			}
+		}
+		const typo = chat.filter(entry => entry.role === 'user' && entry.text === 'Fix the typo in the README');
+		assert.equal(typo.length, 1);
+		assert.deepEqual({ status: typo[0].status, author: typo[0].author }, { status: undefined, author });
+		const firstTask = chat.findIndex(entry => entry.role === 'user' && entry.text === 'Support minutes and hours in parseDuration');
+		const firstReply = chat.findIndex((entry, i) => i > firstTask && entry.role === 'agent');
+		assert.ok(chat.indexOf(typo[0]) > firstReply, 'the queued task moves after the turn it waited for');
+	});
+
 	test('with explanations off, memory is never condensed (the explanation model isn\'t used)', async () => {
 		await h.memory.add(Array.from({ length: 30 }, (_, index) => ({ scope: 'project' as const, note: `fact ${index} ${'x'.repeat(260)}` })));
 		await h.controller.condenseMemory();

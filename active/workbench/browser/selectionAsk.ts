@@ -17,7 +17,7 @@ import { IEditorContribution } from '../../../../editor/common/editorCommon.js';
 import { localize } from '../../../../nls.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { describeCodeSelection, type CodeSelection } from '../common/activeProtocol.js';
-import { IActiveService } from './activeService.js';
+import { IActiveService, REMOTE_FILE_SCHEME } from './activeService.js';
 import { onRightClickQuickPrompt, QuickPromptOptions, showsReceiver } from './quickPrompt.js';
 
 /** How long the selection has to stay put before the button shows (so it doesn't flicker while dragging). */
@@ -65,14 +65,19 @@ class SelectionAskContribution extends Disposable implements IEditorContribution
 		if (this.mouseDown || !selection || selection.isEmpty() || !model || !this.editor.hasWidgetFocus()) {
 			return;
 		}
-		if (this.editor.isSimpleWidget || (model.uri.scheme !== Schemas.file && model.uri.scheme !== Schemas.vscodeRemote)) {
+		// A guest sees the host's files through the session (`active-remote:`), and only those go to the host's agents;
+		// a viewer can't send anything.
+		const remote = this.activeService.remote;
+		if (this.editor.isSimpleWidget || (model.uri.scheme !== Schemas.file && model.uri.scheme !== Schemas.vscodeRemote && model.uri.scheme !== REMOTE_FILE_SCHEME) || remote?.role === 'viewer' || (remote && model.uri.scheme !== REMOTE_FILE_SCHEME)) {
 			return;
 		}
 		const text = model.getValueInRange(selection);
 		if (!text.trim()) {
 			return;
 		}
-		this.widget.value = new SelectionAskWidget(this.editor, selection, target => void this.open(target, selection, text), target => this.quickPrompt(target, selection, text), this.activeService.agent.provider.shortName);
+		// Guests don't get explanations, so they only get Request a change.
+		const targets: Array<'ask' | 'change'> = remote ? ['change'] : ['ask', 'change'];
+		this.widget.value = new SelectionAskWidget(this.editor, selection, targets, target => void this.open(target, selection, text), target => this.quickPrompt(target, selection, text), this.activeService.agent.provider.shortName);
 	}
 
 	/**
@@ -131,12 +136,14 @@ class SelectionAskWidget extends Disposable implements IContentWidget {
 	private readonly node: HTMLElement;
 	private readonly row: HTMLElement;
 
-	constructor(private readonly editor: ICodeEditor, private readonly selection: Selection, run: (target: 'ask' | 'change') => void, quick: (target: 'ask' | 'change') => QuickPromptOptions | undefined, agentName: string) {
+	constructor(private readonly editor: ICodeEditor, private readonly selection: Selection, targets: ReadonlyArray<'ask' | 'change'>, run: (target: 'ask' | 'change') => void, quick: (target: 'ask' | 'change') => QuickPromptOptions | undefined, agentName: string) {
 		super();
 		// Monaco sets the widget's own node to display: block, so the row is laid out inside it.
 		this.node = dom.$('.active-selection-widget');
 		this.row = dom.append(this.node, dom.$('.active-selection-actions'));
-		this.button(Codicon.commentDiscussion, localize('askAboutThis', "Ask about this"), localize('askAboutThisTitle', "Ask Active's explainer about the selected code, in chat. Right-click to type it here."), () => run('ask'), () => quick('ask'));
+		if (targets.includes('ask')) {
+			this.button(Codicon.commentDiscussion, localize('askAboutThis', "Ask about this"), localize('askAboutThisTitle', "Ask Active's explainer about the selected code, in chat. Right-click to type it here."), () => run('ask'), () => quick('ask'));
+		}
 		this.button(Codicon.editSparkle, localize('requestChangeHere', "Request a change"), localize('requestChangeHereTitle', "Ask {0} for a change in chat, with the selected code as context: a change to it, or elsewhere based on it. Right-click to type it here.", agentName), () => run('change'), () => quick('change'));
 		editor.addContentWidget(this);
 	}

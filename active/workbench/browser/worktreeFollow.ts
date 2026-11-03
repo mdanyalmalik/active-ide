@@ -280,7 +280,8 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 			const replacements: IUntypedEditorReplacement[] = [];
 			for (const editor of group.editors) {
 				const resource = EditorResourceAccessor.getOriginalUri(editor);
-				if (!resource || resource.scheme !== Schemas.file) {
+				// A guest's tabs are the host's files through the session (`active-remote:`); they follow too.
+				if (!resource || (resource.scheme !== Schemas.file && resource.scheme !== REMOTE_FILE_SCHEME)) {
 					continue;
 				}
 				if (editor.isDirty()) {

@@ -1304,11 +1304,14 @@ export class ActiveChatEditor extends EditorPane {
 		const eyebrow = (text: string) => { dom.append(node, $('.eyebrow')).textContent = text; };
 		switch (entry.role) {
 			case 'user':
-				// In a session, a guest's message carries their name and colour.
-				if (entry.author && entry.author.id !== this.activeService.presenceSelfId) {
+				// In a session, someone else's message carries their name and colour. A guest sees the host's own
+				// messages (which carry no author) under the host's name, not as "You".
+				const author = entry.author ?? (this.activeService.remote ? this.activeService.presence.find(person => person.role === 'host') : undefined);
+				if (author && author.id !== this.activeService.presenceSelfId) {
 					node.classList.add('by-person');
-					node.style.setProperty('--person-color', personColor(entry.author.colorIndex));
-					eyebrow(entry.status === 'queued' ? localize('personQueued', "{0} · queued", entry.author.name) : entry.author.name);
+					node.style.setProperty('--person-color', personColor(author.colorIndex));
+					const label = entry.about ? localize('personChange', "{0} · task using {1}", author.name, entry.about) : author.name;
+					eyebrow(entry.status === 'queued' ? localize('personQueued', "{0} · queued", label) : label);
 					dom.append(node, $('.text')).textContent = entry.text;
 					break;
 				}

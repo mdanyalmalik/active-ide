@@ -325,7 +325,8 @@ export class ActiveController implements AgentSessionListener {
 	private status: AgentStatus = 'starting';
 	private blocker: string | undefined;
 	private turn: LogicalTurn | undefined;
-	private readonly queuedTasks: string[] = [];
+	/** Tasks sent while a turn was running: what to run, how to show it, and the "queued" entry standing in for it. */
+	private readonly queuedTasks: Array<{ task: string; shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode' | 'author'>; entryId: string }> = [];
 	private readonly chat: ChatEntry[] = [];
 	private readonly chatIndex = new Map<string, ChatEntry>();
 	private readonly itemEntries = new Map<string, string>();
@@ -762,8 +763,9 @@ export class ActiveController implements AgentSessionListener {
 			return;
 		}
 		if (this.turn && !this.turn.codingDone) {
-			this.queuedTasks.push(task);
-			this.upsertChat({ id: entryId('user'), role: 'user', ...shown, status: 'queued', at: Date.now() });
+			const id = entryId('user');
+			this.queuedTasks.push({ task, shown, entryId: id });
+			this.upsertChat({ id, role: 'user', ...shown, status: 'queued', at: Date.now() });
 			return;
 		}
 		await this.beginLogicalTurn(task, false, shown);
@@ -1602,7 +1604,7 @@ export class ActiveController implements AgentSessionListener {
 			// Start the queued task right away: the coding agent never waits for explanations.
 			if (next) {
 				startedNext = true;
-				void this.beginLogicalTurn(next);
+				void this.startQueued(next);
 			}
 			const pending = await this.waitForBackground(turn);
 			for (const check of pending) {
@@ -1689,8 +1691,22 @@ export class ActiveController implements AgentSessionListener {
 			this.turn = undefined;
 		}
 		if (next && !startedNext) {
-			await this.beginLogicalTurn(next);
+			await this.startQueued(next);
 		}
+	}
+
+	/**
+	 * Runs a queued task. Its "queued" entry sat where it was sent, inside the previous turn; it moves to the start of
+	 * its own turn, keeping who sent it and what it was about.
+	 */
+	private async startQueued(queued: { task: string; shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode' | 'author'>; entryId: string }): Promise<void> {
+		const index = this.chat.findIndex(entry => entry.id === queued.entryId);
+		if (index >= 0) {
+			this.chat.splice(index, 1);
+			this.chatIndex.delete(queued.entryId);
+			this.options.emit({ type: 'chatReset', chat: this.chat });
+		}
+		await this.beginLogicalTurn(queued.task, false, queued.shown);
 	}
 
 	/** A background task reported back: mark its pending check finished or failed. */
