@@ -30,7 +30,15 @@ PHONEME_MODEL = "facebook/wav2vec2-lv-60-espeak-cv-ft"
 CARRIERS = ["Next, the {} part.", "We use {} here.", "It skips the {} again.", "The parser walks each line and checks the {}."]
 # Respell only when the plain spelling misses at least this share of the word's phonemes, and keep a respelling only
 # when it is clearly better (a whole phoneme fewer errors on average).
-THRESHOLD = 0.12
+THRESHOLD = 0.25
+# A respelling must beat the plain word by this much on average, and be no worse in any carrier.
+MIN_GAIN = 0.15
+# Everyday function words MMS hears constantly in training; respelling them was where regressions came from.
+SKIP = set("""a about after again all also an and any are as at be because been before being both but by can could did
+do does doing down during each few for from further had has have having he her here hers him his how i if in into is it
+its itself just me more most my no nor not now of off on once only or other our out over own same she should so some
+such than that the their them then there these they this those through to too under until up very was we were what
+when where which while who whom why will with would you your""".split())
 
 # ARPAbet to the espeak-style IPA the phoneme model writes.
 IPA = {"AA": "ɑ", "AE": "æ", "AH": "ʌ", "AO": "ɔ", "AW": "aʊ", "AY": "aɪ", "EH": "ɛ", "ER": "ɚ", "EY": "eɪ", "IH": "ɪ",
@@ -204,21 +212,27 @@ def main():
     voice, _ = mms_sidecar.load_voice(args.model)
     listener = Listener()
 
-    def error(spelling, pron):
-        """Mean phoneme error of `spelling` against `pron` over the carriers."""
+    def errors(spelling, pron):
         target = to_ipa(pron)
-        return sum(word_error(listener.phonemes(voice.speak(mms_sidecar.normalize(c.format(spelling)))), target) for c in CARRIERS) / len(CARRIERS)
+        return [word_error(listener.phonemes(voice.speak(mms_sidecar.normalize(c.format(spelling)))), target) for c in CARRIERS]
 
     def best_spelling(word, pron):
-        plain = error(word, pron)
-        if plain < THRESHOLD:
-            return None, plain, plain
+        plain = errors(word, pron)
+        plain_mean = sum(plain) / len(plain)
+        if plain_mean < THRESHOLD:
+            return None, plain_mean, plain_mean
         # One word only: spaced syllables ("kaw ments") score well on phonemes but MMS then says them as separate
         # words, which sounds choppy and halts recognition (WER on the README went from 19% to 54%).
-        scored = sorted((error(candidate, pron), candidate) for candidate in respellings(pron, limit=30) if candidate != word and " " not in candidate)
-        if scored and scored[0][0] <= plain - 0.07:  # about one phoneme better on average
-            return scored[0][1], plain, scored[0][0]
-        return None, plain, scored[0][0] if scored else plain
+        best = None
+        for candidate in respellings(pron, limit=30):
+            if candidate == word or " " in candidate:
+                continue
+            errs = errors(candidate, pron)
+            mean = sum(errs) / len(errs)
+            # Better on average, and never worse in any one context (MMS says spellings differently by context).
+            if mean <= plain_mean - MIN_GAIN and all(e <= p + 1e-9 for e, p in zip(errs, plain)) and (best is None or mean < best[0]):
+                best = (mean, candidate)
+        return (best[1], plain_mean, best[0]) if best else (None, plain_mean, plain_mean)
 
     from collections import Counter
 
@@ -229,7 +243,7 @@ def main():
     words = {word for word, n in counts.items() if n >= args.min_count}
     if args.extra_words:
         words.update(line.strip().lower() for line in Path(args.extra_words).read_text().splitlines() if line.strip())
-    words = sorted(word for word in words if len(word) >= args.min_length and word in pronunciations and word not in HETERONYMS)
+    words = sorted(word for word in words if len(word) >= args.min_length and word in pronunciations and word not in HETERONYMS and word not in SKIP)
     heteronym_words = HETERONYMS
     if args.only:
         words = [word for word in args.only if word in pronunciations and word not in HETERONYMS]
