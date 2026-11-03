@@ -43,7 +43,7 @@ fi
 export XDG_CONFIG_HOME="$FRESH/xdg-config"
 export XDG_DATA_HOME="$FRESH/xdg-data"
 unset META_API_KEY
-# Reuse the downloaded Phonon model instead of fetching it again.
+# Reuse the downloaded narration models instead of fetching it again.
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 if [[ $NO_MUSE == 1 ]]; then
 	# A throwaway home without ~/.local/bin/muse, and a PATH without any muse on it.

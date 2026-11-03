@@ -1,0 +1,27 @@
+{
+	"name": "active-multiplayer-server",
+	"description": "Signalling server for Active multiplayer: introduces peers, relays opaque signalling blobs, hands out TURN credentials.",
+	"version": "0.1.0",
+	"license": "MIT",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=22.18"
+	},
+	"scripts": {
+		"dev:local": "node src/local.ts",
+		"test": "node --test --test-reporter=spec test/*.test.ts",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+		"dev": "npx wrangler@4 dev",
+		"deploy": "npx wrangler@4 deploy"
+	},
+	"dependencies": {
+		"ws": "^8.18.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20251101.0",
+		"@types/node": "^22.0.0",
+		"@types/ws": "^8.18.0",
+		"typescript": "^5.9.0"
+	}
+}

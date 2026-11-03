@@ -51,6 +51,7 @@ import { SystemMapEditor } from './systemMapEditor.js';
 import { SystemMapFolderPrompt } from './systemMapPrompt.js';
 import { ACTIVE_HISTORY_VIEW_ID, ActiveService, ActiveWalkthroughAvailable, ActiveWalkthroughFocus, IActiveService } from './activeService.js';
 import { ActiveChatEditor } from './chatEditor.js';
+import { ActiveDictationRecording, ActiveDictationService, DICTATE_COMMAND_ID, IActiveDictationService, STOP_DICTATION_COMMAND_ID } from './dictation.js';
 import { ACTIVE_CHANGE_COUNTS_VIEW_ID, ChangeCountsBar, explorerChangeCountsDescriptor } from './explorerStats.js';
 import { AgentDecorations, AgentQuickDiff } from './agentChanges.js';
 import { ExplorerGuide } from './explorerGuide.js';
@@ -60,6 +61,7 @@ import { KnowledgeProfileEditor } from './profileEditor.js';
 import { ActiveCommandIds, WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughEditor } from './walkthroughEditor.js';
 import { ActiveWelcomeDialog } from './welcomeDialog.js';
+import './multiplayer/multiplayer.contribution.js';
 
 registerSingleton(IActiveService, ActiveService, InstantiationType.Delayed);
 
@@ -226,6 +228,66 @@ viewsRegistry.registerViews([{ id: ACTIVE_CHANGE_COUNTS_VIEW_ID, name: localize2
 // ---------------------------------------------------------------- actions & configurable keybindings
 
 const category = localize2('activeCategory', "Active");
+
+// ---------------------------------------------------------------- dictation
+
+registerSingleton(IActiveDictationService, ActiveDictationService, InstantiationType.Delayed);
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: DICTATE_COMMAND_ID,
+			title: localize2('dictate', "Dictate into Chat"),
+			metadata: { description: localize2('dictateDescription', "Hold to talk and release to transcribe, or tap to start and tap again (or press Escape) to stop.") },
+			category,
+			f1: true,
+			keybinding: {
+				// Cmd+Alt+V is VS Code's own "dictate here" key: in a code editor with a dictation engine it stays
+				// editor dictation; everywhere else it dictates into Active's chat.
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyV,
+				when: ContextKeyExpr.or(ContextKeyExpr.not('editorTextFocus'), ContextKeyExpr.and(ContextKeyExpr.not('hasSpeechProvider'), ContextKeyExpr.not('chatSpeechToTextConfigured'))),
+				weight: KeybindingWeight.WorkbenchContrib + 1,
+			},
+		});
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const dictation = accessor.get(IActiveDictationService);
+		const activeService = accessor.get(IActiveService);
+		// Hold mode has to be asked for while the key press is being dispatched, before anything awaits.
+		const held = accessor.get(IKeybindingService).enableKeybindingHoldMode(DICTATE_COMMAND_ID);
+		if (dictation.state !== 'idle') {
+			dictation.stop();
+			return;
+		}
+		if (!dictation.target) {
+			await activeService.openChat(false);
+		}
+		const target = dictation.target;
+		if (!target) {
+			return;
+		}
+		const release = dictation.press(target);
+		if (held) {
+			await held;
+			release();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: STOP_DICTATION_COMMAND_ID,
+			title: localize2('stopDictation', "Stop Dictation"),
+			category,
+			precondition: ActiveDictationRecording,
+			keybinding: { primary: KeyCode.Escape, when: ActiveDictationRecording, weight: KeybindingWeight.WorkbenchContrib + 50 },
+		});
+	}
+	run(accessor: ServicesAccessor): void {
+		accessor.get(IActiveDictationService).stop();
+	}
+});
 
 registerAction2(class extends Action2 {
 	constructor() {
@@ -584,6 +646,7 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 			this.narration.update(this.narrationEntry());
 		};
 		this._register(activeService.onDidChangeAgent(update));
+		this._register(activeService.onDidChangeRemote(update));
 		this._register(activeService.onDidChangeWalkthroughStatus(update));
 		this._register(activeService.onDidChangePlayer(update));
 		this._register(activeService.onDidChangePlayback(update));
@@ -595,6 +658,10 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 	}
 
 	private modeEntry() {
+		// Guests get no explanations.
+		if (this.activeService.remote) {
+			return { name: localize('activeMode', "Active Mode"), text: '', ariaLabel: '' };
+		}
 		const active = this.editorService.activeEditor;
 		const mode = this.activeService.mode;
 		// Labelled, since the mode is one of several things the bottom left could be about now.
@@ -645,7 +712,7 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 		const text = off
 			? `$(mute) ${localize('narrationTurnedOff', "Narration off")}`
 			: narration.available
-				? `$(unmute) ${voice && voice !== 'default' ? localize('narrationReadyVoice', "Phonon 31M · {0}", voice) : localize('narrationReady', "Phonon 31M · on-device")}`
+				? `$(unmute) ${voice && voice !== 'default' && narration.voices?.some(item => item.name === voice) ? localize('narrationReadyVoice', "{0} · {1}", narration.model ?? localize('narrationName', "Narration"), voice) : localize('narrationReady', "{0} · on-device", narration.model ?? localize('narrationName', "Narration"))}`
 				: `$(mute) ${localize('narrationOff', "Narration unavailable")}`;
 		const tooltip = off ? localize('narrationOffTooltip', "Walkthroughs aren't narrated. Click to choose a voice.") : narration.available ? localize('narrationTooltip', "{0}. Click to change the voice.", narration.detail) : narration.detail;
 		return { name: localize('activeNarration', "Active Narration"), text, ariaLabel: text, tooltip, command: ActiveCommandIds.PickVoice };
@@ -715,6 +782,7 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this._register(activeService.onDidChangeDiagram(update));
 		this._register(activeService.onDidChangePlayer(update));
 		this._register(activeService.onDidChangeHandoff(update));
+		this._register(activeService.onDidChangeRemote(update));
 		this._register(keybindingService.onDidUpdateKeybindings(update));
 		this._register(activeService.onDidChangeControlsHeight(update));
 		this._register(layoutService.onDidLayoutMainContainer(update));
@@ -751,7 +819,8 @@ class ActiveFloatingButtons extends Disposable implements IWorkbenchContribution
 		this.walkthrough.classList.toggle('hidden', onWalkthrough || !!this.activeService.pendingHandoff || !this.activeService.hasRecentWalkthrough);
 		this.map.classList.toggle('hidden', active instanceof SystemMapInput || (!this.activeService.diagramsEnabled && !this.activeService.diagram.current));
 		this.map.title = localize('fabSystemMapTitle', "Open the system map");
-		this.trace.classList.toggle('hidden', active instanceof TraceInput);
+		// Traces are built by the host's agent: not for guests (for now).
+		this.trace.classList.toggle('hidden', active instanceof TraceInput || !!this.activeService.remote);
 		this.trace.title = localize('fabCodeTraceTitle', "Trace how something flows through the code");
 		const choices = this.choices();
 		// The cascade runs from the item nearest the circle upwards.

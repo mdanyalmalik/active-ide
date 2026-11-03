@@ -22,15 +22,17 @@ import { callDebugTool, DEBUG_TOOLS, MCP_SERVER_NAME } from './debug/debugTools'
 import { RunningMcpServer, startMcpServer } from './debug/mcpServer';
 import { VscodeDebugBackend } from './debug/vscodeDebugBackend';
 import { DiagramAgent } from './diagram/diagramAgent';
+import { Dictation } from './dictation/transcriber';
 import { TraceBuilder } from './trace/traceBuilder';
 import { ExplainerMemory } from './explain/memory';
 import { HistoryStore, ProfileStore } from './history/historyStore';
 import { AgentApprovalMode, Briefing, DiagramState, ExplainMode, extractJsonObject, MAIN_AGENT_ID, MergeAgentsRequest, NewAgentRequest } from './shared/activeProtocol';
-import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, TaskRequest, TraceRequest, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
+import { ActiveEvent, ActiveSetting, AgentRunSettings, DiagramFolderMode, AskRequest, BriefingRequest, DEFAULT_PROFILE, ElaborateRequest, ExtensionCommand, KnowledgeProfile, REASONING_EFFORTS, ReasoningEffort, SignInMethod, SynthesizeResult, SystemMapTextEdit, TaskRequest, TraceRequest, TranscribeRequest, TranscribeResult, WORKBENCH_EVENT_COMMAND } from './shared/activeProtocol';
 import { ChangeTracker } from './tracking/changeTracker';
 import { isIgnoredPath, WorkspaceFiles } from './tracking/workspaceFiles';
 import { AgentSetup } from './setup/agentSetup';
-import { PhononNarrator } from './tts/phonon';
+import { narrationEngine, NarrationEngineId } from './tts/engines';
+import { SidecarNarrator } from './tts/sidecarNarrator';
 
 /** The coding session last open in this folder (resumed on the next start). */
 const LAST_SESSION_KEY = 'active.codingSessionId';
@@ -81,6 +83,11 @@ async function migrateNarrationSettings(stored: Partial<KnowledgeProfile>): Prom
 	}
 }
 
+/** Folders holding Active's tools: the repo's .tools, then ~/.active. */
+function toolDirs(extensionPath: string): string[] {
+	return [path.resolve(extensionPath, '..', '..', '..', '.tools'), path.join(os.homedir(), '.active')];
+}
+
 function resolvePython(extensionPath: string): string {
 	const configured = config<string>('narration.pythonPath', '');
 	if (configured) {
@@ -110,8 +117,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		void vscode.commands.executeCommand(WORKBENCH_EVENT_COMMAND, event).then(undefined, () => undefined);
 	};
 
-	const narrator = new PhononNarrator(resolvePython(context.extensionPath), context.asAbsolutePath(path.join('resources', 'phonon_sidecar.py')), status => emit({ type: 'narration', ...status }), log);
+	const makeNarrator = () => {
+		const settings = vscode.workspace.getConfiguration();
+		const engine = narrationEngine(settings.get<NarrationEngineId>(ActiveSetting.NarrationEngine, 'mms'), context.asAbsolutePath('resources'), settings.get<string>(ActiveSetting.NarrationMmsModel, ''), toolDirs(context.extensionPath));
+		return new SidecarNarrator(engine, resolvePython(context.extensionPath), status => emit({ type: 'narration', ...status }), log);
+	};
+	let narrator = makeNarrator();
 	context.subscriptions.push({ dispose: () => narrator.dispose() });
+	// A different engine or model takes effect right away: the old sidecar stops and the new one loads.
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+		if (event.affectsConfiguration(ActiveSetting.NarrationEngine) || event.affectsConfiguration(ActiveSetting.NarrationMmsModel) || event.affectsConfiguration('active.narration.pythonPath')) {
+			narrator.dispose();
+			narrator = makeNarrator();
+			void narrator.start().catch(error => log(`narration unavailable: ${error instanceof Error ? error.message : error}`));
+		}
+	}));
 
 	const folder = vscode.workspace.workspaceFolders?.[0];
 	const register = (id: string, handler: (...args: never[]) => unknown) => context.subscriptions.push(vscode.commands.registerCommand(id, handler));
@@ -138,6 +158,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		? new BridgeProvider(config<string>('dev.bridgeDir', '') || path.join(storage, 'bridge', workspaceKey))
 		: new MuseProvider();
 	const providerInfo = { id: provider.id, name: provider.displayName, shortName: provider.shortName, devOnly: provider.devOnly };
+
+	// Dictation uses this developer's own Muse, even as a guest in someone else's session or with no folder open.
+	const muse = new MuseProvider();
+	const dictation = new Dictation({
+		locate: () => muse.locate(config<string>('muse.binaryPath', '') || undefined),
+		env: async (): Promise<Record<string, string>> => {
+			const key = await context.secrets.get(`active.agent.${muse.id}.apiKey`);
+			return key ? { [muse.apiKeyEnvVar]: key } : {};
+		},
+		log,
+	});
+	register(ExtensionCommand.Transcribe, (request: TranscribeRequest): Promise<TranscribeResult> =>
+		dictation.transcribe(request).catch(error => ({ error: error instanceof Error ? error.message : String(error), errorKind: 'failed' as const })));
 
 	if (!folder || folder.uri.scheme !== 'file') {
 		register(ExtensionCommand.Init, async () => ({
@@ -396,6 +429,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			},
 			runner,
 			storeDir: path.join(storage, 'traces', workspaceKey),
+			agentId: spec.id,
 			emit: trace => emit({ type: 'trace', trace }),
 			profile: () => profile,
 			log,
@@ -487,19 +521,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		agentStates: await agents.agentStates(),
 		multiAgentBlocker: agents.multiAgentBlocker,
 	}));
-	register(ExtensionCommand.DiagramBuild, () => runtime().diagram.build());
-	register(ExtensionCommand.DiagramUpdate, () => runtime().diagram.updateNow());
-	register(ExtensionCommand.TraceBuild, (request: TraceRequest) => runtime().traces.build(request));
+	// The System Map is per agent: the workbench names the agent whose map is showing (the highlighted one).
+	register(ExtensionCommand.DiagramBuild, (agentId?: string) => runtime(agentId).diagram.build());
+	register(ExtensionCommand.DiagramUpdate, (agentId?: string) => runtime(agentId).diagram.updateNow());
+	// A trace follows one agent's folder: built by that agent's runtime (the workbench sends the highlighted agent).
+	// Every runtime reads and writes the same trace folder, so any of them can list, load or delete one.
+	register(ExtensionCommand.TraceBuild, (request: TraceRequest, agentId?: string) => runtime(agentId).traces.build(request));
 	register(ExtensionCommand.TraceGet, (id: string) => runtime().traces.get(id));
 	register(ExtensionCommand.TraceList, () => runtime().traces.list());
 	register(ExtensionCommand.TraceDelete, (id: string) => runtime().traces.delete(id));
-	register(ExtensionCommand.DiagramReviseText, (edit: SystemMapTextEdit) => runtime().diagram.reviseText(edit));
-	register(ExtensionCommand.DiagramEdit, (request: string) => {
-		const target = runtime();
+	register(ExtensionCommand.DiagramReviseText, (edit: SystemMapTextEdit, agentId?: string) => runtime(agentId).diagram.reviseText(edit));
+	register(ExtensionCommand.DiagramEdit, (request: string, agentId?: string) => {
+		const target = runtime(agentId);
 		return target.controller.editDiagram(request, text => target.diagram.edit(text));
 	});
-	register(ExtensionCommand.DiagramRevision, (version: number) => runtime().diagram.revision(version));
-	register(ExtensionCommand.DiagramSetFolderMode, (mode: DiagramFolderMode) => runtime().diagram.setFolderMode(mode));
+	register(ExtensionCommand.DiagramRevision, (version: number, agentId?: string) => runtime(agentId).diagram.revision(version));
+	register(ExtensionCommand.DiagramSetFolderMode, (mode: DiagramFolderMode, agentId?: string) => runtime(agentId).diagram.setFolderMode(mode));
 	register(ExtensionCommand.SubmitTask, (request: string | TaskRequest, agentId?: string) => agents.submitTask(agentId, request));
 	register(ExtensionCommand.Ask, (request: AskRequest, agentId?: string) => agents.controllerFor(agentId).ask(request));
 	register(ExtensionCommand.DecideApproval, (request: { approvalId: string; choiceId: string; agentId?: string }) => agents.controllerFor(request.agentId).decideApproval(request.approvalId, request.choiceId));

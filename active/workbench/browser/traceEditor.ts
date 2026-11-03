@@ -21,7 +21,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { traceStepStates, type CodeTrace, type TraceFork, type TraceHopKind, type TraceStep, type TraceStepState, type TraceSummary } from '../common/activeProtocol.js';
+import { MAIN_AGENT_ID, traceStepStates, type CodeTrace, type TraceFork, type TraceHopKind, type TraceStep, type TraceStepState, type TraceSummary } from '../common/activeProtocol.js';
 import { TraceInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
 
@@ -255,7 +255,9 @@ export class TraceEditor extends EditorPane {
 			const text = dom.append(open, $('span.text'));
 			dom.append(text, $('span.title')).textContent = entry.title;
 			const meta = dom.append(text, $('span.meta'));
-			meta.textContent = `${status} · ${fromNow(entry.createdAt, true)}`;
+			// With several agents, which one's code it follows.
+			const agent = this.activeService.agents.length > 1 ? this.activeService.agentInfo(entry.agentId ?? MAIN_AGENT_ID) : undefined;
+			meta.textContent = agent ? `${status} · ${agent.name} · ${fromNow(entry.createdAt, true)}` : `${status} · ${fromNow(entry.createdAt, true)}`;
 			if (entry.question !== entry.title) {
 				open.title = entry.question;
 			}
@@ -482,7 +484,7 @@ export class TraceEditor extends EditorPane {
 		const where = dom.append(titles, $('button.step-where')) as HTMLButtonElement;
 		where.textContent = `${step.file}:${step.startLine}${step.endLine !== step.startLine ? `–${step.endLine}` : ''}`;
 		where.title = localize('traceOpenFile', "Open {0} at these lines", step.file);
-		this.renderStore.add(dom.addDisposableListener(where, dom.EventType.CLICK, () => void this.openStep(step)));
+		this.renderStore.add(dom.addDisposableListener(where, dom.EventType.CLICK, () => void this.openStep(trace, step)));
 		const badge = dom.append(head, $(`span.step-badge.${state}`));
 		if (state === 'observed') {
 			badge.textContent = seen!.hits > 1 ? localize('traceRanTimes', "Ran ×{0}", seen!.hits) : localize('traceRanOnce', "Ran");
@@ -603,9 +605,9 @@ export class TraceEditor extends EditorPane {
 		}
 	}
 
-	private async openStep(step: TraceStep): Promise<void> {
-		// Traces are made in the highlighted agent's folder.
-		const resource = this.activeService.resolveAgentPath(step.file);
+	private async openStep(trace: CodeTrace, step: TraceStep): Promise<void> {
+		// In the folder of the agent whose code the trace follows, whichever agent is highlighted now.
+		const resource = this.activeService.resolveAgentPath(step.file, this.activeService.liveAgent(trace.agentId ?? MAIN_AGENT_ID));
 		if (!resource) {
 			return;
 		}

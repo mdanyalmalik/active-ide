@@ -2,14 +2,14 @@
 
 Active is a Code OSS–based IDE that keeps you informed while an AI agent codes: every meaningful change comes with a narrated walkthrough, tuned to what you already know. It's for developers at any stage of their career who want to follow along with the agent's work rather than review it blind. It was built for the Meta Global Hackathon.
 
-You give Muse Code a task in a chat that fills the work area. The explanation model decides, from your knowledge profile, whether and how much to explain: nothing, a short note in chat, or an inline walkthrough. Long tasks are explained in chapters as each piece of work is finished. A walkthrough pops up from chat: the captured code sits in the native editor, and an explanation zone next to the relevant lines switches between code, diffs, equations, diagrams and charts, in step with on-device narration (Phonon 31M).
+You give Muse Code a task in a chat that fills the work area. The explanation model decides, from your knowledge profile, whether and how much to explain: nothing, a short note in chat, or an inline walkthrough. Long tasks are explained in chapters as each piece of work is finished. A walkthrough pops up from chat: the captured code sits in the native editor, and an explanation zone next to the relevant lines switches between code, diffs, equations, diagrams and charts, in step with on-device narration (MMS English, int8).
 
 ## Setup
 
 Requirements: macOS or Linux, git, Python 3.9+ (or `uv`), and about 3 GB of disk space for Code OSS.
 
 ```sh
-scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron, Phonon, debuggers, Active sources
+scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron, narration (MMS), debuggers, Active sources
 ```
 
 ### Muse Code (coding and explanation)
@@ -35,11 +35,17 @@ The agent integration is provider-based (`active/extension/src/agents/providers.
 
 Muse Code is the default (`active.agent.provider: "muse"`). Adding another agent such as Claude or ChatGPT means writing one provider plus a session adapter that implements `AgentHost`/`AgentSession`. The setup flow and every UI label take the provider's name.
 
-### Phonon 31M (narration)
+### Narration (MMS English)
 
 `scripts/setup-debuggers.sh` downloads the debuggers Active ships, pinned with checksums in `scripts/debuggers.json` (all MIT): debugpy 1.8.21 (the last to support Python 3.8+) into `active/extension/vendor`, and CodeLLDB 1.12.3 for this platform into `vscode/.build/builtInExtensions` (`apply_patches.py` lists it in `product.json`). Delve isn't downloaded: Active runs `go install` for it into its storage on the first Go run.
 
-`scripts/setup-tts.sh` creates `.tools/tts-venv` with Gradium's `ptts` package. On first use, the Apache-2.0 model `gradium/phonon-31m-en` downloads from Hugging Face; after that it runs on the CPU. To use another interpreter, set `active.narration.pythonPath`.
+`scripts/setup-tts.sh` creates `.tools/tts-venv` with both narration engines and downloads their models from Hugging Face; after that they run on the CPU. To use another interpreter, set `active.narration.pythonPath`.
+
+- **MMS English**: Meta's `facebook/mms-tts-eng` (VITS, ~36M parameters, CC-BY-NC 4.0, one voice). Setup exports it once (`active/tts-finetune/export_onnx.py`) to int8 ONNX in `.tools/tts-models/mms-eng-int8`. That's 40 MB instead of 145 MB, and it runs on onnxruntime with the sidecar's own tokenizer, so the runtime needs no torch. Compared with torch fp32 on an M-series CPU, it loads in 0.5 s instead of 3.4 s, runs at about 11× realtime instead of 6×, and uses about 290 MB of memory instead of 910 MB. The int8 audio differs from fp32 by less than two fp32 runs differ from each other.
+- **Your own model:** `active.narration.mmsModel` takes another int8 folder, such as a fine-tune from [`active/tts-finetune`](active/tts-finetune/README.md). It also accepts a Hugging Face id or checkpoint folder, which runs on torch.
+- **Phonon 31M** (Gradium's `ptts`, a native int8 runtime) stays in the code for after the hackathon but is hidden. To use it, set `"active.narration.engine": "phonon"` in settings.json.
+
+Changing either setting restarts narration right away.
 
 ## Run
 
@@ -88,7 +94,7 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 - **Floating buttons**: **Chat** appears whenever chat isn't showing, and **Walkthrough** (the latest explanation) appears whenever a walkthrough isn't showing. Reopening chat always starts on a new coding task; **Ask About** switches to questions about the paused walkthrough.
 - **Pending checks** (background commands that outlasted the timeout) update live on the cards when they finish or fail, and the result is saved to history.
 - **Detail feedback**: now and then, at the end of a walkthrough, Active asks whether the detail was too much, about right, or too little. Each answer nudges the general detail preference a little (a full step changes the depth setting) and moves the profile's knowledge of the walkthrough's topics more.
-- **Voices**: click the Phonon item in the status bar (or **Active: Choose Narration Voice**) to preview and pick one of Phonon's catalog voices. Each voice downloads on first use.
+- **Voices**: click the narration item in the status bar (or **Active: Choose Narration Voice**) to preview and pick a voice. MMS has one.
 - **Default keybindings**, all rebindable in Keyboard Shortcuts:
   - With the walkthrough focused: `Space`/`K` pause or resume, `←`/`J` rewind, `→`/`L` advance, `C` open chat, `O` open file.
   - Anywhere: `⌘K C` open chat about the walkthrough, `⌘K W` return to the walkthrough, `⌘⌥I` open chat.
@@ -114,6 +120,7 @@ The chat header labels this mode "Claude Code subagent bridge (dev only)".
 | `active.explain.chapterMinutes` | 10 | At most one chapter per this many minutes; shorter tasks get one explanation at the end. |
 | `active.explain.queueChapters` | true | A chapter that's ready while you watch the previous one waits until it ends. |
 | `active.explain.preferNotesForSmallChanges` | true | Small changes and short requests lean toward a note in chat. |
+| `active.narration.mmsModel` | – | MMS model: an int8 ONNX folder, or a Hugging Face id or checkpoint (torch). Empty uses the installed stock export. |
 | `active.muse.binaryPath` / `active.narration.pythonPath` | – | Tool locations. |
 
 ## Architecture
@@ -125,11 +132,12 @@ active/
     agents/                     platform-neutral agent interfaces + Muse Code adapter (museHost.ts)
     tracking/                   workspace mirror, per-turn baseline / ordered edits / net diff, Myers diff
     explain/                    per-turn worthiness, planning prompts, read-only explanation session, validate+repair
-    tts/ + resources/           Phonon sidecar (audio in memory only)
+    tts/ + resources/           narration sidecars (audio in memory only)
     history/                    local history store (content-addressed blobs), knowledge profile
     controller.ts               orchestration
   workbench/browser/            Code OSS contribution: chat / walkthrough / profile editor panes,
                                 player, visuals, History view, Explorer counts, status bar, actions
+  tts-finetune/                 fine-tune MMS on a better teacher TTS (offline, not shipped)
 scripts/                        setup, sync into vscode/, patches, run
 demo/                           sample project + scripted scenarios for the test double
 ```

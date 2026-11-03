@@ -31,6 +31,8 @@ export interface TraceBuilderOptions {
 	readonly log: (line: string) => void;
 	readonly now?: () => number;
 	readonly newId?: () => string;
+	/** The agent whose folder (`root`) this builder traces, recorded on each trace. */
+	readonly agentId?: string;
 }
 
 const RUN_TIMEOUT_MS = 60_000;
@@ -51,7 +53,7 @@ export class TraceBuilder {
 	/** Starts a trace and resolves with its id at once; progress and the result arrive through `emit`. */
 	async build(request: TraceRequest): Promise<string> {
 		const id = (this.options.newId ?? (() => `trace-${this.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`))();
-		const trace: CodeTrace = { id, question: request.question, createdAt: this.now(), status: 'tracing', detail: 'Reading the code…', title: request.question, overview: '', steps: [], snippets: {} };
+		const trace: CodeTrace = { id, question: request.question, createdAt: this.now(), status: 'tracing', detail: 'Reading the code…', title: request.question, overview: '', steps: [], snippets: {}, ...(this.options.agentId ? { agentId: this.options.agentId } : {}) };
 		this.update(trace);
 		void this.run(trace, request).catch(error => this.update({ ...this.traces.get(id)!, status: 'failed', detail: `The trace failed: ${message(error)}` }));
 		return id;

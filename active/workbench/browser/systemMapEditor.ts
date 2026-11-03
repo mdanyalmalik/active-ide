@@ -25,6 +25,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { ActiveSetting, type DiagramFolderMode, type MapSelection, type SystemComponent, type SystemConnection, type SystemFileRef, type SystemMapRevision } from '../common/activeProtocol.js';
 import { SystemMapInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
+import { onRightClickQuickPrompt, QuickPromptOptions } from './quickPrompt.js';
 import { connectionPath, layoutMap, MapPoint, mapBounds, NODE_HEIGHT, NODE_WIDTH } from './systemMapLayout.js';
 
 const $ = dom.$;
@@ -268,11 +269,13 @@ export class SystemMapEditor extends EditorPane {
 		button(Codicon.zoomIn, '', localize('mapZoomIn', "Zoom In (+)"), () => this.zoomBy(1.2));
 		button(Codicon.screenFull, localize('mapFit', "Fit"), localize('mapFitTitle', "Show the whole map (0)"), () => this.fit(true), !this.nodes.size);
 		const busy = diagram.status === 'building' || diagram.status === 'updating';
-		if (current) {
+		// A guest looks at the host's map; updating and restructuring it are the host's.
+		if (current && !this.activeService.remote) {
 			button(Codicon.refresh, localize('mapCheck', "Check Now"), localize('mapCheckTitle', "Ask the diagram agent to look for changes now"), () => void this.activeService.updateDiagram(), busy || !this.activeService.diagramsEnabled);
 			// Bigger changes are described in chat, where the diagram agent replies with what it did. (Names and
 			// descriptions are edited in place, from a box's popup.)
-			button(Codicon.editSparkle, localize('mapRestructure', "Restructure"), localize('mapRestructureTitle', "Describe bigger changes in chat (split or merge parts, regroup them, change the level of detail) and the diagram agent makes them. To rename a part or change its description, click it and use the pencil."), () => void this.activeService.editMapInChat(), !this.activeService.diagramsEnabled);
+			const restructure = button(Codicon.editSparkle, localize('mapRestructure', "Restructure"), localize('mapRestructureTitle', "Describe bigger changes in chat (split or merge parts, regroup them, change the level of detail) and the diagram agent makes them. Right-click to type it here. To rename a part or change its description, click it and use the pencil."), () => void this.activeService.editMapInChat(), !this.activeService.diagramsEnabled);
+			this.headerStore.add(onRightClickQuickPrompt(restructure, () => this.quickRestructure()));
 		}
 	}
 
@@ -281,6 +284,9 @@ export class SystemMapEditor extends EditorPane {
 	 * dot), Manual, or Off. Clicking it changes the mode for this folder.
 	 */
 	private renderUpdateMode(): void {
+		if (this.activeService.remote) {
+			return;
+		}
 		const diagram = this.activeService.diagram;
 		const enabled = this.activeService.diagramsEnabled;
 		const mode: DiagramFolderMode = !enabled ? 'off' : diagram.folderMode ?? 'off';
@@ -768,9 +774,13 @@ export class SystemMapEditor extends EditorPane {
 		].filter(Boolean);
 		dom.append(this.selectionBar, $('span.count')).textContent = parts.join(localize('mapPickedAnd', " and "));
 		const ask = dom.append(this.selectionBar, $('button.primary')) as HTMLButtonElement;
+		// Asking is an explanation feature: not for guests (for now).
+		ask.style.display = this.activeService.remote ? 'none' : '';
 		dom.append(ask, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.commentDiscussion));
 		dom.append(ask, $('span')).textContent = localize('mapAskThese', "Ask About These");
+		ask.title = localize('mapAskTheseTitle', "Ask about these in chat. Right-click to type it here.");
 		this.selectionBarStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => void this.askAboutPicked()));
+		this.selectionBarStore.add(onRightClickQuickPrompt(ask, () => this.quickAsk()));
 		const clear = dom.append(this.selectionBar, $('button.secondary')) as HTMLButtonElement;
 		clear.textContent = localize('mapClearPicked', "Clear");
 		clear.title = localize('mapClearPickedTitle', "Clear the selection (Escape)");
@@ -779,9 +789,44 @@ export class SystemMapEditor extends EditorPane {
 
 	/** Opens chat set to ask about what's picked, named the way the developer sees it on the map. */
 	private async askAboutPicked(): Promise<void> {
+		const picked = this.pickedQuestion();
+		if (picked) {
+			await this.activeService.askAboutMap(picked.selection, picked.title);
+		}
+	}
+
+	/** Right-click on Ask About This/These: type the question by the button and send it without opening chat. */
+	private quickAsk(): QuickPromptOptions | undefined {
+		const picked = this.pickedQuestion();
+		if (!picked || this.activeService.remote) {
+			return undefined;
+		}
+		return {
+			title: localize('quickAskMap', "Ask about {0}", picked.title),
+			placeholder: localize('quickAskMapPlaceholder', "Ask about this part of the system…"),
+			agent: this.activeService.highlightedAgent,
+			showAgent: this.activeService.agents.length > 1,
+			send: question => this.activeService.ask({ question, map: picked.selection }),
+		};
+	}
+
+	/** Right-click on Restructure: describe the change by the button; the diagram agent makes it. */
+	private quickRestructure(): QuickPromptOptions | undefined {
+		if (this.activeService.remote || !this.activeService.diagramsEnabled) {
+			return undefined;
+		}
+		return {
+			title: localize('quickRestructure', "Restructure the System Map"),
+			placeholder: localize('quickRestructurePlaceholder', "Split, merge or regroup parts…"),
+			send: request => this.activeService.editDiagram(request),
+		};
+	}
+
+	/** What's picked, as a map selection and the way the developer sees it named on the map. */
+	private pickedQuestion(): { selection: MapSelection; title: string } | undefined {
 		const map = this.shown?.map;
 		if (!map || !this.picked.length) {
-			return;
+			return undefined;
 		}
 		const name = (id: string) => map.components.find(component => component.id === id)?.name ?? id;
 		// Boxes first, then arrows, however they were picked.
@@ -795,7 +840,7 @@ export class SystemMapEditor extends EditorPane {
 			connections: this.picked.flatMap(item => item.kind === 'connection' ? [{ from: item.from, to: item.to }] : []),
 			version: this.viewingOld ? this.shown?.version : undefined,
 		};
-		await this.activeService.askAboutMap(selection, title);
+		return { selection, title };
 	}
 
 	private selectedComponent(): SystemComponent | undefined {
@@ -833,7 +878,7 @@ export class SystemMapEditor extends EditorPane {
 		close.title = localize('mapPopupClose', "Close (Escape)");
 		this.popupStore.add(dom.addDisposableListener(close, dom.EventType.CLICK, () => this.select(undefined)));
 		// Names and descriptions are the developer's to edit in place, on the latest version.
-		if (!this.viewingOld) {
+		if (!this.viewingOld && !this.activeService.remote) {
 			const pencil = dom.append(head, $('button.popup-close.popup-edit')) as HTMLButtonElement;
 			pencil.classList.add(...ThemeIcon.asClassNameArray(Codicon.edit));
 			pencil.classList.toggle('active', this.editing);
@@ -888,10 +933,12 @@ export class SystemMapEditor extends EditorPane {
 		}
 		const actions = dom.append(this.popup, $('.popup-actions'));
 		const ask = dom.append(actions, $('button.primary')) as HTMLButtonElement;
+		ask.style.display = this.activeService.remote ? 'none' : '';
 		dom.append(ask, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.commentDiscussion));
 		dom.append(ask, $('span')).textContent = localize('mapAskThis', "Ask About This");
-		ask.title = localize('mapAskThisTitle', "Ask about this in chat");
+		ask.title = localize('mapAskThisTitle', "Ask about this in chat. Right-click to type it here.");
 		this.popupStore.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => void this.askAboutPicked()));
+		this.popupStore.add(onRightClickQuickPrompt(ask, () => this.quickAsk()));
 		dom.append(actions, $('span.popup-hint')).textContent = isMacintosh
 			? localize('mapMultiHintMac', "⌘-click or ⌘-drag to pick more")
 			: localize('mapMultiHint', "Ctrl-click or Ctrl-drag to pick more");

@@ -748,11 +748,12 @@ export class ActiveController implements AgentSessionListener {
 	/** Starts a coding task; one about code the developer pointed at shows in chat as their words with what it's about. */
 	async submitTask(request: string | TaskRequest): Promise<void> {
 		const { text, code } = typeof request === 'string' ? { text: request, code: undefined } : request;
+		const author = typeof request === 'string' ? undefined : request.author;
 		if (!text.trim()) {
 			return;
 		}
 		const task = typeof request === 'string' ? text.trim() : composeCodeTask(request);
-		const shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode'> = code ? { text: text.trim(), about: describeCodeSelection(code), aboutCode: true } : { text: task };
+		const shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode' | 'author'> = { ...(code ? { text: text.trim(), about: describeCodeSelection(code), aboutCode: true } : { text: typeof request === 'string' ? task : text.trim() }), ...(author ? { author } : {}) };
 		if (!this.coding) {
 			await this.connect();
 		}
@@ -768,7 +769,7 @@ export class ActiveController implements AgentSessionListener {
 		await this.beginLogicalTurn(task, false, shown);
 	}
 
-	private async beginLogicalTurn(task: string, agentInitiated = false, shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode'> = { text: task }): Promise<LogicalTurn> {
+	private async beginLogicalTurn(task: string, agentInitiated = false, shown: Pick<ChatEntry, 'text' | 'about' | 'aboutCode' | 'author'> = { text: task }): Promise<LogicalTurn> {
 		const turn: LogicalTurn = {
 			id: `turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
 			index: ++this.turnCounter,

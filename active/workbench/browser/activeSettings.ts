@@ -113,7 +113,7 @@ const general: IConfigurationNode = {
 		[ActiveSetting.NarrationVoice]: {
 			type: 'string',
 			default: '',
-			markdownDescription: localize('narrationVoice', "Phonon voice for walkthrough narration. Empty uses Phonon's default; `off` turns narration off (walkthroughs are read with Previous and Next). Pick and preview voices with **Active: Choose Narration Voice** or the status bar."),
+			markdownDescription: localize('narrationVoice', "Voice for walkthrough narration. Empty uses the model's default; `off` turns narration off (walkthroughs are read with Previous and Next). Pick and preview voices with **Active: Choose Narration Voice** or the status bar."),
 			scope: ConfigurationScope.APPLICATION,
 		},
 		[ActiveSetting.NarrationSpeed]: {
@@ -127,8 +127,46 @@ const general: IConfigurationNode = {
 		'active.narration.pythonPath': {
 			type: 'string',
 			default: '',
-			description: localize('narrationPython', "Python interpreter with the `ptts` package (Phonon). Empty uses .tools/tts-venv or ~/.active/tts-venv."),
+			description: localize('narrationPython', "Python interpreter with the narration packages (from scripts/setup-tts.sh). Empty uses .tools/tts-venv or ~/.active/tts-venv."),
 			scope: ConfigurationScope.MACHINE,
+		},
+		[ActiveSetting.NarrationEngine]: {
+			type: 'string',
+			enum: ['mms', 'phonon'],
+			enumDescriptions: [
+				localize('engineMms', "Meta's MMS English (facebook/mms-tts-eng), on-device."),
+				localize('enginePhonon', "Phonon 31M English, on-device, with a catalog of voices."),
+			],
+			default: 'mms',
+			description: localize('narrationEngine', "The text-to-speech model for narration."),
+			scope: ConfigurationScope.APPLICATION,
+			// MMS only for the hackathon: Phonon stays in the code (settings.json can still pick it) but isn't offered.
+			included: false,
+		},
+		[ActiveSetting.NarrationMmsModel]: {
+			type: 'string',
+			default: '',
+			markdownDescription: localize('narrationMmsModel', "The MMS model: an int8 ONNX folder from `active/tts-finetune/export_onnx.py` (fast, used for the default), or a Hugging Face id or checkpoint folder (run on torch, slower). Empty uses the stock model that `scripts/setup-tts.sh` installs."),
+			scope: ConfigurationScope.MACHINE,
+		},
+		[ActiveSetting.DictationCleanup]: {
+			type: 'boolean',
+			default: false,
+			markdownDescription: localize('dictationCleanup', "Tidy dictated text with a cheap model: removes fillers, applies spoken corrections (\"no wait, make it 5\"), fixes punctuation and spells file and code names as in your project. Adds 3 to 6 seconds; past 8, the text as heard is used."),
+			scope: ConfigurationScope.APPLICATION,
+		},
+		[ActiveSetting.DictationCleanupModel]: {
+			type: 'string',
+			default: '',
+			markdownDescription: localize('dictationCleanupModel', "Model that tidies dictation. Empty uses the cheapest one your account offers (about $0.002 per dictation)."),
+			scope: ConfigurationScope.APPLICATION,
+		},
+		[ActiveSetting.DictationDictionary]: {
+			type: 'array',
+			items: { type: 'string' },
+			default: [],
+			markdownDescription: localize('dictationDictionary', "Names, jargon and acronyms dictation should spell your way, e.g. `Kubernetes`, `gRPC`, `useAgentGrid`."),
+			scope: ConfigurationScope.APPLICATION,
 		},
 		'active.agent.provider': {
 			type: 'string',

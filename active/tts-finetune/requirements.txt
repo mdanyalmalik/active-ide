@@ -1,0 +1,16 @@
+# Teacher (Kokoro 82M, Apache-2.0), dataset writing, and WikiText transcripts.
+kokoro>=0.9
+soundfile
+scipy
+numpy
+num2words
+datasets
+# Training (train_vits.py: VITS on transformers' VitsModel; CUDA, Apple MPS or CPU).
+torch
+transformers
+huggingface_hub
+safetensors
+# int8 ONNX export of the result (export_onnx.py).
+onnx
+onnxscript
+onnxruntime

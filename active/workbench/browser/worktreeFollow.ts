@@ -41,7 +41,7 @@ import { VIEW_ID as EXPLORER_VIEW_ID } from '../../files/common/files.js';
 import { ISCMRepository, ISCMService, ISCMViewService } from '../../scm/common/scm.js';
 import { SearchView } from '../../search/browser/searchView.js';
 import { AGENT_COLORS, AgentInfo, MAIN_AGENT_ID } from '../common/activeProtocol.js';
-import { IActiveService } from './activeService.js';
+import { IActiveService, REMOTE_FILE_SCHEME } from './activeService.js';
 
 // The workbench follows the highlighted agent's worktree: the Explorer, Search, Quick Open, Source Control, new
 // terminals and open editors switch to its folder, without changing the workspace folders (that would restart the
@@ -81,7 +81,7 @@ export function agentForResource(resource: URI, agents: readonly AgentInfo[], ma
 		if (agent.inMainFolder) {
 			continue;
 		}
-		const root = URI.file(agent.root);
+		const root = resource.scheme === REMOTE_FILE_SCHEME ? URI.from({ scheme: REMOTE_FILE_SCHEME, path: agent.root }) : URI.file(agent.root);
 		// Top-level agents come before their nested ones, so on equal roots the top-level one wins.
 		if (root.path.length > bestLength && extUri.isEqualOrParent(resource, root)) {
 			best = agent;
@@ -183,6 +183,7 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 		}));
 		// Agents' activity changes this often; only what's shown here matters (see `shownKey`).
 		this._register(this.activeService.onDidChangeAgents(() => this.update()));
+		this._register(this.activeService.onDidChangeRemote(() => this.update()));
 		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => this.update()));
 		this._register(this.editorService.onDidEditorsChange(() => this.updateOpenResources()));
 		this._register(this.configurationService.onDidChangeConfiguration(event => {
@@ -200,6 +201,11 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 		return this.workspaceService.getWorkspace().folders[0]?.uri;
 	}
 
+	/** An agent's folder: on this machine, or the host's (read-only, through the session) while a guest. */
+	private rootOf(agent: AgentInfo): URI {
+		return this.activeService.remote ? URI.from({ scheme: REMOTE_FILE_SCHEME, path: agent.root }) : URI.file(agent.root);
+	}
+
 	/** The highlighted agent when it works outside the developer's folder (the only case anything is overridden). */
 	private worktreeAgent(): AgentInfo | undefined {
 		const agent = this.activeService.highlightedAgent;
@@ -209,7 +215,7 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 	/** What this shows of the agents (folders, names, colours, branches, the highlight), to skip activity-only changes. */
 	private shownKey(): string {
 		const highlighted = this.activeService.highlightedAgentId;
-		return JSON.stringify([highlighted, this.mainFolder()?.toString(), this.activeService.agents.map(agent => [agent.id, agent.name, agent.root, agent.inMainFolder, agent.branch, agent.readOnly, agent.colorIndex, agent.kind, agent.finished])]);
+		return JSON.stringify([highlighted, this.mainFolder()?.toString(), !!this.activeService.remote, this.activeService.agents.map(agent => [agent.id, agent.name, agent.root, agent.inMainFolder, agent.branch, agent.readOnly, agent.colorIndex, agent.kind, agent.finished])]);
 	}
 
 	private lastKey: string | undefined;
@@ -226,19 +232,19 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 		// Every worktree's files are labelled relative to it, and subagents' worktrees are read-only, highlighted or not.
 		const roots: IOverrideRoot[] = [];
 		for (const agent of agents) {
-			if (!agent.inMainFolder && agent.root && !roots.some(root => extUriBiasedIgnorePathCase.isEqual(root.root, URI.file(agent.root)))) {
+			if (!agent.inMainFolder && agent.root && !roots.some(root => extUriBiasedIgnorePathCase.isEqual(root.root, this.rootOf(agent)))) {
 				roots.push({
-					root: URI.file(agent.root),
+					root: this.rootOf(agent),
 					name: agent.name,
-					readonly: agent.readOnly ? new MarkdownString(localize('worktreeReadOnly', "{0}'s worktree is read-only.", agent.name)) : undefined,
+					readonly: this.activeService.remote ? new MarkdownString(localize('sessionReadOnly', "Files in a shared session are read-only.")) : agent.readOnly ? new MarkdownString(localize('worktreeReadOnly', "{0}'s worktree is read-only.", agent.name)) : undefined,
 				});
 			}
 		}
 		workspaceRootOverride.setRoots(roots);
 
 		const agent = this.worktreeAgent();
-		const target = agent && folder ? URI.file(agent.root) : folder;
-		workspaceRootOverride.set(agent && folder ? { folder, root: URI.file(agent.root), label: agent.name } : undefined);
+		const target = agent && folder ? this.rootOf(agent) : folder;
+		workspaceRootOverride.set(agent && folder ? { folder, root: this.rootOf(agent), label: agent.name } : undefined);
 		this.updateStatus();
 		this.renderHeader();
 		this._onDidChangeDecorations.fire([...this.openResources]);
@@ -401,7 +407,8 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 	 */
 	private watch(): void {
 		const agent = this.worktreeAgent();
-		if (!agent || !this.mainFolder()) {
+		// A guest's host pushes changes itself.
+		if (!agent || !this.mainFolder() || this.activeService.remote) {
 			this.watcher.clear();
 			return;
 		}
@@ -412,7 +419,7 @@ class WorktreeFollow extends Disposable implements IWorkbenchContribution {
 				excludes.push(pattern);
 			}
 		}
-		this.watcher.value = this.fileService.watch(URI.file(agent.root), { recursive: true, excludes });
+		this.watcher.value = this.fileService.watch(this.rootOf(agent), { recursive: true, excludes });
 	}
 
 	// ------------------------------------------------------------- tab badges

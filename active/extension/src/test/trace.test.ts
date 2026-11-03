@@ -111,7 +111,7 @@ describe('Code trace shapes', () => {
 });
 
 describe('Building a code trace', () => {
-	async function harness(replies: string[], run: Awaited<ReturnType<TraceRunner['observe']>>) {
+	async function harness(replies: string[], run: Awaited<ReturnType<TraceRunner['observe']>>, agentId?: string) {
 		const storeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'active-trace-test-'));
 		const asked: string[] = [];
 		const observed: Array<{ command: string; points: readonly BreakpointSpec[] }> = [];
@@ -123,7 +123,7 @@ describe('Building a code trace', () => {
 		const builder = new TraceBuilder({
 			ask: async prompt => { asked.push(prompt.split('\n').find(line => line.startsWith('CODE TRACE')) ?? '?'); return replies.shift() ?? '{}'; },
 			root: '/work/project', listFiles: async () => Object.keys(FILES), readFile: async file => FILES[file], runner, storeDir,
-			emit: trace => emitted.push(trace), profile: () => DEFAULT_PROFILE, log: () => undefined, newId: () => 'trace-1',
+			emit: trace => emitted.push(trace), profile: () => DEFAULT_PROFILE, log: () => undefined, newId: () => 'trace-1', agentId,
 		});
 		const finished = () => new Promise<CodeTrace>(resolve => {
 			const check = () => {
@@ -235,5 +235,12 @@ describe('Building a code trace', () => {
 		await h.builder.build({ question: 'q', noRun: true });
 		const trace = await h.finished();
 		assert.deepStrictEqual({ statuses: h.emitted.map(entry => entry.status), observation: trace.observation, ran: h.observed.length }, { statuses: ['tracing', 'ready'], observation: undefined, ran: 0 });
+	});
+
+	test('a trace records the agent whose folder it follows, and the history keeps it', async () => {
+		const h = await harness([JSON.stringify({ title: 't', overview: 'o', steps: [] })], { outcome: 'ran', hits: [], output: [] } as never, 'a2');
+		await h.builder.build({ question: 'q', noRun: true });
+		const trace = await h.finished();
+		assert.deepStrictEqual([trace.agentId, (await h.builder.list())[0]?.agentId], ['a2', 'a2']);
 	});
 });

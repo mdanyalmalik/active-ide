@@ -8,6 +8,7 @@ import { RunOnceScheduler } from '../../../../base/common/async.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
+import { extUriBiasedIgnorePathCase } from '../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { ContentWidgetPositionPreference, ICodeEditor, IContentWidget, IContentWidgetPosition } from '../../../../editor/browser/editorBrowser.js';
 import { EditorContributionInstantiation, registerEditorContribution } from '../../../../editor/browser/editorExtensions.js';
@@ -15,8 +16,9 @@ import { Selection } from '../../../../editor/common/core/selection.js';
 import { IEditorContribution } from '../../../../editor/common/editorCommon.js';
 import { localize } from '../../../../nls.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
-import type { CodeSelection } from '../common/activeProtocol.js';
+import { describeCodeSelection, type CodeSelection } from '../common/activeProtocol.js';
 import { IActiveService } from './activeService.js';
+import { onRightClickQuickPrompt, QuickPromptOptions } from './quickPrompt.js';
 
 /** How long the selection has to stay put before the button shows (so it doesn't flicker while dragging). */
 const SHOW_DELAY_MS = 180;
@@ -70,21 +72,50 @@ class SelectionAskContribution extends Disposable implements IEditorContribution
 		if (!text.trim()) {
 			return;
 		}
-		this.widget.value = new SelectionAskWidget(this.editor, selection, target => void this.open(target, selection, text), this.activeService.agent.provider.shortName);
+		this.widget.value = new SelectionAskWidget(this.editor, selection, target => void this.open(target, selection, text), target => this.quickPrompt(target, selection, text), this.activeService.agent.provider.shortName);
 	}
 
-	private async open(target: 'ask' | 'change', selection: Selection, text: string): Promise<void> {
+	/**
+	 * The selected code and the agent it belongs to: whoever's worktree the file is in (the highlighted agent for
+	 * files outside every agent's folder). The path is relative to that agent's folder, as the agent sees it.
+	 */
+	private codeFor(selection: Selection, text: string): { code: CodeSelection; agentId: string } | undefined {
 		const model = this.editor.getModel();
 		if (!model) {
-			return;
+			return undefined;
 		}
 		// A selection ending at the very start of a line doesn't include that line.
 		const endLine = selection.endColumn === 1 && selection.endLineNumber > selection.startLineNumber ? selection.endLineNumber - 1 : selection.endLineNumber;
-		const folder = this.workspaceService.getWorkspaceFolder(model.uri);
-		const file = folder ? model.uri.path.slice(folder.uri.path.replace(/\/$/, '').length + 1) : model.uri.fsPath;
-		const code: CodeSelection = { file, startLine: selection.startLineNumber, endLine, text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n…` : text };
+		const agentId = this.activeService.agentForResource(model.uri) ?? this.activeService.highlightedAgentId;
+		const root = this.activeService.agentRoot(agentId);
+		const folder = this.workspaceService.getWorkspaceFolder(model.uri)?.uri;
+		const file = (root && extUriBiasedIgnorePathCase.relativePath(root, model.uri)) ?? (folder && extUriBiasedIgnorePathCase.relativePath(folder, model.uri)) ?? model.uri.fsPath;
+		return { agentId, code: { file, startLine: selection.startLineNumber, endLine, text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n…` : text } };
+	}
+
+	private async open(target: 'ask' | 'change', selection: Selection, text: string): Promise<void> {
+		const picked = this.codeFor(selection, text);
+		if (!picked) {
+			return;
+		}
 		this.widget.clear();
-		await (target === 'ask' ? this.activeService.askAboutCode(code) : this.activeService.requestChange(code));
+		await (target === 'ask' ? this.activeService.askAboutCode(picked.code, picked.agentId) : this.activeService.requestChange(picked.code, undefined, picked.agentId));
+	}
+
+	/** Right-click: type the question or change by the button and send it without opening chat. */
+	private quickPrompt(target: 'ask' | 'change', selection: Selection, text: string): QuickPromptOptions | undefined {
+		const picked = this.codeFor(selection, text);
+		const remote = this.activeService.remote;
+		// Viewers can't send; guests don't get explanations, so asking is the host's.
+		if (!picked || remote?.role === 'viewer' || (target === 'ask' && remote)) {
+			return undefined;
+		}
+		const { code, agentId } = picked;
+		const where = describeCodeSelection(code);
+		const shared = { agent: this.activeService.agentInfo(agentId), showAgent: this.activeService.agents.length > 1 };
+		return target === 'ask'
+			? { ...shared, title: localize('quickAskCode', "Ask about {0}", where), placeholder: localize('quickAskCodePlaceholder', "Ask about this code…"), send: question => this.activeService.ask({ question, code }, agentId) }
+			: { ...shared, title: localize('quickChangeCode', "Request a change · {0}", where), placeholder: localize('quickChangePlaceholder', "Describe the change…"), send: change => this.activeService.submitTask({ text: change, code }, agentId, true) };
 	}
 }
 
@@ -100,17 +131,17 @@ class SelectionAskWidget extends Disposable implements IContentWidget {
 	private readonly node: HTMLElement;
 	private readonly row: HTMLElement;
 
-	constructor(private readonly editor: ICodeEditor, private readonly selection: Selection, run: (target: 'ask' | 'change') => void, agentName: string) {
+	constructor(private readonly editor: ICodeEditor, private readonly selection: Selection, run: (target: 'ask' | 'change') => void, quick: (target: 'ask' | 'change') => QuickPromptOptions | undefined, agentName: string) {
 		super();
 		// Monaco sets the widget's own node to display: block, so the row is laid out inside it.
 		this.node = dom.$('.active-selection-widget');
 		this.row = dom.append(this.node, dom.$('.active-selection-actions'));
-		this.button(Codicon.commentDiscussion, localize('askAboutThis', "Ask about this"), localize('askAboutThisTitle', "Ask Active's explainer about the selected code, in chat"), () => run('ask'));
-		this.button(Codicon.editSparkle, localize('requestChangeHere', "Request a change"), localize('requestChangeHereTitle', "Ask {0} for a change in chat, with the selected code as context: a change to it, or elsewhere based on it", agentName), () => run('change'));
+		this.button(Codicon.commentDiscussion, localize('askAboutThis', "Ask about this"), localize('askAboutThisTitle', "Ask Active's explainer about the selected code, in chat. Right-click to type it here."), () => run('ask'), () => quick('ask'));
+		this.button(Codicon.editSparkle, localize('requestChangeHere', "Request a change"), localize('requestChangeHereTitle', "Ask {0} for a change in chat, with the selected code as context: a change to it, or elsewhere based on it. Right-click to type it here.", agentName), () => run('change'), () => quick('change'));
 		editor.addContentWidget(this);
 	}
 
-	private button(icon: ThemeIcon, label: string, title: string, run: () => void): void {
+	private button(icon: ThemeIcon, label: string, title: string, run: () => void, quick: () => QuickPromptOptions | undefined): void {
 		const button = dom.append(this.row, dom.$('button.active-selection-ask'));
 		button.setAttribute('type', 'button');
 		dom.append(button, dom.$('span.icon')).classList.add(...ThemeIcon.asClassNameArray(icon));
@@ -126,6 +157,7 @@ class SelectionAskWidget extends Disposable implements IContentWidget {
 			event.stopPropagation();
 			run();
 		}));
+		this._register(onRightClickQuickPrompt(button, quick));
 	}
 
 	getId(): string {

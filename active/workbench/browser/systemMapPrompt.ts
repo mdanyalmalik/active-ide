@@ -36,6 +36,10 @@ export class SystemMapFolderPrompt extends Disposable implements IWorkbenchContr
 	private evaluate(): void {
 		const folder = this.workspaceService.getWorkspace().folders[0];
 		const diagram = this.activeService.diagram;
+		// A guest in someone's session sees the host's map; this window's own folder isn't on screen.
+		if (this.activeService.remote) {
+			return;
+		}
 		if (this.asked || !folder || !this.activeService.stateLoaded || !this.activeService.diagramsEnabled || diagram.current || diagram.folderMode !== undefined || diagram.status === 'building') {
 			return;
 		}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup: Node 24, Code OSS 1.143.1 + dependencies, Electron, Phonon TTS, the shipped debuggers, and Active's sources.
+# One-time setup: Node 24, Code OSS 1.143.1 + dependencies, Electron, narration TTS (MMS + Phonon), the shipped debuggers, and Active's sources.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 mkdir -p "$ACTIVE_ROOT/.tools"

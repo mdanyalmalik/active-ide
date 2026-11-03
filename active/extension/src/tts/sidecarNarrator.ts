@@ -13,7 +13,15 @@ interface Pending {
 	reject(error: Error): void;
 }
 
-export type PhononStatus = NarrationStatus;
+/** A narration model run as a Python sidecar speaking the JSON-lines protocol of resources/*_sidecar.py. */
+export interface NarrationEngine {
+	/** Shown in the status bar and messages, e.g. "MMS English". */
+	readonly name: string;
+	readonly script: string;
+	readonly args?: readonly string[];
+	/** What the Python environment needs, for the "not found" message. */
+	readonly needs: string;
+}
 
 /** Storytelling character voices (a demon, a wizard…) as opposed to everyday narrators. */
 function isCharacterVoice(name: string, description: string | undefined): boolean {
@@ -21,20 +29,24 @@ function isCharacterVoice(name: string, description: string | undefined): boolea
 }
 
 /**
- * Client for the Phonon 31M English sidecar. Audio is synthesized on demand from
+ * Client for a narration sidecar (MMS or Phonon). Audio is synthesized on demand from
  * narration text and returned in memory; it is never written to history.
  */
-export class PhononNarrator {
+export class SidecarNarrator {
 	private child: ChildProcessWithoutNullStreams | undefined;
 	private ready: Promise<void> | undefined;
 	private readonly pending = new Map<string, Pending>();
 	private nextId = 1;
-	private status: PhononStatus = { available: false, detail: 'Phonon not started' };
+	private status: NarrationStatus;
 	private voices: VoiceInfo[] = [];
+	private model: string;
 
-	constructor(private readonly python: string, private readonly script: string, private readonly onStatus: (status: PhononStatus) => void, private readonly log: (line: string) => void) { }
+	constructor(private readonly engine: NarrationEngine, private readonly python: string, private readonly onStatus: (status: NarrationStatus) => void, private readonly log: (line: string) => void) {
+		this.model = engine.name;
+		this.status = { available: false, detail: `${engine.name} not started`, model: engine.name };
+	}
 
-	get currentStatus(): PhononStatus {
+	get currentStatus(): NarrationStatus {
 		return this.status;
 	}
 
@@ -44,32 +56,34 @@ export class PhononNarrator {
 		}
 		this.ready = new Promise<void>((resolve, reject) => {
 			if (!existsSync(this.python)) {
-				this.setStatus({ available: false, detail: `Python for Phonon not found at ${this.python}. Run scripts/setup-tts.sh or set active.narration.pythonPath.` });
+				this.setStatus({ available: false, detail: `Python for ${this.engine.name} (${this.engine.needs}) not found at ${this.python}. Run scripts/setup-tts.sh or set active.narration.pythonPath.` });
 				reject(new Error(this.status.detail));
 				return;
 			}
-			this.setStatus({ available: false, detail: 'Loading Phonon 31M…' });
-			const child = spawn(this.python, [this.script], { stdio: ['pipe', 'pipe', 'pipe'] });
+			this.setStatus({ available: false, detail: `Loading ${this.engine.name}…` });
+			const child = spawn(this.python, [this.engine.script, ...(this.engine.args ?? [])], { stdio: ['pipe', 'pipe', 'pipe'] });
 			this.child = child;
-			child.stderr.on('data', chunk => this.log(`[phonon] ${String(chunk).trimEnd()}`));
+			child.stderr.on('data', chunk => this.log(`[narration] ${String(chunk).trimEnd()}`));
 			const lines = readline.createInterface({ input: child.stdout });
 			let started = false;
 			lines.on('line', line => {
-				let message: { ready?: boolean; error?: string; id?: string; wav?: string; model?: string; voices?: Array<{ name: string; description?: string } | string> };
+				let message: { ready?: boolean; error?: string; id?: string; wav?: string; model?: string; voices?: Array<{ name: string; description?: string } | string>; label?: string };
 				try {
 					message = JSON.parse(line);
 				} catch {
-					this.log(`[phonon] ${line}`);
+					this.log(`[narration] ${line}`);
 					return;
 				}
 				if (!started && message.ready !== undefined) {
 					started = true;
 					if (message.ready) {
 						this.voices = (message.voices ?? []).map(voice => typeof voice === 'string' ? { name: voice } : { name: voice.name, description: voice.description || undefined, character: voice.name !== 'default' && isCharacterVoice(voice.name, voice.description) });
-						this.setStatus({ available: true, detail: 'Phonon 31M English · on-device' });
+						// `label` is a display name (a fine-tune's folder, say); `model` is only an id, so the engine's name is shown instead.
+						this.model = message.label || this.engine.name;
+						this.setStatus({ available: true, detail: `${this.model} · on-device` });
 						resolve();
 					} else {
-						this.setStatus({ available: false, detail: `Phonon failed to load: ${message.error}` });
+						this.setStatus({ available: false, detail: `${this.engine.name} failed to load: ${message.error}` });
 						reject(new Error(this.status.detail));
 					}
 					return;
@@ -86,7 +100,7 @@ export class PhononNarrator {
 				}
 			});
 			child.on('exit', code => {
-				const error = new Error(`Phonon sidecar exited (${code})`);
+				const error = new Error(`${this.engine.name} sidecar exited (${code})`);
 				for (const pending of this.pending.values()) {
 					pending.reject(error);
 				}
@@ -109,7 +123,7 @@ export class PhononNarrator {
 		await this.start();
 		const child = this.child;
 		if (!child) {
-			throw new Error('Phonon is not running');
+			throw new Error(`${this.engine.name} is not running`);
 		}
 		const id = String(this.nextId++);
 		return new Promise<string>((resolve, reject) => {
@@ -118,8 +132,8 @@ export class PhononNarrator {
 		});
 	}
 
-	private setStatus(status: PhononStatus): void {
-		status = { ...status, voices: this.voices.length ? this.voices : undefined };
+	private setStatus(status: NarrationStatus): void {
+		status = { ...status, model: this.model, voices: this.voices.length ? this.voices : undefined };
 		this.status = status;
 		this.onStatus(status);
 	}

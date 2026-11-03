@@ -387,6 +387,8 @@ export interface ApprovalRequest {
 	readonly approvalId: string;
 	readonly title: string;
 	readonly detail: string;
+	/** The narration model, e.g. "MMS English" or "Phonon 31M". */
+	readonly model?: string;
 	readonly choices: ReadonlyArray<{ readonly choiceId: string; readonly label: string; readonly approves: boolean }>;
 	readonly resolved?: string;
 }
@@ -410,6 +412,15 @@ export interface ChatEntry {
 	readonly aboutCode?: boolean;
 	/** The developer's message describes a change to the system map. */
 	readonly mapEdit?: boolean;
+	/** Multiplayer: who sent this message, when it wasn't the host. */
+	readonly author?: SessionAuthor;
+}
+
+/** A person in a multiplayer session, as messages name them. */
+export interface SessionAuthor {
+	readonly id: string;
+	readonly name: string;
+	readonly colorIndex: number;
 }
 
 export type WalkthroughStage = 'idle' | 'collecting' | 'drafting' | 'waitingForBackground' | 'finalizing' | 'ready' | 'notExplained' | 'failed';
@@ -418,6 +429,8 @@ export interface WalkthroughStatus {
 	readonly turnId: string;
 	readonly stage: WalkthroughStage;
 	readonly detail: string;
+	/** The narration model, e.g. "MMS English" or "Phonon 31M". */
+	readonly model?: string;
 }
 
 export interface FileChangeStat {
@@ -577,12 +590,22 @@ export const enum ActiveSetting {
 	ExplanationEffort = 'active.explanation.reasoningEffort',
 	NarrationVoice = 'active.narration.voice',
 	NarrationSpeed = 'active.narration.speed',
+	/** `mms` (the default for the hackathon) or `phonon`. */
+	NarrationEngine = 'active.narration.engine',
+	/** The MMS checkpoint: a Hugging Face id or a local folder (a fine-tune from active/tts-finetune). */
+	NarrationMmsModel = 'active.narration.mmsModel',
 	ExplainMode = 'active.explain.mode',
 	/** What Active does around the coding agent: walkthroughs, the system map, or both. */
 	Features = 'active.features',
 	DebugAgentTools = 'active.debug.agentTools',
 	DebugSuggestWhenStuck = 'active.debug.suggestWhenStuck',
 	DiagramCheckMinutes = 'active.diagram.checkMinutes',
+	/** Dictation: tidy the transcript with a cheap model (fillers, punctuation, self-corrections, identifiers). */
+	DictationCleanup = 'active.dictation.cleanup',
+	/** Dictation: the model that tidies it; empty picks the cheapest one offered. */
+	DictationCleanupModel = 'active.dictation.cleanupModel',
+	/** Dictation: names, jargon and identifiers to spell the developer's way. */
+	DictationDictionary = 'active.dictation.dictionary',
 }
 
 export type ActiveFeatures = 'both' | 'explanations' | 'diagrams';
@@ -623,6 +646,8 @@ export interface VoiceInfo {
 export interface NarrationStatus {
 	readonly available: boolean;
 	readonly detail: string;
+	/** The narration model, e.g. "MMS English" or "Phonon 31M". */
+	readonly model?: string;
 	/** Voices the narrator offers; `default` is the model's built-in voice. */
 	readonly voices?: ReadonlyArray<VoiceInfo>;
 }
@@ -739,6 +764,8 @@ export const enum ExtensionCommand {
 	AgentInterrupt = 'active.ext.agentInterrupt',
 	/** All agents' state (`AgentInitialState[]`), e.g. after the agent list changes. */
 	AgentStates = 'active.ext.agentStates',
+	/** Dictation (`TranscribeRequest`): `TranscribeResult`. Always runs in this window, with this developer's own Muse. */
+	Transcribe = 'active.ext.transcribe',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
@@ -804,6 +831,8 @@ export interface TaskRequest {
 	readonly code?: CodeSelection;
 	/** The explanation card the change was requested from: its title and what it said. */
 	readonly explanation?: { readonly title: string; readonly text: string };
+	/** Multiplayer: a guest sent it (shown with their name). */
+	readonly author?: SessionAuthor;
 }
 
 /** Boxes and arrows picked on the system map (at least one). */
@@ -818,6 +847,36 @@ export interface SynthesizeResult {
 	/** Base64 WAV (24 kHz mono). Never persisted. */
 	readonly wav?: string;
 	readonly error?: string;
+}
+
+export interface TranscribeRequest {
+	/** Base64 WAV (16 kHz mono PCM16). Never persisted. */
+	readonly wav: string;
+	/** Tidy the transcript with a cheap model; absent: the raw transcript. */
+	readonly cleanup?: DictationCleanupRequest;
+}
+
+export interface DictationCleanupRequest {
+	readonly model?: string;
+	/** Names the developer may say: open files, recently changed files, identifiers on screen (only those the transcript seems to mention are sent). */
+	readonly vocabulary: readonly string[];
+	/** The developer's own dictionary (always sent). */
+	readonly dictionary: readonly string[];
+	/** The text just before the cursor, for continuing a sentence. */
+	readonly before?: string;
+}
+
+/** `signedOut`: Muse has no credentials; `empty`: no words were heard; `unavailable`: Muse isn't installed. */
+export type TranscribeErrorKind = 'signedOut' | 'empty' | 'unavailable' | 'failed';
+
+export interface TranscribeResult {
+	readonly text?: string;
+	/** What was heard, before cleanup. */
+	readonly raw?: string;
+	/** Whether `text` is the cleaned-up version (false: cleanup was off, failed or too slow). */
+	readonly cleaned?: boolean;
+	readonly error?: string;
+	readonly errorKind?: TranscribeErrorKind;
 }
 
 export interface HistoryDetail {
@@ -1494,6 +1553,8 @@ export interface CodeTrace {
 	readonly forks?: readonly TraceFork[];
 	readonly snippets: Readonly<Record<string, TraceSnippet>>;
 	readonly observation?: TraceObservation;
+	/** The agent whose folder it follows (its steps' paths are relative to that folder). Absent: the main agent. */
+	readonly agentId?: string;
 }
 
 /** A past trace in the history list. */
@@ -1505,11 +1566,12 @@ export interface TraceSummary {
 	readonly status: TraceStatus;
 	/** For a ready trace: whether running it confirmed the path (`observed`), or it's from the source alone. */
 	readonly evidence?: 'observed' | 'inferred';
+	readonly agentId?: string;
 }
 
 export function summarizeTrace(trace: CodeTrace): TraceSummary {
 	const observed = trace.observation && trace.observation.outcome !== 'failed';
-	return { id: trace.id, question: trace.question, title: trace.title, createdAt: trace.createdAt, status: trace.status, ...(trace.status === 'ready' ? { evidence: observed ? 'observed' as const : 'inferred' as const } : {}) };
+	return { id: trace.id, question: trace.question, title: trace.title, createdAt: trace.createdAt, status: trace.status, ...(trace.status === 'ready' ? { evidence: observed ? 'observed' as const : 'inferred' as const } : {}), ...(trace.agentId ? { agentId: trace.agentId } : {}) };
 }
 
 export interface TraceRequest {

@@ -1,0 +1,24 @@
+# Cloudflare Worker + Durable Object for Active multiplayer signalling.
+# Nothing here is account-specific; `wrangler deploy` uses the logged-in account.
+name = "active-multiplayer"
+main = "src/worker.ts"
+compatibility_date = "2025-11-01"
+
+# One Durable Object instance per room (addressed by room id).
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+# SQLite-backed storage is the recommended (and free-plan compatible) backend.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# Secrets (not stored here; set with `wrangler secret put <NAME>`):
+#   TURN_KEY_ID         - the TURN key's id (Cloudflare dashboard > Realtime > TURN)
+#   TURN_KEY_API_TOKEN  - that key's API token
+# Without them, GET /turn returns public STUN only.
+#
+# For `wrangler dev`, put them in a git-ignored .dev.vars file instead:
+#   TURN_KEY_ID=...
+#   TURN_KEY_API_TOKEN=...

@@ -1,7 +1,7 @@
 {
 	"name": "active-agent",
 	"displayName": "Active Agent Services",
-	"description": "Muse Code coding/explanation sessions, change tracking, walkthrough planning, Phonon narration and local history for Active.",
+	"description": "Muse Code coding/explanation sessions, change tracking, walkthrough planning, on-device narration (MMS or Phonon) and local history for Active.",
 	"version": "0.1.0",
 	"publisher": "active",
 	"license": "MIT",

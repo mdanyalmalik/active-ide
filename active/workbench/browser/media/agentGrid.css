@@ -1389,3 +1389,111 @@
 @keyframes active-helper-fade {
 	to { opacity: 0; }
 }
+
+/* ------------------------------------------------------------------ multiplayer presence */
+
+/* People's colours are separate from the agents' so a person and an agent never look alike. */
+.monaco-workbench {
+	--active-person-0: #f2c94c;
+	--active-person-1: #f2784b;
+	--active-person-2: #6fcf97;
+	--active-person-3: #56ccf2;
+	--active-person-4: #bb6bd9;
+	--active-person-5: #ff6b9a;
+}
+
+.active-presence-badges {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 6px;
+	flex-shrink: 0;
+}
+
+.active-presence-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	background: var(--person-color);
+	color: #1e1e1e;
+	font-size: 8px;
+	font-weight: 700;
+	letter-spacing: -0.2px;
+	box-shadow: 0 0 0 1.5px var(--vscode-editor-background);
+}
+
+.active-presence-badge + .active-presence-badge {
+	margin-left: -4px;
+}
+
+.active-presence-more {
+	margin-left: 3px;
+	font-size: 10px;
+	opacity: 0.75;
+}
+
+.monaco-workbench .active-chat-header .active-presence-legend {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-left: auto;
+	margin-right: 12px;
+	padding: 2px 9px;
+	border-radius: 11px;
+	/* Neutral, so every person's colour reads on it. */
+	background: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	font-size: 11px;
+	white-space: nowrap;
+	min-width: 0;
+	overflow: hidden;
+}
+
+/* The legend takes the right-hand group's push, so the status after it sits beside it. */
+.monaco-workbench .active-chat-header .active-presence-legend:not(.hidden) + .agent-status {
+	margin-left: 0;
+}
+
+.monaco-workbench .active-chat-header .active-presence-legend.hidden {
+	display: none;
+}
+
+.active-presence-person {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+}
+
+.active-presence-swatch {
+	flex-shrink: 0;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--person-color);
+}
+
+.active-presence-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 110px;
+}
+
+/* A guest's message: their name in their colour, with a matching edge. */
+.active-chat .entry.user.by-person {
+	padding-left: 12px;
+	box-shadow: inset 3px 0 0 var(--person-color);
+}
+
+.active-chat .entry.user.by-person > .eyebrow {
+	color: var(--person-color);
+}
+
+.active-chat .agent-session {
+	margin-left: 8px;
+	padding: 1px 7px;
+	border-radius: 9px;
+	font-size: 11px;
+	background: color-mix(in srgb, var(--active-person-0) 22%, transparent);
+}

@@ -17,6 +17,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { AGENT_COLORS, type AgentApprovalMode, type AgentInfo, type AgentOverlap, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
 import { IActiveService } from './activeService.js';
+import { renderPresenceBadges } from './multiplayer/presence.js';
 
 const $ = dom.$;
 
@@ -422,10 +423,11 @@ export function agentStatus(agent: AgentInfo): AgentStatusKind {
 	return agent.status === 'running' ? 'running' : agent.status === 'starting' ? 'starting' : agent.status === 'error' ? 'error' : agent.status === 'unavailable' ? 'unavailable' : 'idle';
 }
 
-export function agentStatusLabel(agent: AgentInfo, agents: readonly AgentInfo[]): string {
+/** `canApprove`: false for a viewer in someone's session, who sees that an approval is pending but can't answer it. */
+export function agentStatusLabel(agent: AgentInfo, agents: readonly AgentInfo[], canApprove = true): string {
 	switch (agentStatus(agent)) {
 		case 'merged': return localize('agentMerged', "Merged into {0}", agents.find(other => other.id === agent.mergedInto)?.name ?? '');
-		case 'approval': return localize('agentApproval', "Needs your approval");
+		case 'approval': return canApprove ? localize('agentApproval', "Needs your approval") : localize('agentApprovalOther', "Waiting for approval");
 		case 'finished': return localize('agentFinished', "Finished");
 		case 'running': return localize('agentRunning', "Working");
 		case 'starting': return localize('agentStarting', "Starting…");
@@ -1013,7 +1015,7 @@ export class AgentGridView extends Disposable {
 		node.dataset.status = status;
 		node.classList.toggle('leaving', this.leaving.has(agent.id));
 		node.setAttribute('aria-selected', String(highlighted === agent.id));
-		node.setAttribute('aria-label', localize('boxAria', "{0}: {1}", agent.name, agentStatusLabel(agent, agents)));
+		node.setAttribute('aria-label', localize('boxAria', "{0}: {1}", agent.name, agentStatusLabel(agent, agents, this.activeService.canApprove)));
 
 		// Header: the handle for moving the box, with name, status and the box's menu.
 		const header = dom.append(node, $('.agent-box-header'));
@@ -1023,14 +1025,15 @@ export class AgentGridView extends Disposable {
 		if (status === 'running' || status === 'starting') {
 			chip.classList.add('live');
 		}
-		chip.textContent = agentStatusLabel(agent, agents);
+		chip.textContent = agentStatusLabel(agent, agents, this.activeService.canApprove);
 		const helper = helperOf(agent, agents);
 		if (helper) {
 			dom.append(header, $('span.agent-helper-tag')).textContent = helper;
 		}
+		renderPresenceBadges(header, this.activeService, agent.id);
 		const actions = dom.append(header, $('.agent-box-actions'));
-		// Subagents' work is explained as part of their parent's: no explanation mode of their own.
-		if (agent.kind === 'agent') {
+		// Subagents' work is explained as part of their parent's: no explanation mode of their own. Guests get no explanations.
+		if (agent.kind === 'agent' && !this.activeService.remote) {
 			const mode = this.activeService.modeOf(agent.id);
 			const modeButton = this.iconButton(actions, explainModeIcon(mode), localize('boxModeTitle', "Explanations for {0}: {1}. Click to change.", agent.name, mode === 'auto' ? localize('modeAutoShort', "Auto") : mode === 'away' ? localize('modeAwayShort', "Away") : localize('modeOffShort', "Off")), store, () => {
 				this.contextMenuService.showContextMenu({ getAnchor: () => modeButton, getActions: () => explainModeActions(this.activeService, agent.id).actions });
@@ -1096,7 +1099,10 @@ export class AgentGridView extends Disposable {
 				detail.title = approval.approval.detail;
 			}
 			const buttons = dom.append(card, $('.approval-actions'));
-			for (const choice of approval.approval.choices) {
+			if (!this.activeService.canApprove) {
+				dom.append(buttons, $('span.approval-waiting')).textContent = localize('approvalWaitingHost', "Waiting for the host or a collaborator");
+			}
+			for (const choice of this.activeService.canApprove ? approval.approval.choices : []) {
 				const button = dom.append(buttons, $(`button.${choice.approves ? 'primary' : 'secondary'}`)) as HTMLButtonElement;
 				button.textContent = choice.label;
 				const approvalId = approval.approval.approvalId;
@@ -1240,6 +1246,14 @@ export class AgentGridView extends Disposable {
 
 	private showBoxMenu(agent: AgentInfo, anchor: HTMLElement): void {
 		const running = agent.status === 'running';
+		// A guest can only look: stopping, renaming, modes, merging and closing are the host's.
+		if (this.activeService.remote) {
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => anchor,
+				getActions: () => [toAction({ id: 'active.agentBox.open', label: localize('boxOpen', "Open Full Screen"), run: () => this.host.open(agent.id) })],
+			});
+			return;
+		}
 		if (agent.kind === 'subagent') {
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => anchor,
@@ -1510,6 +1524,10 @@ export class AgentGridView extends Disposable {
 
 	/** Only top-level agents still working on their own can be merged, and not into themselves. */
 	private canMerge(sourceId: string, targetId: string): boolean {
+		// Merging is the host's.
+		if (this.activeService.remote) {
+			return false;
+		}
 		const source = this.activeService.agentInfo(sourceId);
 		const target = this.activeService.agentInfo(targetId);
 		const open = (agent: AgentInfo | undefined) => !!agent && agent.kind === 'agent' && !agent.mergedInto && !agent.finished;

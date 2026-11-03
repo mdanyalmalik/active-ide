@@ -31,6 +31,7 @@ import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
 import { AgentApprovalMode, AgentInfo, AgentInitialState, AgentOverlap, MAIN_AGENT_ID, MergeAgentsResult, NewAgentRequest } from '../common/activeProtocol.js';
 import { INotificationHandle } from '../../../../platform/notification/common/notification.js';
+import { extUriBiasedIgnorePathCase } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ActiveEvent, CodeTrace, MapSelection, SystemMapTextEdit, TraceRequest, TraceSummary, TaskRequest, CodeSelection, describeCodeSelection, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput, TraceInput } from './activeInputs.js';
@@ -164,9 +165,10 @@ export interface IActiveService {
 	/** Opens chat set to describe changes to the system map. */
 	editMapInChat(): Promise<void>;
 	/** Opens chat set to ask the explainer about this code (selected in the editor). */
-	askAboutCode(code: CodeSelection): Promise<void>;
+	/** `agentId`: whose chat opens (default: the highlighted agent's); it's highlighted first when it isn't. */
+	askAboutCode(code: CodeSelection, agentId?: string): Promise<void>;
 	/** Opens chat set to ask the coding agent for a change, with this code (selected, or shown by a card) as context. */
-	requestChange(code: CodeSelection, explanation?: { title: string; text: string }): Promise<void>;
+	requestChange(code: CodeSelection, explanation?: { title: string; text: string }, agentId?: string): Promise<void>;
 
 	/** Sends a described change to the diagram agent, which replies in chat. */
 	editDiagram(request: string): Promise<void>;
@@ -197,11 +199,16 @@ export interface IActiveService {
 	readonly hasRecentWalkthrough: boolean;
 	readonly onDidChangeRecentWalkthrough: Event<void>;
 
-	handleEvent(event: ActiveEvent): void;
+	/** `fromHost`: forwarded from the host of the session this window is a guest in. */
+	handleEvent(event: ActiveEvent, fromHost?: boolean): void;
 	initialize(): Promise<void>;
 	/** Starts a coding task (`TaskRequest` when it's about code the developer pointed at). */
-	submitTask(text: string | TaskRequest): Promise<void>;
-	ask(request: AskRequest): Promise<void>;
+	/**
+	 * To `agentId` (default: the highlighted agent) without changing what's highlighted. `quiet` (a right-click quick
+	 * prompt): chat stays as it is, keeping its context, briefing and any paused walkthrough.
+	 */
+	submitTask(text: string | TaskRequest, agentId?: string, quiet?: boolean): Promise<void>;
+	ask(request: AskRequest, agentId?: string): Promise<void>;
 	decideApproval(approvalId: string, choiceId: string): Promise<void>;
 	synthesize(text: string, voice?: string): Promise<SynthesizeResult>;
 	getHistory(turnId: string): Promise<HistoryDetail | undefined>;
@@ -346,6 +353,14 @@ export interface IActiveService {
 	agentRoot(agentId?: string): URI | undefined;
 	/** A path relative to an agent's folder (default: the highlighted agent's) as a URI. */
 	resolveAgentPath(relative: string, agentId?: string): URI | undefined;
+	/**
+	 * The agent that messages about `resource` should go to: whoever's worktree it's in (a subagent's worktree goes to
+	 * the agent that started it, a merged agent's to where it was merged), the main agent for the developer's own
+	 * folder, undefined for anything outside them.
+	 */
+	agentForResource(resource: URI): string | undefined;
+	/** `agentId` itself while it's around; otherwise where it was merged, or the main agent. */
+	liveAgent(agentId: string | undefined): string;
 	/** One agent's transcript (`chat` is the highlighted one's). */
 	chatOf(agentId: string): readonly ChatEntry[];
 	agentStateOf(agentId: string): AgentState | undefined;
@@ -386,7 +401,53 @@ export interface IActiveService {
 	dismissAllBriefing(): void;
 	/** Another agent can be started here (the folder is a git repository); otherwise why not. */
 	readonly multiAgentBlocker: string | undefined;
+
+	// ------------------------------------------------------------- multiplayer
+
+	/** Set while this window is a guest in someone's session: everything shown is the host's. */
+	readonly remote: RemoteSession | undefined;
+	readonly onDidChangeRemote: Event<void>;
+	/** Becomes a guest: requests go to the host through `transport`, and the host's state replaces this window's. */
+	enterRemote(transport: RemoteTransport, snapshot: InitialState, session: RemoteSession): void;
+	/** Back to this window's own agents. */
+	exitRemote(): void;
+	/** The host changed what this guest may do. */
+	setRemoteRole(role: SessionRole): void;
+	/** Events from this window's own extension (a host forwards them to its guests). */
+	readonly onDidReceiveLocalEvent: Event<ActiveEvent>;
+	/** Everyone in the session and which agent each is looking at (empty outside a session). */
+	readonly presence: readonly SessionParticipant[];
+	readonly onDidChangePresence: Event<void>;
+	setPresence(participants: readonly SessionParticipant[], selfId: string | undefined): void;
+	/** This window's own participant id in the session, if any. */
+	readonly presenceSelfId: string | undefined;
+	/** Whether approvals can be answered here (not as a viewer in someone's session). */
+	readonly canApprove: boolean;
 }
+
+export type SessionRole = 'host' | 'collaborator' | 'viewer';
+
+export interface SessionParticipant {
+	readonly id: string;
+	readonly name: string;
+	readonly colorIndex: number;
+	readonly role: SessionRole;
+	/** The agent they have highlighted. */
+	readonly agentId?: string;
+}
+
+export interface RemoteSession {
+	readonly hostName: string;
+	readonly role: SessionRole;
+	readonly selfId: string;
+}
+
+export interface RemoteTransport {
+	call<T>(command: string, args: unknown[]): Promise<T>;
+}
+
+/** Files of a host's project, as a guest opens them (read-only, fetched on demand). */
+export const REMOTE_FILE_SCHEME = 'active-remote';
 
 export type AgentHighlightReason = 'user' | 'explanation';
 
@@ -419,6 +480,31 @@ const AGENT_MODES_KEY = 'active.agents.modes';
 const HIGHLIGHTED_AGENT_KEY = 'active.agents.highlighted';
 const CAUGHT_UP_ALL_KEY = 'active.away.caughtUpAllAt';
 const SHOW_FINISHED_HELPERS_KEY = 'active.agents.showFinishedHelpers';
+
+/** `agentId` while it can take messages; a subagent's go to its parent, a merged agent's to where it was merged. */
+export function liveAgent(agents: readonly AgentInfo[], agentId: string | undefined): string {
+	let info = agentId ? agents.find(agent => agent.id === agentId) : undefined;
+	for (let hops = 0; info && hops < 8; hops++) {
+		const next = info.mergedInto ?? (info.kind === 'subagent' ? info.parentId : undefined);
+		if (!next) {
+			return info.id;
+		}
+		info = agents.find(agent => agent.id === next);
+	}
+	return MAIN_AGENT_ID;
+}
+
+/** Whose folder `resource` is in: the innermost agent root containing it (worktrees can sit inside the main folder). */
+export function agentForResource(agents: readonly AgentInfo[], rootOf: (agentId: string) => URI | undefined, resource: URI): string | undefined {
+	let best: { id: string; length: number } | undefined;
+	for (const agent of agents) {
+		const root = rootOf(agent.id);
+		if (root && extUriBiasedIgnorePathCase.isEqualOrParent(resource, root) && (!best || root.path.length > best.length)) {
+			best = { id: agent.id, length: root.path.length };
+		}
+	}
+	return best && liveAgent(agents, best.id);
+}
 
 export class ActiveService extends Disposable implements IActiveService {
 	declare readonly _serviceBrand: undefined;
@@ -627,7 +713,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	private async refreshGitChanges(): Promise<void> {
-		const files = await this.commandService.executeCommand<FileChangeStat[] | undefined>(ExtensionCommand.GitChanges).catch(() => undefined);
+		const files = await this.exec<FileChangeStat[] | undefined>(ExtensionCommand.GitChanges).catch(() => undefined);
 		const available = files !== undefined && files !== null;
 		const next = new Map((files ?? []).map(file => [file.path, file] as const));
 		const same = available === this._gitAvailable && next.size === this._gitChanges.size && [...next].every(([path, file]) => {
@@ -663,11 +749,21 @@ export class ActiveService extends Disposable implements IActiveService {
 		await this.openChatWith({ kind: 'mapEdit', title: localize('systemMapContext', "System Map") });
 	}
 
-	async askAboutCode(code: CodeSelection): Promise<void> {
+	async askAboutCode(code: CodeSelection, agentId?: string): Promise<void> {
+		this.highlightIfOther(agentId);
 		await this.openChatWith({ kind: 'code', code, title: describeCodeSelection(code) });
 	}
 
-	async requestChange(code: CodeSelection, explanation?: { title: string; text: string }): Promise<void> {
+	/** Chat about one agent's work opens that agent's chat. */
+	private highlightIfOther(agentId: string | undefined): void {
+		const target = agentId && this.liveAgent(agentId);
+		if (target && target !== this._highlighted) {
+			this.highlightAgent(target);
+		}
+	}
+
+	async requestChange(code: CodeSelection, explanation?: { title: string; text: string }, agentId?: string): Promise<void> {
+		this.highlightIfOther(agentId);
 		// Asked from a walkthrough's card: it pauses there (and can be returned to), as when opening chat from it.
 		const player = this.player;
 		if (player?.playing) {
@@ -678,11 +774,11 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async editDiagram(request: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DiagramEdit, request);
+		await this.exec(ExtensionCommand.DiagramEdit, request, this._highlighted);
 	}
 
 	async reviseDiagramText(edit: SystemMapTextEdit): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DiagramReviseText, edit);
+		await this.exec(ExtensionCommand.DiagramReviseText, edit, this._highlighted);
 	}
 
 	/** Opens chat with its second mode set to `context` (asking or describing changes), selected and focused. */
@@ -716,7 +812,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		// The agent services live in the `active-agent` extension; wait for it to activate.
 		for (let attempt = 0; attempt < 60; attempt++) {
 			try {
-				const state = await this.commandService.executeCommand<InitialState>(ExtensionCommand.Init);
+				const state = await this.exec<InitialState>(ExtensionCommand.Init);
 				if (state) {
 					this.applyInitialState(state);
 					return;
@@ -740,7 +836,7 @@ export class ActiveService extends Disposable implements IActiveService {
 			this.applyAgentStates(state.agentStates);
 		}
 		// Back to the agent highlighted before the reload, once its state is in.
-		const remembered = this.storageService.get(HIGHLIGHTED_AGENT_KEY, StorageScope.WORKSPACE);
+		const remembered = this._remote ? undefined : this.storageService.get(HIGHLIGHTED_AGENT_KEY, StorageScope.WORKSPACE);
 		const bucket = this.bucket(MAIN_AGENT_ID);
 		bucket.agent = state.agent;
 		bucket.chat.splice(0, bucket.chat.length, ...state.chat);
@@ -750,7 +846,7 @@ export class ActiveService extends Disposable implements IActiveService {
 				bucket.diagram = state.diagram;
 			}
 			this._highlighted = remembered;
-			void this.commandService.executeCommand(ExtensionCommand.AgentFocus, remembered).then(undefined, () => undefined);
+			void this.exec(ExtensionCommand.AgentFocus, remembered).then(undefined, () => undefined);
 			this._profile = state.profile;
 			this._stateLoaded = true;
 			this._history = [...state.history];
@@ -788,7 +884,17 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 	}
 
-	handleEvent(event: ActiveEvent): void {
+	handleEvent(event: ActiveEvent, fromHost = false): void {
+		if (!fromHost) {
+			this._onDidReceiveLocalEvent.fire(event);
+			// A guest shows only the host's session; this window's own agents carry on unseen.
+			if (this._remote) {
+				return;
+			}
+		}
+		if (fromHost && event.type === 'agents') {
+			event = { ...event, agents: event.agents.map(agent => ({ ...agent, inMainFolder: false })) };
+		}
 		if (event.type === 'agents') {
 			this.setAgents(event.agents, event.overlaps);
 			return;
@@ -962,6 +1068,96 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	// ------------------------------------------------------------- agents
 
+	// ------------------------------------------------------------- multiplayer
+
+	private _remote: { transport: RemoteTransport; session: RemoteSession } | undefined;
+	private readonly _onDidChangeRemote = this._register(new Emitter<void>());
+	readonly onDidChangeRemote = this._onDidChangeRemote.event;
+	private readonly _onDidReceiveLocalEvent = this._register(new Emitter<ActiveEvent>());
+	readonly onDidReceiveLocalEvent = this._onDidReceiveLocalEvent.event;
+	private _presence: readonly SessionParticipant[] = [];
+	private _presenceSelfId: string | undefined;
+	private readonly _onDidChangePresence = this._register(new Emitter<void>());
+	readonly onDidChangePresence = this._onDidChangePresence.event;
+
+	get remote(): RemoteSession | undefined { return this._remote?.session; }
+	get presence(): readonly SessionParticipant[] { return this._presence; }
+	get presenceSelfId(): string | undefined { return this._presenceSelfId; }
+	get canApprove(): boolean { return this._remote?.session.role !== 'viewer'; }
+
+	setPresence(participants: readonly SessionParticipant[], selfId: string | undefined): void {
+		this._presence = participants;
+		this._presenceSelfId = selfId;
+		this._onDidChangePresence.fire();
+		this._onDidChangeAgents.fire();
+	}
+
+	/** A request to the agent services: this window's own extension, or the host's while a guest. */
+	private exec<T>(command: string, ...args: unknown[]): Promise<T | undefined> {
+		if (this._remote) {
+			// A refusal (their role) or a lost host shows as a notice, not an error in each caller.
+			return this._remote.transport.call<T>(command, args).catch(error => {
+				console.info(`[Active] the host refused ${command}: ${error instanceof Error ? error.message : String(error)}`);
+				this.notificationService.info(error instanceof Error ? error.message : String(error));
+				return undefined;
+			});
+		}
+		return this.commandService.executeCommand<T>(command, ...args);
+	}
+
+	enterRemote(transport: RemoteTransport, snapshot: InitialState, session: RemoteSession): void {
+		this._remote = { transport, session };
+		// The host's agents replace this window's: start from a clean slate, then apply the host's state.
+		this.buckets.clear();
+		this._agents = [];
+		this._overlaps = [];
+		this._highlighted = MAIN_AGENT_ID;
+		this.playerRef.clear();
+		this.offer(undefined);
+		this._pendingHandoff = undefined;
+		this._chatContext = undefined;
+		this.applyInitialState(this.asGuestState(snapshot));
+		this._onDidChangeRemote.fire();
+		this.fireAllForHighlight();
+	}
+
+	setRemoteRole(role: SessionRole): void {
+		if (this._remote) {
+			this._remote = { ...this._remote, session: { ...this._remote.session, role } };
+			this._onDidChangeRemote.fire();
+			// Approval buttons and labels in the boxes and cards depend on the role.
+			this._onDidChangeAgents.fire();
+		}
+	}
+
+	exitRemote(): void {
+		if (!this._remote) {
+			return;
+		}
+		this._remote = undefined;
+		this.buckets.clear();
+		this._agents = [];
+		this._overlaps = [];
+		this._highlighted = MAIN_AGENT_ID;
+		this.setPresence([], undefined);
+		this._onDidChangeRemote.fire();
+		// Back to this window's own agents.
+		this.initialized = undefined;
+		void this.initialize().then(() => this.fireAllForHighlight());
+	}
+
+	/** A guest sees the host's agents as remote folders (none is "theirs"), and no explanations. */
+	private asGuestState(state: InitialState): InitialState {
+		return {
+			...state,
+			agents: state.agents?.map(agent => ({ ...agent, inMainFolder: false })),
+			history: [],
+			pendingWalkthrough: undefined,
+			chat: state.chat.filter(entry => entry.role !== 'explainer'),
+			agentStates: state.agentStates?.map(agent => ({ ...agent, chat: agent.chat.filter(entry => entry.role !== 'explainer'), pendingWalkthrough: undefined })),
+		};
+	}
+
 	/** Agents (and helpers) in the middle of a task. */
 	private workingAgents(): AgentInfo[] {
 		const running = this._agents.filter(agent => !agent.finished && (agent.status === 'running' || agent.waitingForApproval));
@@ -1027,6 +1223,10 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	agentRoot(agentId: string = this._highlighted): URI | undefined {
 		const info = this.agentInfo(agentId);
+		// A guest opens the host's files through the session (read-only).
+		if (this._remote) {
+			return info ? URI.from({ scheme: REMOTE_FILE_SCHEME, path: info.root }) : undefined;
+		}
 		if (info && !info.inMainFolder) {
 			return URI.file(info.root);
 		}
@@ -1039,6 +1239,14 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 		const root = this.agentRoot(agentId);
 		return root && URI.joinPath(root, relative);
+	}
+
+	agentForResource(resource: URI): string | undefined {
+		return agentForResource(this._agents, id => this.agentRoot(id), resource);
+	}
+
+	liveAgent(agentId: string | undefined): string {
+		return liveAgent(this._agents, agentId);
 	}
 
 	chatOf(agentId: string): readonly ChatEntry[] {
@@ -1056,8 +1264,12 @@ export class ActiveService extends Disposable implements IActiveService {
 			this.bucket(agent.id);
 		}
 		this._onDidChangeAgents.fire();
-		if (!this.agentInfo(this._highlighted) && agents.length) {
+		const highlighted = this.agentInfo(this._highlighted);
+		if (!highlighted && agents.length) {
 			this.highlightAgent(MAIN_AGENT_ID);
+		} else if (highlighted?.mergedInto && this.agentInfo(highlighted.mergedInto)) {
+			// Its worktree is gone (or kept only as a branch): follow its work to where it was merged.
+			this.highlightAgent(highlighted.mergedInto);
 		}
 	}
 
@@ -1089,8 +1301,10 @@ export class ActiveService extends Disposable implements IActiveService {
 			previous.lastViewedAt = Date.now();
 		}
 		this._highlighted = agentId;
-		this.storageService.store(HIGHLIGHTED_AGENT_KEY, agentId, StorageScope.WORKSPACE, StorageTarget.MACHINE);
-		void this.commandService.executeCommand(ExtensionCommand.AgentFocus, agentId).then(undefined, () => undefined);
+		if (!this._remote) {
+			this.storageService.store(HIGHLIGHTED_AGENT_KEY, agentId, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		}
+		void this.exec(ExtensionCommand.AgentFocus, agentId).then(undefined, () => undefined);
 		// Chat and its questions belong to the agent they were about.
 		this._chatContext = undefined;
 		this.fireAllForHighlight();
@@ -1144,12 +1358,12 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	async newAgent(request: NewAgentRequest = {}): Promise<string | undefined> {
 		await this.initialize();
-		const result: { id?: string; error?: string } | undefined = await this.commandService.executeCommand<{ id?: string; error?: string }>(ExtensionCommand.AgentNew, request).catch(error => ({ error: String(error) }));
+		const result: { id?: string; error?: string } | undefined = await this.exec<{ id?: string; error?: string }>(ExtensionCommand.AgentNew, request).catch(error => ({ error: String(error) }));
 		if (!result?.id) {
 			this.notificationService.warn(localize('newAgentFailed', "Couldn't start another agent: {0}", result?.error ?? localize('unknownError', "unknown error")));
 			return undefined;
 		}
-		const states = await this.commandService.executeCommand<AgentInitialState[]>(ExtensionCommand.AgentStates).catch(() => undefined);
+		const states = await this.exec<AgentInitialState[]>(ExtensionCommand.AgentStates).catch(() => undefined);
 		if (states) {
 			this.applyAgentStates(states.filter(state => state.agentId === result.id));
 		}
@@ -1158,7 +1372,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async mergeAgents(sourceId: string, targetId: string, options: { commit?: boolean } = {}): Promise<MergeAgentsResult> {
-		const result = await this.commandService.executeCommand<MergeAgentsResult>(ExtensionCommand.AgentMerge, { sourceId, targetId, commit: options.commit }).catch(error => ({ ok: false, message: String(error) }));
+		const result = await this.exec<MergeAgentsResult>(ExtensionCommand.AgentMerge, { sourceId, targetId, commit: options.commit }).catch(error => ({ ok: false, message: String(error) }));
 		const outcome = result ?? { ok: false, message: localize('mergeNoAnswer', "No answer from Active's agent services.") };
 		if (!outcome.ok) {
 			this.notificationService.warn(outcome.message);
@@ -1173,7 +1387,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		if (this._highlighted === agentId) {
 			this.highlightAgent(this.agentInfo(agentId)?.parentId ?? MAIN_AGENT_ID);
 		}
-		const result = await this.commandService.executeCommand<{ ok: boolean; message: string }>(ExtensionCommand.AgentClose, agentId, options);
+		const result = await this.exec<{ ok: boolean; message: string }>(ExtensionCommand.AgentClose, agentId, options);
 		if (result && !result.ok) {
 			this.notificationService.warn(result.message);
 		} else if (result && options.keep) {
@@ -1182,11 +1396,11 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async renameAgent(agentId: string, name: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.AgentRename, { agentId, name });
+		await this.exec(ExtensionCommand.AgentRename, { agentId, name });
 	}
 
 	async interruptAgent(agentId: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.AgentInterrupt, agentId);
+		await this.exec(ExtensionCommand.AgentInterrupt, agentId);
 	}
 
 	async submitTaskTo(agentId: string, text: string | TaskRequest): Promise<void> {
@@ -1197,7 +1411,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async setAgentApprovalMode(agentId: string, mode: AgentApprovalMode): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.AgentSetApprovalMode, { agentId, mode });
+		await this.exec(ExtensionCommand.AgentSetApprovalMode, { agentId, mode });
 	}
 
 	/** Alerts for approvals waiting on the developer, by approval id (closed once it's answered anywhere). */
@@ -1209,7 +1423,8 @@ export class ActiveService extends Disposable implements IActiveService {
 	 */
 	private alertApproval(agentId: string, entry: ChatEntry): void {
 		const approval = entry.approval;
-		if (!approval) {
+		// A viewer in someone's session can't answer approvals.
+		if (!approval || this._remote?.session.role === 'viewer') {
 			return;
 		}
 		if (approval.resolved) {
@@ -1231,7 +1446,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async decideApprovalFor(agentId: string, approvalId: string, choiceId: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DecideApproval, { approvalId, choiceId, agentId });
+		await this.exec(ExtensionCommand.DecideApproval, { approvalId, choiceId, agentId });
 	}
 
 	readyWalkthroughs(agentId: string): readonly Walkthrough[] {
@@ -1254,7 +1469,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		const state: BriefingState = { since: from, minutes: Math.max(1, Math.round((Date.now() - from) / 60_000)), items: this.briefingItems(from), status: 'loading' };
 		this._allBriefing = state;
 		this._onDidChangeAllBriefing.fire();
-		const briefing = await this.commandService.executeCommand<Briefing>(ExtensionCommand.Brief, { since: from, allAgents: true }).catch(() => undefined);
+		const briefing = await this.exec<Briefing>(ExtensionCommand.Brief, { since: from, allAgents: true }).catch(() => undefined);
 		if (this._allBriefing === state) {
 			this._allBriefing = { ...state, status: 'ready', briefing: briefing ?? { headline: localize('briefingUnavailable', "Couldn't write the briefing"), done: [], attention: [], problems: [], next: '', fallback: true } };
 			this._onDidChangeAllBriefing.fire();
@@ -1379,7 +1594,7 @@ export class ActiveService extends Disposable implements IActiveService {
 			return;
 		}
 		this.storageService.store(AGENT_MODES_KEY, JSON.stringify({ ...this.agentModes(), [agentId]: mode }), StorageScope.WORKSPACE, StorageTarget.MACHINE);
-		await this.commandService.executeCommand(ExtensionCommand.AgentSetMode, { agentId, mode }).then(undefined, () => undefined);
+		await this.exec(ExtensionCommand.AgentSetMode, { agentId, mode }).then(undefined, () => undefined);
 		this.onAgentModeChanged(agentId);
 	}
 
@@ -1414,7 +1629,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async startTrace(request: TraceRequest): Promise<void> {
-		const id = await this.commandService.executeCommand<string>(ExtensionCommand.TraceBuild, request);
+		const id = await this.exec<string>(ExtensionCommand.TraceBuild, request, this._highlighted);
 		if (id) {
 			await this.openTraces(id);
 		}
@@ -1422,11 +1637,11 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	async traceHistory(): Promise<TraceSummary[]> {
 		await this.initialize();
-		return (await this.commandService.executeCommand<TraceSummary[]>(ExtensionCommand.TraceList).catch(() => undefined)) ?? [];
+		return (await this.exec<TraceSummary[]>(ExtensionCommand.TraceList).catch(() => undefined)) ?? [];
 	}
 
 	async deleteTrace(id: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.TraceDelete, id);
+		await this.exec(ExtensionCommand.TraceDelete, id);
 		this.traces.delete(id);
 		this._onDidChangeTrace.fire(id);
 	}
@@ -1442,7 +1657,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 		// A tab restored after a reload asks before the agent extension is up: wait for it, as startup does.
 		await this.initialize();
-		const loaded = await this.commandService.executeCommand<CodeTrace | undefined>(ExtensionCommand.TraceGet, id).catch(() => undefined);
+		const loaded = await this.exec<CodeTrace | undefined>(ExtensionCommand.TraceGet, id).catch(() => undefined);
 		if (loaded) {
 			this.traces.set(id, loaded);
 		}
@@ -1450,19 +1665,19 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async buildDiagram(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DiagramBuild);
+		await this.exec(ExtensionCommand.DiagramBuild, this._highlighted);
 	}
 
 	async updateDiagram(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DiagramUpdate);
+		await this.exec(ExtensionCommand.DiagramUpdate, this._highlighted);
 	}
 
 	diagramRevision(version: number): Promise<SystemMapRevision | undefined> {
-		return this.commandService.executeCommand<SystemMapRevision>(ExtensionCommand.DiagramRevision, version);
+		return this.exec<SystemMapRevision>(ExtensionCommand.DiagramRevision, version, this._highlighted);
 	}
 
 	async setDiagramFolderMode(mode: DiagramFolderMode): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DiagramSetFolderMode, mode);
+		await this.exec(ExtensionCommand.DiagramSetFolderMode, mode, this._highlighted);
 	}
 
 	/** Entering Away starts the period a briefing covers; leaving it shows the briefing if anything happened. */
@@ -1529,7 +1744,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		if (!short && agentId === this._highlighted && !this._gridOpen) {
 			await this.openChat(false);
 		}
-		const briefing = await this.commandService.executeCommand<Briefing>(ExtensionCommand.Brief, { since, agentId, short }).catch(() => undefined);
+		const briefing = await this.exec<Briefing>(ExtensionCommand.Brief, { since, agentId, short }).catch(() => undefined);
 		if (bucket.briefing === state) {
 			bucket.briefing = { ...state, status: 'ready', briefing: briefing ?? { headline: localize('briefingUnavailable', "Couldn't write the briefing"), done: [], attention: [], problems: [], next: '', fallback: true } };
 			this._onDidChangeBriefing.fire();
@@ -1606,7 +1821,11 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	// ------------------------------------------------------------- extension calls
 
-	async submitTask(text: string | TaskRequest): Promise<void> {
+	async submitTask(text: string | TaskRequest, agentId: string = this._highlighted, quiet = false): Promise<void> {
+		if (quiet) {
+			await this.exec(ExtensionCommand.SubmitTask, text, agentId);
+			return;
+		}
 		if (this._briefing) {
 			this.dismissBriefing();
 		}
@@ -1618,15 +1837,15 @@ export class ActiveService extends Disposable implements IActiveService {
 			this.dismissedPlayer = this.player?.walkthrough.id;
 			this._onDidChangePlayer.fire();
 		}
-		await this.commandService.executeCommand(ExtensionCommand.SubmitTask, text, this._highlighted);
+		await this.exec(ExtensionCommand.SubmitTask, text, agentId);
 	}
 
-	async ask(request: AskRequest): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.Ask, request, this._highlighted);
+	async ask(request: AskRequest, agentId: string = this._highlighted): Promise<void> {
+		await this.exec(ExtensionCommand.Ask, request, agentId);
 	}
 
 	async decideApproval(approvalId: string, choiceId: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DecideApproval, { approvalId, choiceId, agentId: this._highlighted });
+		await this.exec(ExtensionCommand.DecideApproval, { approvalId, choiceId, agentId: this._highlighted });
 	}
 
 	async synthesize(text: string, voice = this.narrationVoice): Promise<SynthesizeResult> {
@@ -1634,11 +1853,11 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	getHistory(turnId: string): Promise<HistoryDetail | undefined> {
-		return this.commandService.executeCommand<HistoryDetail>(ExtensionCommand.HistoryGet, turnId);
+		return this.exec<HistoryDetail>(ExtensionCommand.HistoryGet, turnId);
 	}
 
 	async deleteHistory(turnId?: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.HistoryDelete, turnId);
+		await this.exec(ExtensionCommand.HistoryDelete, turnId);
 		const removed = (walkthrough: Walkthrough | undefined) => walkthrough && (!turnId || walkthrough.turnId === turnId);
 		if (removed(this._offered)) {
 			this.offer(undefined);
@@ -1654,23 +1873,23 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async setupInstall(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.SetupInstall);
+		await this.exec(ExtensionCommand.SetupInstall);
 	}
 
 	async setupChooseMethod(method: SignInMethod): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.SetupChooseMethod, method);
+		await this.exec(ExtensionCommand.SetupChooseMethod, method);
 	}
 
 	async setupSignIn(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.SetupSignIn);
+		await this.exec(ExtensionCommand.SetupSignIn);
 	}
 
 	async setupSaveApiKey(key: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.SetupSaveApiKey, key);
+		await this.exec(ExtensionCommand.SetupSaveApiKey, key);
 	}
 
 	async setupCancel(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.SetupCancel);
+		await this.exec(ExtensionCommand.SetupCancel);
 	}
 
 	async setupRestart(): Promise<void> {
@@ -1678,15 +1897,15 @@ export class ActiveService extends Disposable implements IActiveService {
 			// The agent extension doesn't run in Restricted Mode; chat explains how to trust the folder.
 			return;
 		}
-		await this.commandService.executeCommand(ExtensionCommand.SetupRestart);
+		await this.exec(ExtensionCommand.SetupRestart);
 	}
 
 	async reconnect(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.Reconnect);
+		await this.exec(ExtensionCommand.Reconnect);
 	}
 
 	async saveProfile(profile: KnowledgeProfile): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.ProfileSet, profile);
+		await this.exec(ExtensionCommand.ProfileSet, profile);
 	}
 
 	// ------------------------------------------------------------- navigation
@@ -1882,7 +2101,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		const elaboration: Elaboration = { requestId: `elab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, walkthroughId, sceneId, question, text: '', status: 'streaming' };
 		this.elaborations.set(`${walkthroughId}/${sceneId}`, elaboration);
 		this._onDidChangeElaboration.fire(elaboration);
-		void this.commandService.executeCommand(ExtensionCommand.Elaborate, { requestId: elaboration.requestId, walkthroughId, sceneId, question }).then(undefined, error => {
+		void this.exec(ExtensionCommand.Elaborate, { requestId: elaboration.requestId, walkthroughId, sceneId, question }).then(undefined, error => {
 			this.handleEvent({ type: 'elaboration', requestId: elaboration.requestId, text: String(error), status: 'error' });
 		});
 		return elaboration;
@@ -1915,11 +2134,11 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async memoryNotes(): Promise<readonly MemoryNote[]> {
-		return (await this.commandService.executeCommand<MemoryNote[]>(ExtensionCommand.MemoryGet)) ?? [];
+		return (await this.exec<MemoryNote[]>(ExtensionCommand.MemoryGet)) ?? [];
 	}
 
 	async forgetMemory(id?: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.MemoryDelete, id);
+		await this.exec(ExtensionCommand.MemoryDelete, id);
 	}
 
 	async openNote(recordId: string): Promise<void> {
@@ -2064,7 +2283,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async newChat(): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.NewSession);
+		await this.exec(ExtensionCommand.NewSession);
 		await this.openChat(false);
 	}
 
@@ -2094,7 +2313,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 		const chosen = await this.quickInputService.pick(items, { title: localize('resumeChatTitle', "Resume a Chat"), placeHolder: localize('resumeChatPlaceholder', "Earlier chats in this folder, newest first"), matchOnDetail: true });
 		if (chosen && chosen.sessionId !== current) {
-			await this.commandService.executeCommand(ExtensionCommand.ResumeSession, chosen.sessionId);
+			await this.exec(ExtensionCommand.ResumeSession, chosen.sessionId);
 		}
 		await this.openChat(false);
 	}
@@ -2104,7 +2323,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async pickVoice(): Promise<void> {
-		const voices: readonly VoiceInfo[] = this._narration.voices?.length ? this._narration.voices : [{ name: 'default', description: localize('builtInVoice', "Phonon's built-in voice") }];
+		const voices: readonly VoiceInfo[] = this._narration.voices?.length ? this._narration.voices : [{ name: 'default', description: localize('builtInVoice', "The model's built-in voice") }];
 		const current = this.narrationVoice;
 		type VoiceItem = IQuickPickItem & { voice: string };
 		const item = (voice: VoiceInfo): VoiceItem => ({
@@ -2137,7 +2356,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		picker.items = items;
 		picker.activeItems = picker.items.filter((candidate): candidate is VoiceItem => (candidate as VoiceItem).voice === current);
 		const disposables = [
-			picker.onDidTriggerItemButton(event => void this.speak(localize('voiceSample', "Hi, I'm {0}. This is how I'll sound.", event.item.voice === 'default' ? localize('phonon', "Phonon") : event.item.voice), event.item.voice)),
+			picker.onDidTriggerItemButton(event => void this.speak(event.item.voice === 'default' ? localize('voiceSampleDefault', "Hi. This is how I'll sound.") : localize('voiceSample', "Hi, I'm {0}. This is how I'll sound.", event.item.voice), event.item.voice)),
 			picker.onDidAccept(() => {
 				const chosen = picker.selectedItems[0];
 				picker.hide();

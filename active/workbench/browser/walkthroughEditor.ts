@@ -30,9 +30,10 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import type { CapturedFile, DetailFeedback, PendingCheck, Scene, Walkthrough } from '../common/activeProtocol.js';
+import { MAIN_AGENT_ID, type CapturedFile, type CodeSelection, type DetailFeedback, type PendingCheck, type Scene, type Walkthrough } from '../common/activeProtocol.js';
 import { WalkthroughInput } from './activeInputs.js';
 import { ActiveWalkthroughFocus, agentLabel, Elaboration, IActiveService } from './activeService.js';
+import { onRightClickQuickPrompt, QuickPromptOptions } from './quickPrompt.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughPlayer } from './walkthroughPlayer.js';
 import { isRedundantVisual, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
@@ -681,8 +682,9 @@ export class WalkthroughEditor extends EditorPane {
 		const change = dom.append(headActions, $('button.more-detail.request-change')) as HTMLButtonElement;
 		dom.append(change, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.editSparkle));
 		dom.append(change, $('span')).textContent = localize('requestChange', "Request a change");
-		change.title = localize('requestChangeTitle', "Ask {0} for a change in chat, with this part of the walkthrough as context: a change to this code, or elsewhere based on it", this.activeService.agent.provider.shortName);
+		change.title = localize('requestChangeTitle', "Ask {0} for a change in chat, with this part of the walkthrough as context: a change to this code, or elsewhere based on it. Right-click to type it here.", this.activeService.agent.provider.shortName);
 		store.add(dom.addDisposableListener(change, dom.EventType.CLICK, () => void this.requestChange(walkthrough, scene)));
+		store.add(onRightClickQuickPrompt(change, () => this.quickChange(walkthrough, scene)));
 		const ask = dom.append(headActions, $('button.more-detail.ask')) as HTMLButtonElement;
 		this.askButton = ask;
 		store.add(dom.addDisposableListener(ask, dom.EventType.CLICK, () => this.openAsk(walkthrough, scene)));
@@ -811,11 +813,37 @@ export class WalkthroughEditor extends EditorPane {
 	}
 
 	/** Context for a change request: the code a card explains (its highlighted lines, or the whole captured file) and what it says. */
-	private async requestChange(walkthrough: Walkthrough, scene: Scene): Promise<void> {
+	private changeContext(walkthrough: Walkthrough, scene: Scene): { code: CodeSelection; explanation: { title: string; text: string } } {
 		const lines = (walkthrough.files[scene.file]?.final ?? '').split(/\r?\n/).length;
 		const startLine = scene.focus.length ? Math.min(...scene.focus.map(range => range.startLine)) : 1;
 		const endLine = scene.focus.length ? Math.max(...scene.focus.map(range => range.endLine)) : lines;
-		await this.activeService.requestChange({ file: scene.file, startLine, endLine }, { title: scene.title, text: scene.narration.map(segment => segment.text).join(' ') });
+		return { code: { file: scene.file, startLine, endLine }, explanation: { title: scene.title, text: scene.narration.map(segment => segment.text).join(' ') } };
+	}
+
+	/** A walkthrough explains one agent's work: changes asked from it go to that agent (or where it was merged). */
+	private ownerOf(walkthrough: Walkthrough): string {
+		return this.activeService.liveAgent(walkthrough.agentId ?? MAIN_AGENT_ID);
+	}
+
+	private async requestChange(walkthrough: Walkthrough, scene: Scene): Promise<void> {
+		const { code, explanation } = this.changeContext(walkthrough, scene);
+		await this.activeService.requestChange(code, explanation, this.ownerOf(walkthrough));
+	}
+
+	/** Right-click on Request a change: type it by the card and send it; the walkthrough keeps playing. */
+	private quickChange(walkthrough: Walkthrough, scene: Scene): QuickPromptOptions | undefined {
+		if (this.activeService.remote?.role === 'viewer') {
+			return undefined;
+		}
+		const { code, explanation } = this.changeContext(walkthrough, scene);
+		const owner = this.ownerOf(walkthrough);
+		return {
+			title: localize('quickChangeScene', "Request a change · {0}", scene.title),
+			placeholder: localize('quickChangePlaceholder', "Describe the change…"),
+			agent: this.activeService.agentInfo(owner),
+			showAgent: this.activeService.agents.length > 1,
+			send: text => this.activeService.submitTask({ text, code, explanation }, owner, true),
+		};
 	}
 
 	private openAsk(walkthrough: Walkthrough, scene: Scene): void {

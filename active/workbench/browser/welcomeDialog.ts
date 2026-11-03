@@ -100,6 +100,11 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 
 	private evaluate(): void {
 		const agent = this.activeService.agent;
+		// A guest in someone's session is looking at the host's setup, not theirs.
+		if (this.activeService.remote) {
+			this.dialog.clear();
+			return;
+		}
 		if (this.dialog.value) {
 			this.render();
 			return;
@@ -353,7 +358,7 @@ export class ActiveWelcomeDialog extends Disposable implements IWorkbenchContrib
 				return;
 			}
 			const name = select.value;
-			void this.activeService.speak(localize('voiceSampleWelcome', "Hi, I'm {0}. This is how your walkthroughs will sound.", name === 'default' ? localize('phononName', "Phonon") : name), name);
+			void this.activeService.speak(name === 'default' ? localize('voiceSampleWelcomeDefault', "Hi. This is how your walkthroughs will sound.") : localize('voiceSampleWelcome', "Hi, I'm {0}. This is how your walkthroughs will sound.", name), name);
 		});
 	}
 

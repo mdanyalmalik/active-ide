@@ -23,6 +23,7 @@ import { IContextMenuService } from '../../../../platform/contextview/browser/co
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
+import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
@@ -34,7 +35,9 @@ import { ActiveSetting, REASONING_EFFORTS, type AgentInfo, type ChatEntry, type 
 import { agentColor, agentOneLiner, agentStatus, agentStatusLabel, AgentGridView, approvalModeActions, explainModeActions, helperOf, shownAgents, formatCost, GRID_PRESETS, GridPreset, nestedUnder, OverscrollGesture, overlapMarkers, setPullProgress, topLevelOf, wheelPixels, DEFAULT_OVERSCROLL } from './agentGrid.js';
 import { effortLabel } from './activeSettings.js';
 import { ActiveChatInput } from './activeInputs.js';
+import { DICTATE_COMMAND_ID, DictationTarget, IActiveDictationService, insertAtCursor } from './dictation.js';
 import { IActiveService } from './activeService.js';
+import { personColor, renderPresenceBadges, renderPresenceLegend } from './multiplayer/presence.js';
 import { renderSetupPanel, SetupPanelViewState } from './setupPanel.js';
 
 const $ = dom.$;
@@ -69,6 +72,9 @@ export class ActiveChatEditor extends EditorPane {
 	private textarea!: HTMLTextAreaElement;
 	private effortButton!: HTMLButtonElement;
 	private sendButton!: HTMLButtonElement;
+	private micButton!: HTMLButtonElement;
+	private micIcon!: HTMLElement;
+	private micLabel!: HTMLElement;
 	private modeLabel!: HTMLElement;
 	private footerRow!: HTMLElement;
 	private mode: ComposerMode = 'task';
@@ -91,6 +97,7 @@ export class ActiveChatEditor extends EditorPane {
 	private agentListRight!: HTMLElement;
 	private sideBySide = false;
 	private headerKey = '';
+	private legend!: HTMLElement;
 	private helperTimer: ReturnType<typeof setTimeout> | undefined;
 	private leavingCards = new Set<string>();
 	private chatPull!: HTMLElement;
@@ -119,6 +126,8 @@ export class ActiveChatEditor extends EditorPane {
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IAccessibilityService private readonly accessibilityService: IAccessibilityService,
+		@IActiveDictationService private readonly dictationService: IActiveDictationService,
+		@IKeybindingService private readonly keybindingService: IKeybindingService,
 	) {
 		super(ActiveChatEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -126,6 +135,12 @@ export class ActiveChatEditor extends EditorPane {
 	protected createEditor(parent: HTMLElement): void {
 		this.root = dom.append(parent, $('.active-chat'));
 		this.header = dom.append(this.root, $('.active-chat-header'));
+		// Multiplayer: who's in the session, in the header (it's re-placed whenever the header is redrawn).
+		this.legend = $('.active-presence-legend.hidden');
+		const renderLegend = () => renderPresenceLegend(this.legend, this.activeService);
+		this._register(this.activeService.onDidChangePresence(renderLegend));
+		this._register(this.activeService.onDidChangeAgents(renderLegend));
+		renderLegend();
 		this.content = $('.active-chat-content');
 		this.scrollable = this._register(new DomScrollableElement(this.content, { vertical: ScrollbarVisibility.Auto, horizontal: ScrollbarVisibility.Hidden, useShadows: true }));
 		// The chat and the grid of all agents share the stage between the header and the dock, so zooming
@@ -188,6 +203,11 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(dom.addDisposableListener(this.composerTarget, dom.EventType.CLICK, () => this.showTargetMenu()));
 		this.modeLabel = dom.append(left, $('.composer-mode'));
 		this._register(this.activeService.onDidChangeMode(() => this.renderComposerContext()));
+		// Joining or leaving a session, or a new role in one, changes the header and the chat box.
+		this._register(this.activeService.onDidChangeRemote(() => {
+			this.renderChrome();
+			this.renderComposerContext();
+		}));
 		const tools = dom.append(bar, $('.composer-tools'));
 		// The coding agent's model and effort, one click from where the task is typed.
 		this.effortButton = dom.append(tools, $('button.composer-effort')) as HTMLButtonElement;
@@ -203,6 +223,7 @@ export class ActiveChatEditor extends EditorPane {
 				this.renderEffort();
 			}
 		}));
+		this.renderMicButton(tools);
 		this.sendButton = dom.append(tools, $('button.send')) as HTMLButtonElement;
 		this.sendButton.textContent = localize('send', "Send ↑");
 		this._register(dom.addDisposableListener(this.sendButton, dom.EventType.CLICK, () => this.send()));
@@ -418,12 +439,26 @@ export class ActiveChatEditor extends EditorPane {
 		} else {
 			this.renderChatHeader();
 		}
+		this.placeLegend();
 		this.introLead.textContent = localize('introLead', "{0} writes the code. Active walks you through what changed.", agent.provider.name);
 		this.renderNotices();
 		this.renderStage();
 		this.renderComposerContext();
 		this.renderFooter();
 		this.intro.classList.toggle('compact', this.activeService.chat.length > 0);
+	}
+
+	/** The session legend starts the header's right-hand group: before the status, or after the grid's spacer. */
+	private placeLegend(): void {
+		const status = this.header.querySelector(':scope > .agent-status');
+		const spacer = this.header.querySelector(':scope > .header-spacer');
+		if (status) {
+			this.header.insertBefore(this.legend, status);
+		} else if (spacer) {
+			spacer.after(this.legend);
+		} else {
+			this.header.append(this.legend);
+		}
 	}
 
 	private headerAction(icon: ThemeIcon, label: string, title: string, run: () => unknown, extraClass?: string): HTMLButtonElement {
@@ -470,6 +505,14 @@ export class ActiveChatEditor extends EditorPane {
 			running: localize('statusRunning', "Working"),
 			error: localize('statusError', "Error"),
 		}[agent.status];
+		// A guest is in someone else's session: say whose, and leave the host's controls to the host.
+		const remote = this.activeService.remote;
+		if (remote) {
+			const session = dom.append(this.header, $('span.agent-session'));
+			session.textContent = localize('guestSessionLabel', "{0}'s session · {1}", remote.hostName, remote.role);
+			this.headerAction(Codicon.dashboard, localize('allAgents', "All Agents"), localize('allAgentsTitle', "Show all agents"), () => this.zoomOut(), 'collapsible');
+			return;
+		}
 		// Chats are sessions: start a new one, or go back to an earlier one from this folder.
 		this.headerAction(Codicon.history, localize('resumeChat', "Chats"), localize('resumeChatTitle', "Resume an earlier chat in this folder"), () => this.activeService.pickChatToResume(), 'collapsible');
 		this.headerAction(Codicon.add, localize('newChat', "New Chat"), localize('newChatTitle', "Start a new chat (a new {0} session)", agent.provider.name), () => this.activeService.newChat(), 'collapsible');
@@ -508,6 +551,11 @@ export class ActiveChatEditor extends EditorPane {
 		overflow.classList.toggle('on', this.grid.overflow);
 		overflow.setAttribute('aria-pressed', String(this.grid.overflow));
 		dom.append(this.header, $('span.header-spacer'));
+		if (this.activeService.remote) {
+			const name = this.activeService.highlightedAgent?.name;
+			this.headerAction(Codicon.screenFull, name ? localize('openAgent', "Open {0}", name) : localize('backToChat', "Back to Chat"), localize('openAgentTitle', "Open the highlighted agent"), () => this.zoomIn(this.activeService.highlightedAgentId));
+			return;
+		}
 		if (!this.activeService.allBriefing) {
 			this.headerAction(Codicon.history, localize('catchUpAll', "Catch Me Up"), localize('catchUpAllTitle', "What every agent did"), () => this.activeService.catchUpAll(), 'collapsible');
 		// Finished helpers fade out a few seconds after they're done; this keeps them.
@@ -624,7 +672,8 @@ export class ActiveChatEditor extends EditorPane {
 			}
 		}
 		// Until the saved profile has loaded it's the blank default: don't ask them to set up one they have.
-		if (this.activeService.stateLoaded && !this.activeService.profile.configured) {
+		// (Walkthroughs aren't shared with guests, so a guest isn't asked.)
+		if (this.activeService.stateLoaded && !this.activeService.profile.configured && !this.activeService.remote) {
 			const card = dom.append(this.notices, $('.notice'));
 			dom.append(card, $('.notice-title')).textContent = localize('profileNoticeTitle', "Personalize walkthroughs");
 			dom.append(card, $('.notice-detail')).textContent = localize('profileDetail', "Tell Active what you know and how much detail you want.");
@@ -708,6 +757,12 @@ export class ActiveChatEditor extends EditorPane {
 					: kind === 'code' ? localize('askCodePlaceholder', "Ask about this code…")
 						: kind === 'change' ? localize('changePlaceholder', "Describe a change: here, or elsewhere with this code as context…")
 							: localize('askPlaceholder', "Ask about this part…");
+		const remote = this.activeService.remote;
+		if (remote?.role === 'viewer') {
+			this.textarea.placeholder = localize('viewerPlaceholder', "You're watching {0}'s session. Ask them to make you a collaborator to send messages.", remote.hostName);
+		}
+		this.textarea.disabled = remote?.role === 'viewer';
+		this.renderMicState();
 		this.renderEffort();
 		this.updateSendState();
 	}
@@ -717,8 +772,8 @@ export class ActiveChatEditor extends EditorPane {
 		this.modeStore.clear();
 		dom.clearNode(this.modeLabel);
 		const kind = this.activeService.chatContext?.kind;
-		// A subagent's work is explained as part of its parent's: no explanation mode to show.
-		if (this.activeService.highlightedAgent?.kind === 'subagent') {
+		// A subagent's work is explained as part of its parent's: no explanation mode to show. Guests get no explanations.
+		if (this.activeService.highlightedAgent?.kind === 'subagent' || this.activeService.remote) {
 			return;
 		}
 		// A change request is a coding task, so how its work gets explained still applies.
@@ -761,8 +816,8 @@ export class ActiveChatEditor extends EditorPane {
 		dom.append(this.effortButton, $('span')).textContent = localize('modelButton', "{0} · {1}", model?.label ?? localize('defaultModelLabel', "Default model"), this.effortText(effort, model?.defaultEffort));
 		dom.append(this.effortButton, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
 		this.effortButton.title = localize('modelTitle', "The model {0} writes code with and how much it reasons before acting. Click to change.", this.activeService.agent.provider.name);
-		// These apply to coding tasks; questions use the explanation model's settings.
-		this.effortButton.classList.toggle('hidden', this.mode === 'ask');
+		// These apply to coding tasks; questions use the explanation model's settings. A guest's tasks run with the host's.
+		this.effortButton.classList.toggle('hidden', this.mode === 'ask' || !!this.activeService.remote);
 	}
 
 	private effortText(effort: string, modelDefault: string | undefined): string {
@@ -800,6 +855,10 @@ export class ActiveChatEditor extends EditorPane {
 	private renderFooter(): void {
 		this.footerStore.clear();
 		dom.clearNode(this.footerRow);
+		// The profile shapes walkthroughs, which guests don't get.
+		if (this.activeService.remote) {
+			return;
+		}
 		const profile = dom.append(this.footerRow, $('button.link'));
 		profile.textContent = localize('knowledgeProfile', "Knowledge Profile");
 		this.footerStore.add(dom.addDisposableListener(profile, dom.EventType.CLICK, () => this.activeService.openProfile()));
@@ -815,7 +874,7 @@ export class ActiveChatEditor extends EditorPane {
 			this.renderComposerTarget();
 			// The grid's top bar shows the agent count and the finished-helpers toggle: redo it when those change.
 			const agents = this.activeService.agents;
-			const headerKey = `${agents.filter(agent => !nestedUnder(agent)).length}/${agents.some(agent => agent.kind === 'subagent' && agent.finished)}/${this.activeService.showFinishedHelpers}`;
+			const headerKey = `${this.activeService.remote?.role ?? ''}/${agents.filter(agent => !nestedUnder(agent)).length}/${agents.some(agent => agent.kind === 'subagent' && agent.finished)}/${this.activeService.showFinishedHelpers}`;
 			if (headerKey !== this.headerKey) {
 				this.headerKey = headerKey;
 				this.renderChrome();
@@ -895,12 +954,13 @@ export class ActiveChatEditor extends EditorPane {
 		row.style.setProperty('--agent-color', agentColor(agent));
 		dom.append(row, $('span.agent-dot'));
 		dom.append(row, $('span.row-name')).textContent = agent.name;
+		renderPresenceBadges(row, this.activeService, agent.id);
 		const helper = helperOf(agent, agents);
 		if (helper) {
 			row.title = helper;
 		}
 		// Second line: what it's doing (or its status), and what it has cost.
-		const line = agentOneLiner(agent) || agentStatusLabel(agent, agents);
+		const line = agentOneLiner(agent) || agentStatusLabel(agent, agents, this.activeService.canApprove);
 		const cost = formatCost(agent.cost);
 		const lineNode = dom.append(row, $('span.row-line'));
 		lineNode.textContent = cost ? `${line} · ${cost}` : line;
@@ -925,11 +985,11 @@ export class ActiveChatEditor extends EditorPane {
 			icon.style.color = marker.conflict ? 'var(--vscode-editorWarning-foreground)' : agentColor(other);
 			icon.title = `${marker.conflict ? localize('rowConflict', "Likely conflict with {0}", other?.name ?? marker.otherId) : localize('rowOverlap', "Also changed by {0}", other?.name ?? marker.otherId)}\n${marker.files.join('\n')}`;
 		}
-		row.setAttribute('aria-label', localize('rowAria', "{0}, {1}", agent.name, agentStatusLabel(agent, agents)));
+		row.setAttribute('aria-label', localize('rowAria', "{0}, {1}", agent.name, agentStatusLabel(agent, agents, this.activeService.canApprove)));
 		const select = () => this.activeService.highlightAgent(agent.id);
 		this.agentListStore.add(dom.addDisposableListener(row, dom.EventType.CLICK, select));
-		// Right-click: this agent's explanation and approval modes.
-		if (agent.kind === 'agent') {
+		// Right-click: this agent's explanation and approval modes (the host's to set).
+		if (agent.kind === 'agent' && !this.activeService.remote) {
 			this.agentListStore.add(dom.addDisposableListener(row, dom.EventType.CONTEXT_MENU, (event: MouseEvent) => {
 				event.preventDefault();
 				this.contextMenuService.showContextMenu({ getAnchor: () => ({ x: event.clientX, y: event.clientY }), getActions: () => [explainModeActions(this.activeService, agent.id), approvalModeActions(this.activeService, agent)] });
@@ -1116,11 +1176,80 @@ export class ActiveChatEditor extends EditorPane {
 		this.zooming = false;
 	}
 
+	/** Push-to-talk: press and hold to talk, or click to start and click again to stop. */
+	private renderMicButton(tools: HTMLElement): void {
+		this.micButton = dom.append(tools, $('button.composer-mic')) as HTMLButtonElement;
+		this.micIcon = dom.append(this.micButton, $('span.mic-icon'));
+		this.micLabel = dom.append(this.micButton, $('span.mic-label'));
+		const target: DictationTarget = {
+			window: dom.getWindow(this.root),
+			canDictate: () => this.activeService.remote?.role !== 'viewer',
+			isVisible: () => this.isVisible() && !this.gridMode,
+			textBeforeCursor: () => this.textarea.value.slice(0, this.textarea.selectionStart),
+			insert: text => this.insertDictation(text),
+		};
+		this._register(this.dictationService.registerTarget(target));
+		this._register(dom.addDisposableListener(this.textarea, dom.EventType.FOCUS, () => this.dictationService.preferTarget(target)));
+		let release: (() => void) | undefined;
+		this._register(dom.addDisposableListener(this.micButton, dom.EventType.POINTER_DOWN, (event: PointerEvent) => {
+			if (event.button !== 0 || this.micButton.disabled) {
+				return;
+			}
+			event.preventDefault(); // keep the cursor where it is in the chat box
+			this.micButton.setPointerCapture(event.pointerId);
+			release = this.dictationService.press(target);
+		}));
+		const up = () => {
+			release?.();
+			release = undefined;
+		};
+		this._register(dom.addDisposableListener(this.micButton, dom.EventType.POINTER_UP, up));
+		this._register(dom.addDisposableListener(this.micButton, 'pointercancel', up));
+		// Keyboard (Enter or Space on the focused button): a click that toggles.
+		this._register(dom.addDisposableListener(this.micButton, dom.EventType.CLICK, (event: MouseEvent) => {
+			if (event.detail === 0) {
+				this.dictationService.press(target);
+			}
+		}));
+		this._register(this.dictationService.onDidChangeState(() => this.renderMicState()));
+		this._register(this.keybindingService.onDidUpdateKeybindings(() => this.renderMicState()));
+		this.renderMicState();
+	}
+
+	private renderMicState(): void {
+		if (!this.micButton) {
+			return;
+		}
+		const state = this.dictationService.state;
+		const mine = this.dictationService.target?.isVisible() ?? false;
+		const shown = mine ? state : 'idle';
+		this.micIcon.className = `mic-icon ${ThemeIcon.asClassName(shown === 'transcribing' ? ThemeIcon.modify(Codicon.loading, 'spin') : shown === 'recording' ? Codicon.micFilled : Codicon.mic)}`;
+		this.micLabel.textContent = shown === 'recording' ? localize('micListening', "Listening") : shown === 'transcribing' ? localize('micTranscribing', "Transcribing") : '';
+		this.micButton.classList.toggle('recording', shown === 'recording');
+		this.micButton.classList.toggle('transcribing', shown === 'transcribing');
+		this.micButton.disabled = this.activeService.remote?.role === 'viewer' || shown === 'transcribing';
+		const key = this.keybindingService.lookupKeybinding(DICTATE_COMMAND_ID)?.getLabel();
+		this.micButton.title = shown === 'recording'
+			? localize('micStopTitle', "Release or click to stop (Escape)")
+			: key ? localize('micTitleKey', "Dictate: hold to talk, or click to start and stop ({0})", key) : localize('micTitle', "Dictate: hold to talk, or click to start and stop");
+		this.micButton.setAttribute('aria-label', shown === 'recording' ? localize('micStopLabel', "Stop dictation") : localize('micLabel', "Dictate"));
+		this.micButton.setAttribute('aria-pressed', String(shown === 'recording'));
+	}
+
+	private insertDictation(text: string): void {
+		const { value, cursor } = insertAtCursor(this.textarea.value, this.textarea.selectionStart, this.textarea.selectionEnd, text);
+		this.textarea.value = value;
+		this.textarea.focus();
+		this.textarea.setSelectionRange(cursor, cursor);
+		this.updateSendState();
+		this.updateHandoffCountdown();
+	}
+
 	private updateSendState(): void {
 		const agent = this.activeService.agent;
 		const empty = !this.textarea.value.trim();
 		const codingTask = this.mode === 'task' || this.activeService.chatContext?.kind === 'change';
-		this.sendButton.disabled = empty || (codingTask && (agent.status === 'starting' || !!agent.setup));
+		this.sendButton.disabled = empty || this.activeService.remote?.role === 'viewer' || (codingTask && (agent.status === 'starting' || !!agent.setup));
 	}
 
 	private async send(): Promise<void> {
@@ -1175,6 +1304,14 @@ export class ActiveChatEditor extends EditorPane {
 		const eyebrow = (text: string) => { dom.append(node, $('.eyebrow')).textContent = text; };
 		switch (entry.role) {
 			case 'user':
+				// In a session, a guest's message carries their name and colour.
+				if (entry.author && entry.author.id !== this.activeService.presenceSelfId) {
+					node.classList.add('by-person');
+					node.style.setProperty('--person-color', personColor(entry.author.colorIndex));
+					eyebrow(entry.status === 'queued' ? localize('personQueued', "{0} · queued", entry.author.name) : entry.author.name);
+					dom.append(node, $('.text')).textContent = entry.text;
+					break;
+				}
 				eyebrow(entry.about
 					? (entry.status === 'queued' ? localize('youQueuedChange', "You · task using {0} · queued", entry.about) : localize('youChange', "You · task using {0}", entry.about))
 					: entry.status === 'queued' ? localize('youQueued', "You · queued") : localize('you', "You"));
@@ -1224,6 +1361,8 @@ export class ActiveChatEditor extends EditorPane {
 				const actions = dom.append(node, $('.actions'));
 				if (approval?.resolved) {
 					dom.append(actions, $('span.resolved')).textContent = localize('resolved', "Decision: {0}", approval.resolved);
+				} else if (!this.activeService.canApprove) {
+					dom.append(actions, $('span.resolved')).textContent = localize('approvalWaitingHost', "Waiting for the host or a collaborator");
 				} else {
 					for (const choice of approval?.choices ?? []) {
 						const button = dom.append(actions, $(`button.${choice.approves ? 'primary' : 'secondary'}`));
