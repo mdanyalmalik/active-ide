@@ -62,6 +62,7 @@ import { ActiveCommandIds, WalkthroughCommandIds } from './walkthroughCommands.j
 import { WalkthroughEditor } from './walkthroughEditor.js';
 import { ActiveWelcomeDialog } from './welcomeDialog.js';
 import './multiplayer/multiplayer.contribution.js';
+import './feedback.js';
 
 registerSingleton(IActiveService, ActiveService, InstantiationType.Delayed);
 

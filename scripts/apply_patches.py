@@ -563,3 +563,56 @@ for source, target in icons:
             # Finder and the Dock cache bundle icons; touching the bundle makes them look again.
             (target.parents[2]).touch()
         print(f"copied icon to {target.relative_to(root)}")
+
+# 9. Active's "Report a Bug or Request a Feature" icon at the top of the bottom-left bar (above Accounts and Manage).
+#    It renders like those icons and runs Active's active.reportIssue command (feedback.ts). Accounts moves to index 1,
+#    and showing/hiding Accounts checks for its action instead of counting the bar's items.
+GLOBAL_BAR = "src/vs/workbench/browser/parts/globalCompositeBar.ts"
+patch(
+    GLOBAL_BAR,
+    "export class GlobalCompositeBar extends Disposable {",
+    "const ACTIVE_FEEDBACK_ID = 'active.reportIssue';\n\n"
+    "/** Active: report a bug or request a feature (the command lives in Active's feedback.ts). */\n"
+    "class ActiveFeedbackAction extends CompositeBarAction {\n"
+    "\tconstructor(private readonly commandService: ICommandService) {\n"
+    "\t\tsuper({ id: ACTIVE_FEEDBACK_ID, name: localize('activeFeedback', \"Report a Bug or Request a Feature\"), classNames: ThemeIcon.asClassNameArray(Codicon.feedback) });\n"
+    "\t}\n\n"
+    "\toverride async run(): Promise<void> {\n"
+    "\t\tawait this.commandService.executeCommand(ACTIVE_FEEDBACK_ID);\n"
+    "\t}\n"
+    "}\n\n"
+    "export class GlobalCompositeBar extends Disposable {",
+    "class ActiveFeedbackAction extends CompositeBarAction",
+)
+patch(
+    GLOBAL_BAR,
+    "\tprivate static readonly ACCOUNTS_ACTION_INDEX = 0;",
+    "\tprivate static readonly ACCOUNTS_ACTION_INDEX = 1; // Active: its feedback icon is first",
+    "ACCOUNTS_ACTION_INDEX = 1; // Active",
+)
+patch(
+    GLOBAL_BAR,
+    "\t\t@IExtensionService private readonly extensionService: IExtensionService,\n\t) {\n\t\tsuper();\n\n\t\tthis.element = $('div');",
+    "\t\t@IExtensionService private readonly extensionService: IExtensionService,\n\t\t@ICommandService private readonly activeCommandService: ICommandService,\n\t) {\n\t\tsuper();\n\n\t\tthis.element = $('div');",
+    "private readonly activeCommandService: ICommandService",
+)
+patch(
+    GLOBAL_BAR,
+    "\t\t\t\tif (action.id === ACCOUNTS_ACTIVITY_ID) {\n\t\t\t\t\treturn this.instantiationService.createInstance(AccountsActivityActionViewItem,",
+    "\t\t\t\tif (action.id === ACTIVE_FEEDBACK_ID) {\n\t\t\t\t\treturn this.instantiationService.createInstance(CompositeBarActionViewItem, action as CompositeBarAction, { ...options, icon: true, colors: this.colors, hoverOptions: this.activityHoverOptions }, () => false);\n\t\t\t\t}\n\n"
+    "\t\t\t\tif (action.id === ACCOUNTS_ACTIVITY_ID) {\n\t\t\t\t\treturn this.instantiationService.createInstance(AccountsActivityActionViewItem,",
+    "if (action.id === ACTIVE_FEEDBACK_ID) {",
+)
+patch(
+    GLOBAL_BAR,
+    "\t\tif (this.accountsVisibilityPreference) {\n\t\t\tthis.globalActivityActionBar.push(this.accountAction, { index: GlobalCompositeBar.ACCOUNTS_ACTION_INDEX });\n\t\t}\n\n\t\tthis.globalActivityActionBar.push(this.globalActivityAction);",
+    "\t\tthis.globalActivityActionBar.push(this._register(new ActiveFeedbackAction(this.activeCommandService)));\n\n"
+    "\t\tif (this.accountsVisibilityPreference) {\n\t\t\tthis.globalActivityActionBar.push(this.accountAction, { index: GlobalCompositeBar.ACCOUNTS_ACTION_INDEX });\n\t\t}\n\n\t\tthis.globalActivityActionBar.push(this.globalActivityAction);",
+    "new ActiveFeedbackAction(this.activeCommandService)",
+)
+patch(
+    GLOBAL_BAR,
+    "\t\tconst accountsVisible = this.globalActivityActionBar.length() === 2;",
+    "\t\tconst accountsVisible = this.globalActivityActionBar.hasAction(this.accountAction); // Active: not a count (its feedback icon is there too)",
+    "hasAction(this.accountAction); // Active",
+)
