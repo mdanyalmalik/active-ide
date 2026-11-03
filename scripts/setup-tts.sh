@@ -9,7 +9,7 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 VENV="$ACTIVE_ROOT/.tools/tts-venv"
 MMS_INT8="$ACTIVE_ROOT/.tools/tts-models/mms-eng-int8"
-PACKAGES=(ptts onnxruntime numpy num2words torch transformers onnx onnxscript)
+PACKAGES=(ptts onnxruntime numpy scipy num2words torch transformers onnx onnxscript)
 if [ ! -x "$VENV/bin/python" ]; then
 	if command -v uv >/dev/null; then
 		uv venv --python 3.12 "$VENV" -q
@@ -17,14 +17,17 @@ if [ ! -x "$VENV/bin/python" ]; then
 		python3 -m venv "$VENV"
 	fi
 fi
-if ! "$VENV/bin/python" -c "import ptts, onnxruntime, num2words, torch, transformers, onnx, onnxscript" 2>/dev/null; then
+if ! "$VENV/bin/python" -c "import ptts, onnxruntime, scipy, num2words, torch, transformers, onnx, onnxscript" 2>/dev/null; then
 	if command -v uv >/dev/null; then
 		VIRTUAL_ENV="$VENV" uv pip install -q "${PACKAGES[@]}"
 	else
 		"$VENV/bin/pip" install -q "${PACKAGES[@]}"
 	fi
 fi
-if [ ! -f "$MMS_INT8/model.int8.onnx" ]; then
+# Re-export when the folder is missing or from an older recipe (see RECIPE in export_onnx.py).
+RECIPE=$(sed -n 's/^RECIPE = //p' "$ACTIVE_ROOT/active/tts-finetune/export_onnx.py")
+HAVE=$("$VENV/bin/python" -c "import json,sys; print(json.load(open(sys.argv[1])).get('recipe', 1))" "$MMS_INT8/active-mms.json" 2>/dev/null || echo 0)
+if [ ! -f "$MMS_INT8/model.int8.onnx" ] || [ "$HAVE" != "$RECIPE" ]; then
 	"$VENV/bin/python" "$ACTIVE_ROOT/active/tts-finetune/export_onnx.py" facebook/mms-tts-eng "$MMS_INT8" 2>&1 | grep -E "^wrote|Error" || true
 fi
 [ -f "$MMS_INT8/model.int8.onnx" ] && echo "MMS English ready (int8 ONNX)"

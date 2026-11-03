@@ -53,12 +53,30 @@ def money_words(match):
         return f" {match.group(1)} dollars "
 
 
+LETTERS = {
+    "a": "ay", "b": "bee", "c": "see", "d": "dee", "e": "ee", "f": "ef", "g": "jee", "h": "aych", "i": "eye", "j": "jay",
+    "k": "kay", "l": "el", "m": "em", "n": "en", "o": "oh", "p": "pee", "q": "kew", "r": "ar", "s": "ess", "t": "tee",
+    "u": "you", "v": "vee", "w": "double you", "x": "ex", "y": "why", "z": "zee",
+}
+# Acronyms said as words rather than letters.
+SPOKEN_ACRONYMS = {"JSON": "jason", "ONNX": "onix", "GIF": "gif", "NASA": "nasa", "RAM": "ram", "SQL": "sequel", "CRUD": "crud", "YAML": "yamel"}
+
+
+def acronym_words(match):
+    word = match.group(0)
+    plural = word.endswith("s") and not word.isupper()  # APIs
+    word = word[:-1] if plural else word
+    spoken = SPOKEN_ACRONYMS.get(word) or " ".join(LETTERS[c] for c in word.lower())
+    return f" {spoken}{'es' if plural and spoken.endswith('s') else 's' if plural else ''} "
+
+
 def normalize(text):
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"(\*{1,2})(\S(?:.*?\S)?)\1", r"\2", text)  # Markdown *emphasis* and **bold**
     text = re.sub(r"(?<=\d)\s*\*\s*(?=\d)", " times ", text)  # 3 * 4
     text = text.replace("*", " ")
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)  # camelCase reads as words
+    text = re.sub(r"\b[A-Z]{2,5}s?\b", acronym_words, text)  # TTS, APIs
     text = re.sub(r"[_\-]+(?=\w)", " ", text)  # snake_case and kebab-case too
     text = re.sub(r"(?<=\w)\.(?=[A-Za-z])", " dot ", text)  # file.py, obj.method
     text = re.sub(r"\$(" + NUMBER + r")", money_words, text)
@@ -68,6 +86,43 @@ def normalize(text):
         text = text.replace(symbol, words)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+# Heteronyms (noun vs verb sound, e.g. records) come from the lexicon file with measured respellings; a determiner
+# before one means the noun.
+DETERMINERS = {"the", "a", "an", "this", "that", "these", "those", "its", "their", "our", "your", "my", "his", "her", "each", "every", "some", "any", "no", "new"}
+
+
+def load_lexicon(path=None):
+    """Respellings for words MMS mispronounces, measured by active/tts-finetune/build_lexicon.py:
+    {"words": {word: spelling}, "heteronyms": {word: [noun, verb]}}; empty if absent."""
+    path = Path(path) if path else Path(__file__).with_name("mms_lexicon.json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"words": {}, "heteronyms": {}}
+    if "words" not in data:  # an older flat file
+        data = {"words": data, "heteronyms": {}}
+    return {"words": {w.lower(): s for w, s in data["words"].items()}, "heteronyms": {w.lower(): tuple(f) for w, f in data.get("heteronyms", {}).items()}}
+
+
+def respell(text, lexicon):
+    """Swaps in respellings MMS reads correctly, word by word; heteronyms by whether a determiner comes first."""
+    words = lexicon.get("words", {}) if "words" in lexicon else lexicon
+    heteronyms = lexicon.get("heteronyms", {})
+    tokens = re.split(r"(\W+)", text)
+    previous = ""
+    for index, token in enumerate(tokens):
+        word = token.lower()
+        if not word or not word[0].isalpha():
+            continue
+        if word in heteronyms:
+            noun, verb = heteronyms[word]
+            tokens[index] = noun if previous in DETERMINERS else verb
+        elif word in words:
+            tokens[index] = words[word]
+        previous = word
+    return "".join(tokens)
 
 
 def sentences(text):
@@ -83,6 +138,40 @@ def sentences(text):
         if part:
             pieces.append(part)
     return pieces
+
+
+def phrases(sentence):
+    """A sentence split at its commas: MMS's vocabulary has no punctuation, so it would read straight through them."""
+    return [part for part in re.split(r"(?<=,)\s+", sentence) if part.strip()]
+
+
+def trim(samples, sample_rate, margin_s=0.03):
+    """Cuts MMS's own silence (about 0.25 s at each end of every piece), keeping a short margin, so the pauses
+    between pieces are the ones synth() puts there."""
+    import numpy as np
+
+    loud = np.flatnonzero(np.abs(samples) > 0.02 * (np.abs(samples).max() + 1e-9))
+    if not len(loud):
+        return samples
+    margin = int(sample_rate * margin_s)
+    return samples[max(0, loud[0] - margin):loud[-1] + margin]
+
+
+def polish(samples, sample_rate):
+    """Light mastering, which a listening test preferred: rumble cut, a lift above 3 kHz (MMS is 16 kHz and sounds
+    muffled), a soft-knee limiter, and loudness to about -18 dBFS RMS."""
+    import numpy as np
+
+    try:
+        from scipy.signal import butter, sosfilt
+
+        lows_cut = sosfilt(butter(2, 70, "highpass", fs=sample_rate, output="sos"), samples)
+        samples = lows_cut + 0.35 * sosfilt(butter(2, 3000, "highpass", fs=sample_rate, output="sos"), lows_cut)
+    except ImportError:
+        pass  # without scipy: no EQ, the rest still applies
+    samples = np.tanh(2.0 * samples) / np.tanh(2.0)
+    rms = float(np.sqrt(np.mean(samples ** 2))) + 1e-9
+    return np.clip(samples * (10 ** (-18 / 20) / rms), -0.98, 0.98).astype(np.float32)
 
 
 def to_wav(samples, sample_rate):
@@ -192,17 +281,21 @@ def main():
         print(json.dumps({"ready": False, "error": f"{type(error).__name__}: {error}"}), flush=True)
         return 1
     sample_rate = voice.sample_rate
+    lexicon = load_lexicon()
     print(f"MMS: {voice.source} on {runtime}", file=sys.stderr, flush=True)
 
     def synth(text):
-        gap = np.zeros(int(sample_rate * 0.18), dtype=np.float32)
+        # Pauses measured from Kokoro reading the same sentences: about 0.2-0.35 s at a comma, longer between sentences.
+        sentence_gap = np.zeros(int(sample_rate * 0.4), dtype=np.float32)
+        comma_gap = np.zeros(int(sample_rate * 0.18), dtype=np.float32)
         chunks = []
         for piece in sentences(text):
-            audio = voice.speak(normalize(piece))
-            if audio is not None:
-                chunks.append(audio.astype(np.float32))
-                chunks.append(gap)
-        return np.concatenate(chunks) if chunks else gap
+            parts = [voice.speak(respell(normalize(part), lexicon)) for part in phrases(piece)]
+            parts = [trim(part.astype(np.float32), sample_rate) for part in parts if part is not None]
+            for index, part in enumerate(parts):
+                chunks.append(part)
+                chunks.append(comma_gap if index < len(parts) - 1 else sentence_gap)
+        return polish(np.concatenate(chunks), sample_rate) if chunks else sentence_gap
 
     source = voice.source.rstrip("/")
     name = "MMS English" if source == DEFAULT_MODEL else f"MMS English ({source.split('/')[-1]})"

@@ -18,6 +18,12 @@ import tempfile
 import warnings
 from pathlib import Path
 
+# How MMS samples its prosody, baked into the export (VITS draws noise for pitch/timing variation and duration).
+# Calmer than the stock 0.667 / 0.8 / 1.0, which a listening test preferred; pitch spread measured the same as Kokoro's
+# either way, so this mostly steadies timing. Bump RECIPE when these or the export change, so setup re-exports.
+NOISE_SCALE, NOISE_SCALE_DURATION, SPEAKING_RATE = 0.45, 0.1, 0.94
+RECIPE = 3
+
 # The text encoder's relative attention needs a few tokens; the sidecar pads shorter input to this.
 MIN_TOKENS = 8
 MAX_TOKENS = 4000
@@ -100,6 +106,9 @@ def main():
     parser.add_argument("model", help="Hugging Face id or local checkpoint folder (e.g. a fine-tune's output_dir)")
     parser.add_argument("out", help="folder to write")
     parser.add_argument("--check", action="store_true", help="verify the export against torch and time it")
+    parser.add_argument("--noise-scale", type=float, default=NOISE_SCALE)
+    parser.add_argument("--noise-duration", type=float, default=NOISE_SCALE_DURATION)
+    parser.add_argument("--speaking-rate", type=float, default=SPEAKING_RATE)
     args = parser.parse_args()
     warnings.filterwarnings("ignore")
 
@@ -108,6 +117,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     model, tokenizer = load(args.model)
+    model.noise_scale, model.noise_scale_duration, model.speaking_rate = args.noise_scale, args.noise_duration, args.speaking_rate
     with tempfile.TemporaryDirectory() as tmp:
         fp32 = Path(tmp) / "model.onnx"
         export(model, tokenizer, fp32)
@@ -126,6 +136,10 @@ def main():
         "pad_token_id": tokenizer.pad_token_id,
         "min_tokens": MIN_TOKENS,
         "max_tokens": MAX_TOKENS,
+        "recipe": RECIPE,
+        "noise_scale": args.noise_scale,
+        "noise_scale_duration": args.noise_duration,
+        "speaking_rate": args.speaking_rate,
     }
     (out / "active-mms.json").write_text(json.dumps(meta, indent=2))
     print(f"wrote {out / 'model.int8.onnx'} ({(out / 'model.int8.onnx').stat().st_size / 1e6:.0f} MB)")
