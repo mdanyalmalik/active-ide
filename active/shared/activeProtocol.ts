@@ -304,6 +304,9 @@ export interface ToolOutcome {
 export interface Walkthrough {
 	readonly id: string;
 	readonly sessionId: string;
+	/** The top-level agent whose work this explains (absent: made before multi-agent support). */
+	readonly agentId?: string;
+	readonly agentName?: string;
 	readonly turnId: string;
 	readonly turnIndex: number;
 	readonly task: string;
@@ -427,6 +430,9 @@ export interface FileChangeStat {
 
 export interface TurnSummary {
 	readonly sessionId: string;
+	/** The top-level agent that did this turn (absent: made before multi-agent support). */
+	readonly agentId?: string;
+	readonly agentName?: string;
 	readonly turnId: string;
 	readonly index: number;
 	readonly task: string;
@@ -450,6 +456,117 @@ export interface InitialState {
 	readonly narration: NarrationStatus;
 	readonly pendingWalkthrough?: Walkthrough;
 	readonly diagram?: DiagramState;
+	/** Every agent (top-level and nested) with its own initial state, when multi-agent support is on. */
+	readonly agents?: ReadonlyArray<AgentInfo>;
+	readonly overlaps?: ReadonlyArray<AgentOverlap>;
+	/** Per-agent state for agents other than the main one (the main one's is above). */
+	readonly agentStates?: ReadonlyArray<AgentInitialState>;
+	/** Why other agents can't be started here (e.g. the folder isn't a git repository). */
+	readonly multiAgentBlocker?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-agent
+// ---------------------------------------------------------------------------
+
+/** The id of the agent working in the developer's own folder (the first one). */
+export const MAIN_AGENT_ID = 'main';
+
+/** How many agent colours there are (`--active-agent-0` … in CSS). */
+export const AGENT_COLORS = 8;
+
+/**
+ * How an agent's actions get approved. `auto`: Muse's sandbox, with its AI judge deciding what it can and asking you
+ * the rest (Muse's default). `ask`: asks about anything no saved rule allows. `allowAll`: approves everything.
+ */
+export type AgentApprovalMode = 'auto' | 'ask' | 'allowAll';
+
+export interface AgentTodo {
+	readonly text: string;
+	readonly status: 'pending' | 'inProgress' | 'done';
+}
+
+/** One agent, as the agent list and the grid show it. */
+export interface AgentInfo {
+	readonly id: string;
+	readonly name: string;
+	readonly colorIndex: number;
+	/**
+	 * `agent`: one the developer started (its own worktree, or their folder). `subagent`: one the coding agent spawned
+	 * (Muse's own), shown nested under `parentId`. An agent merged into another is shown nested too (`mergedInto`).
+	 */
+	readonly kind: 'agent' | 'subagent';
+	readonly parentId?: string;
+	/** The folder it works in (absolute). */
+	readonly root: string;
+	/** True for the agent that works in the developer's own folder. Only the Explorer needs to show this. */
+	readonly inMainFolder: boolean;
+	/** Its git branch, when it has one. */
+	readonly branch?: string;
+	/** Subagent worktrees are Muse's: shown read-only. */
+	readonly readOnly?: boolean;
+	readonly sessionId?: string;
+	readonly status: AgentStatus;
+	readonly waitingForApproval: boolean;
+	/** One line on what it's doing now. */
+	readonly activity?: string;
+	/** The latest reasoning summary. */
+	readonly reasoning?: string;
+	/** Its plan, when it keeps one. */
+	readonly todo?: ReadonlyArray<AgentTodo>;
+	/** Estimated spend so far, in USD, when the agent reports it: coding plus its explanations, map and traces. */
+	readonly cost?: number;
+	/** What `cost` is made of. */
+	readonly costBreakdown?: { readonly coding: number; readonly explanations: number };
+	/** The current (or last) task. */
+	readonly task?: string;
+	readonly explainMode: ExplainMode;
+	readonly approvalMode: AgentApprovalMode;
+	readonly createdAt: number;
+	/** It finished its work and was merged into another agent (now shown nested under that one). */
+	readonly mergedInto?: string;
+	/** A subagent finished, or an agent was merged: nothing more will happen in it. */
+	readonly finished?: boolean;
+	/** When a subagent finished (it fades out of the list and grid shortly after). */
+	readonly finishedAt?: number;
+}
+
+/** Two top-level agents changed the same files (`sameLines`: the same lines, a likely merge conflict). */
+export interface AgentOverlap {
+	readonly agents: readonly [string, string];
+	readonly files: ReadonlyArray<{ readonly path: string; readonly sameLines: boolean }>;
+}
+
+/** The parts of `InitialState` that are per agent. */
+export interface AgentInitialState {
+	readonly agentId: string;
+	readonly agent: AgentState;
+	readonly chat: ReadonlyArray<ChatEntry>;
+	readonly turnChanges: ReadonlyArray<FileChangeStat>;
+	readonly pendingWalkthrough?: Walkthrough;
+	readonly diagram?: DiagramState;
+}
+
+export interface NewAgentRequest {
+	/** Starts it on this task straight away. */
+	readonly task?: string | TaskRequest;
+	readonly name?: string;
+}
+
+export interface MergeAgentsRequest {
+	/** The agent dragged… */
+	readonly sourceId: string;
+	/** …onto this one, which takes its work as if it had been its subagent. */
+	readonly targetId: string;
+	/** Commit the dragged agent's work on its branch first, and keep that branch. */
+	readonly commit?: boolean;
+}
+
+export interface MergeAgentsResult {
+	readonly ok: boolean;
+	readonly message: string;
+	readonly files?: number;
+	readonly conflicts?: readonly string[];
 }
 
 /** Setting ids shared by the workbench (which registers them) and the extension (which applies them). */
@@ -533,8 +650,13 @@ export interface ElaborateRequest {
 	readonly question?: string;
 }
 
-export type ActiveEvent =
+/**
+ * Events from the extension. Per-agent events carry `agentId` (absent: the main agent). The agent list itself is
+ * the `agents` event.
+ */
+export type ActiveEvent = (
 	| { readonly type: 'agent'; readonly agent: AgentState }
+	| { readonly type: 'agents'; readonly agents: ReadonlyArray<AgentInfo>; readonly overlaps: ReadonlyArray<AgentOverlap> }
 	| { readonly type: 'chat'; readonly entry: ChatEntry }
 	| { readonly type: 'turnChanges'; readonly turnId: string; readonly files: ReadonlyArray<FileChangeStat> }
 	| { readonly type: 'walkthroughStatus'; readonly status: WalkthroughStatus }
@@ -549,7 +671,8 @@ export type ActiveEvent =
 	| { readonly type: 'diagram'; readonly state: DiagramState }
 	| { readonly type: 'trace'; readonly trace: CodeTrace }
 	/** The whole transcript changed (a session was resumed or a new one started). */
-	| { readonly type: 'chatReset'; readonly chat: ReadonlyArray<ChatEntry> };
+	| { readonly type: 'chatReset'; readonly chat: ReadonlyArray<ChatEntry> }
+) & { readonly agentId?: string };
 
 /** Command ids the extension registers. */
 export const enum ExtensionCommand {
@@ -599,6 +722,23 @@ export const enum ExtensionCommand {
 	TraceList = 'active.ext.traceList',
 	/** Forgets a saved trace (its id). */
 	TraceDelete = 'active.ext.traceDelete',
+	/** The agent the developer has highlighted (its id): requests without an agent go to it. */
+	AgentFocus = 'active.ext.agentFocus',
+	/** Starts another top-level agent in its own worktree (`NewAgentRequest`); resolves with its id, or an error message. */
+	AgentNew = 'active.ext.agentNew',
+	/** Merges one agent's work into another (`MergeAgentsRequest`): `MergeAgentsResult`. */
+	AgentMerge = 'active.ext.agentMerge',
+	/** Stops an agent and removes its worktree (its id). Its history stays. */
+	AgentClose = 'active.ext.agentClose',
+	AgentRename = 'active.ext.agentRename',
+	/** One agent's explanation mode: `{ agentId, mode }`. */
+	AgentSetMode = 'active.ext.agentSetMode',
+	/** One agent's approval mode: `{ agentId, mode: AgentApprovalMode }`. */
+	AgentSetApprovalMode = 'active.ext.agentSetApprovalMode',
+	/** Interrupts an agent's running turn (its id). */
+	AgentInterrupt = 'active.ext.agentInterrupt',
+	/** All agents' state (`AgentInitialState[]`), e.g. after the agent list changes. */
+	AgentStates = 'active.ext.agentStates',
 }
 
 /** Command id the workbench registers for extension → workbench events. */
@@ -617,11 +757,18 @@ export interface Briefing {
 	readonly next: string;
 	/** Set when the explanation model couldn't write it and this is the plain fallback. */
 	readonly fallback?: boolean;
+	/** An all-agents briefing: the same, per agent (the lists above then hold what spans agents, e.g. overlaps). */
+	readonly agents?: ReadonlyArray<{ readonly agentId: string; readonly name: string; readonly headline: string; readonly done: readonly string[]; readonly attention: readonly string[]; readonly problems: readonly string[] }>;
 }
 
 export interface BriefingRequest {
 	/** Cover turns that ended (and chapters made) at or after this time. */
 	readonly since: number;
+	/** Brief on one agent only (default: the highlighted one), or on every agent, grouped. */
+	readonly agentId?: string;
+	readonly allAgents?: boolean;
+	/** Very short: for opening an agent the developer hasn't looked at for a while. */
+	readonly short?: boolean;
 }
 
 export interface AskRequest {

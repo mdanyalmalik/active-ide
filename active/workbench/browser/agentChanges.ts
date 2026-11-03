@@ -14,7 +14,6 @@ import { ITextModelContentProvider, ITextModelService } from '../../../../editor
 import { localize } from '../../../../nls.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { IDecorationData, IDecorationsService } from '../../../services/decorations/common/decorations.js';
 import { IQuickDiffService } from '../../scm/common/quickDiff.js';
@@ -46,7 +45,6 @@ export class AgentQuickDiff extends Disposable implements IWorkbenchContribution
 		@ILanguageService private readonly languageService: ILanguageService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IStorageService private readonly storageService: IStorageService,
-		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IActiveService private readonly activeService: IActiveService,
 	) {
 		super();
@@ -62,11 +60,12 @@ export class AgentQuickDiff extends Disposable implements IWorkbenchContribution
 
 	private registerProvider(): void {
 		this.version++;
-		const folder = this.workspaceService.getWorkspace().folders[0];
+		// The highlighted agent's folder: its own worktree, or the workspace folder.
+		const root = this.activeService.agentRoot();
 		this.provider.value = this.quickDiffService.addQuickDiffProvider({
 			id: PROVIDER_ID,
 			label: localize('agentChanges', "Agent Changes"),
-			rootUri: folder?.uri,
+			rootUri: root,
 			kind: 'contributed',
 			getOriginalResource: async uri => {
 				const relative = this.relativePath(uri);
@@ -121,9 +120,18 @@ export class AgentQuickDiff extends Disposable implements IWorkbenchContribution
 		if (uri.scheme !== Schemas.file) {
 			return undefined;
 		}
-		const folder = this.workspaceService.getWorkspaceFolder(uri);
-		return folder ? uri.path.slice(folder.uri.path.length + 1) : undefined;
+		return agentRelative(this.activeService, uri);
 	}
+}
+
+/** `uri` relative to the highlighted agent's folder (the counts and baselines are that agent's). */
+function agentRelative(activeService: IActiveService, uri: URI): string | undefined {
+	const root = activeService.agentRoot();
+	if (!root || uri.scheme !== Schemas.file) {
+		return undefined;
+	}
+	const prefix = root.path.replace(/\/$/, '') + '/';
+	return uri.path.startsWith(prefix) ? uri.path.slice(prefix.length) : undefined;
 }
 
 /** Git's decorations come from its extension, under its identifier. */
@@ -146,7 +154,6 @@ export class AgentDecorations extends Disposable implements IWorkbenchContributi
 
 	constructor(
 		@IDecorationsService decorationsService: IDecorationsService,
-		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IActiveService private readonly activeService: IActiveService,
 	) {
 		super();
@@ -168,8 +175,8 @@ export class AgentDecorations extends Disposable implements IWorkbenchContributi
 		if (this.mode !== 'agent') {
 			return undefined;
 		}
-		const folder = uri.scheme === Schemas.file ? this.workspaceService.getWorkspaceFolder(uri) : undefined;
-		const stats = folder ? this.activeService.turnChanges.get(uri.path.slice(folder.uri.path.length + 1)) : undefined;
+		const relative = agentRelative(this.activeService, uri);
+		const stats = relative !== undefined ? this.activeService.turnChanges.get(relative) : undefined;
 		if (!stats) {
 			return undefined;
 		}
@@ -180,8 +187,8 @@ export class AgentDecorations extends Disposable implements IWorkbenchContributi
 
 	/** Refreshes the files that were marked and the ones that are marked now, and re-filters git on a mode switch. */
 	private update(): void {
-		const folder = this.workspaceService.getWorkspace().folders[0];
-		const now = folder && this.activeService.explorerCountsMode === 'agent' ? [...this.activeService.turnChanges.keys()].map(path => URI.joinPath(folder.uri, path)) : [];
+		const root = this.activeService.agentRoot();
+		const now = root && this.activeService.explorerCountsMode === 'agent' ? [...this.activeService.turnChanges.keys()].map(path => URI.joinPath(root, path)) : [];
 		const modeChanged = this.mode !== this.activeService.explorerCountsMode;
 		this.mode = this.activeService.explorerCountsMode;
 		const affected = [...this.marked, ...now];

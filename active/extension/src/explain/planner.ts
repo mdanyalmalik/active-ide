@@ -21,6 +21,60 @@ interface PendingTurn {
  * whose final agent message is the answer. It reads the live project under the
  * agent's read-only permission profile.
  */
+/**
+ * Shared by every agent's explainer (and side agents): how many explanation requests run at once across all of
+ * them, and which goes next. The developer's own questions first, then the highlighted agent's work, then the rest
+ * in the order they asked. With one agent it changes nothing.
+ */
+export class ExplainerGate {
+	private running = 0;
+	private readonly waiting: Array<{ readonly owner: string; readonly urgent: boolean; readonly start: () => void; readonly seq: number }> = [];
+	private seq = 0;
+
+	constructor(private readonly limit: () => number, private readonly focused: () => string | undefined) { }
+
+	/** Resolves when `owner` may start; call the returned function when done. */
+	acquire(owner: string, urgent: boolean): Promise<() => void> {
+		return new Promise(resolve => {
+			this.waiting.push({ owner, urgent, seq: this.seq++, start: () => resolve(once(() => this.release())) });
+			this.pump();
+		});
+	}
+
+	private release(): void {
+		this.running = Math.max(0, this.running - 1);
+		this.pump();
+	}
+
+	private pump(): void {
+		while (this.running < Math.max(1, this.limit()) && this.waiting.length) {
+			const focused = this.focused();
+			const rank = (entry: { owner: string; urgent: boolean }) => entry.urgent ? 0 : entry.owner === focused ? 1 : 2;
+			let best = 0;
+			for (let index = 1; index < this.waiting.length; index++) {
+				const candidate = this.waiting[index];
+				const current = this.waiting[best];
+				if (rank(candidate) < rank(current) || (rank(candidate) === rank(current) && candidate.seq < current.seq)) {
+					best = index;
+				}
+			}
+			const [next] = this.waiting.splice(best, 1);
+			this.running++;
+			next.start();
+		}
+	}
+}
+
+function once(run: () => void): () => void {
+	let done = false;
+	return () => {
+		if (!done) {
+			done = true;
+			run();
+		}
+	};
+}
+
 export class ExplanationAgent {
 	private session: AgentSession | undefined;
 	private readonly turns = new Map<string, PendingTurn>();
@@ -38,7 +92,25 @@ export class ExplanationAgent {
 		private readonly openSession: (listener: ExplanationAgent) => Promise<AgentSession>,
 		private readonly turnTimeoutMs = 5 * 60 * 1000,
 		private readonly reasoningEffort: () => string | undefined = () => undefined,
+		private readonly gate?: { readonly instance: ExplainerGate; readonly owner: string },
 	) { }
+
+	/** Muse credit this agent's sessions have used (earlier sessions, plus the open one's running total). */
+	private priorCost = 0;
+	private sessionCost = 0;
+	/** Called when the cost changes. */
+	onCostChange: (() => void) | undefined;
+
+	get cost(): number {
+		return this.priorCost + this.sessionCost;
+	}
+
+	onUsage(usage: { readonly costUsd?: number }): void {
+		if (usage.costUsd !== undefined && usage.costUsd !== this.sessionCost) {
+			this.sessionCost = usage.costUsd;
+			this.onCostChange?.();
+		}
+	}
 
 	/** The open session, if any (for applying a model change). */
 	get currentSession(): AgentSession | undefined {
@@ -48,6 +120,8 @@ export class ExplanationAgent {
 	/** Forgets the session (after a reconnect the old host is gone). */
 	reset(): void {
 		this.session = undefined;
+		this.priorCost += this.sessionCost;
+		this.sessionCost = 0;
 		// A turn on the old host may never report back: don't let it hold up later requests.
 		this.generation++;
 		this.busy = false;
@@ -64,7 +138,9 @@ export class ExplanationAgent {
 		}
 		this.busy = true;
 		const generation = this.generation;
-		void next.run().finally(() => {
+		const gate = this.gate;
+		const run = gate ? () => gate.instance.acquire(gate.owner, next.urgent).then(release => next.run().finally(release)) : next.run;
+		void run().finally(() => {
 			if (generation === this.generation) {
 				this.busy = false;
 				this.pump();

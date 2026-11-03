@@ -4386,3 +4386,26 @@
 		animation: none;
 	}
 }
+
+/* Whose work an explanation or history entry is (shown when several agents run). */
+.active-agent-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	margin-right: 8px;
+	padding: 0 7px;
+	border-radius: 9px;
+	font-size: 11px;
+	line-height: 18px;
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--agent-color) 18%, transparent);
+	border: 1px solid color-mix(in srgb, var(--agent-color) 45%, transparent);
+}
+
+.active-agent-chip::before {
+	content: '';
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--agent-color);
+}

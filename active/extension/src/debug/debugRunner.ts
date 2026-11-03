@@ -341,7 +341,7 @@ export class DebugRunner {
 				this.receive(holder, event);
 			}
 			this.touch(holder);
-			this.options.log(`debug: started ${id}: ${command} (${points.length} point(s))`);
+			this.options.log(`debug: started ${id}: ${command} in ${cwd} (${points.length} point(s))`);
 			return { ok: true, session: holder };
 		} catch (failure) {
 			await removeBreakpoints().catch(() => undefined);

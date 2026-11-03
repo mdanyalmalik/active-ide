@@ -48,7 +48,30 @@ function toItem(raw: Params): AgentItem {
 		} : undefined,
 		callId: asString(raw.callId),
 		fallbackText: asString(raw.fallbackText),
+		subagent: raw.kind === 'subagent' ? {
+			subagentId: String(raw.subagentId ?? raw.itemId),
+			childSessionId: asString(raw.childSessionId),
+			objective: asString(raw.objective),
+			role: asString(raw.role),
+			agentPath: asString(raw.agentPath),
+			controlStatus: asString(raw.controlStatus),
+			resultSummary: asString((raw.result as Params | undefined)?.summary),
+			failureReason: asString(raw.failureReason),
+			depth: typeof raw.depth === 'number' ? raw.depth : undefined,
+		} : undefined,
 	};
+}
+
+/** Per-session tool servers, in `session/start` / `session/resume` form (only for sessions that may act). */
+function sessionConfig(options: AgentSessionOptions): Params {
+	if (options.readOnly || !options.mcpServers || !Object.keys(options.mcpServers).length) {
+		return {};
+	}
+	const mcpServers: Params = {};
+	for (const [name, server] of Object.entries(options.mcpServers)) {
+		mcpServers[name] = { transport: 'streamableHttp', url: server.url, ...(server.headers ? { headers: { ...server.headers } } : {}), mode: 'optional' };
+	}
+	return { config: { mcpServers } };
 }
 
 function describeApproval(params: Params): { title: string; detail: string } {
@@ -126,7 +149,8 @@ export class MuseHost implements AgentHost {
 		});
 		let msp: SpawnedMspConnection;
 		try {
-			msp = await handshake.initialize({ clientInfo: CLIENT_INFO });
+			// sessionMcp: each coding agent gets its own tools (its debugger, in its own folder) at session start.
+			msp = await handshake.initialize({ clientInfo: CLIENT_INFO, capabilities: { requestedCapabilities: ['sessionMcp'] } });
 		} catch (error) {
 			const tail = stderr.join('').split('\n').filter(Boolean).slice(-6).join('\n');
 			throw new MuseUnavailableError(`${error instanceof Error ? error.message : String(error)}${tail ? `\n${tail}` : ''}`);
@@ -136,6 +160,10 @@ export class MuseHost implements AgentHost {
 		}
 		const info = msp.initializeResult;
 		host = new MuseHost(msp, `${info.serverInfo.name} ${info.serverInfo.version}`, stderr);
+		host.sessionTools = (info.grantedCapabilities ?? []).includes('sessionMcp');
+		if (!host.sessionTools) {
+			log('Muse didn\'t grant per-session tools (sessionMcp): agents won\'t get their debugger');
+		}
 		for (const frame of early) {
 			host.route(frame.method, frame.params);
 		}
@@ -144,7 +172,7 @@ export class MuseHost implements AgentHost {
 
 	private route(method: string, params: Params): void {
 		const sessionId = asString(params.sessionId);
-		const session = sessionId ? this.sessions.get(sessionId) : undefined;
+		const session = sessionId ? this.sessions.get(sessionId) ?? this.watched.get(sessionId) : undefined;
 		if (!session) {
 			return;
 		}
@@ -178,7 +206,7 @@ export class MuseHost implements AgentHost {
 				throw new MuseUnavailableError(`Muse Code didn't accept its read-only permission profile (${READ_ONLY_PROFILE}), so Active won't start the explanation session: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		} else {
-			result = await connection.command('session/start', { workspaceRoot: options.workspaceRoot });
+			result = await connection.command('session/start', { workspaceRoot: options.workspaceRoot, ...(this.sessionTools ? sessionConfig(options) : {}) });
 		}
 		const sessionInfo = (result.session ?? {}) as Params;
 		const sessionId = String(sessionInfo.sessionId);
@@ -207,11 +235,38 @@ export class MuseHost implements AgentHost {
 
 	async resumeSession(sessionId: string, options: AgentSessionOptions): Promise<AgentSession> {
 		// Active keeps its own transcript, so only the live session is needed, not Muse's history.
-		const result = await this.msp.connection.command('session/resume', { sessionId, excludeItems: true });
+		const result = await this.msp.connection.command('session/resume', { sessionId, excludeItems: true, ...(this.sessionTools ? sessionConfig(options) : {}) });
 		const resumed = String(((result.session ?? {}) as Params).sessionId ?? sessionId);
 		const session = new MuseSession(resumed, this.msp, options.listener, options.readOnly);
 		this.sessions.set(resumed, session);
 		return session;
+	}
+
+	/** Muse accepts tool servers per session (each agent's own debugger). */
+	sessionTools = false;
+
+	/** Sessions followed read-only (subagents'), by id. */
+	private readonly watched = new Map<string, MuseSession>();
+
+	async watchSession(sessionId: string, listener: AgentSessionListener): Promise<{ readonly worktreeRoot?: string; dispose(): void }> {
+		const session = new MuseSession(sessionId, this.msp, listener, true, true);
+		this.watched.set(sessionId, session);
+		// Only new events: the parent's item already carries what the child set out to do.
+		await this.msp.connection.request('view/subscribe', { sessionId }).catch(error => {
+			this.watched.delete(sessionId);
+			throw error;
+		});
+		const read = await this.msp.connection.request('session/read', { sessionId, excludeItems: true }).catch(() => undefined) as Params | undefined;
+		const worktree = read?.worktree as Params | undefined;
+		return {
+			worktreeRoot: asString(worktree?.worktreeRoot),
+			dispose: () => {
+				if (this.watched.get(sessionId) === session) {
+					this.watched.delete(sessionId);
+					void this.msp.connection.request('view/unsubscribe', { sessionId }).catch(() => undefined);
+				}
+			},
+		};
 	}
 
 	async dispose(): Promise<void> {
@@ -222,7 +277,8 @@ export class MuseHost implements AgentHost {
 class MuseSession implements AgentSession {
 	private readonly deltas = new Map<string, Map<string, string>>();
 
-	constructor(readonly sessionId: string, private readonly msp: SpawnedMspConnection, private readonly listener: AgentSessionListener, private readonly readOnly: boolean) { }
+	/** `watchOnly`: a session Active follows but doesn't own (a subagent's): its approvals are left to its parent. */
+	constructor(readonly sessionId: string, private readonly msp: SpawnedMspConnection, private readonly listener: AgentSessionListener, private readonly readOnly: boolean, private readonly watchOnly = false) { }
 
 	handle(method: string, params: Params): void {
 		switch (method) {
@@ -258,8 +314,21 @@ class MuseSession implements AgentSession {
 				this.listener.onTurnCompleted?.(String(params.turnId), 'unqueued');
 				break;
 			case 'approval/requested':
-				this.onApproval(params);
+				if (!this.watchOnly) {
+					this.onApproval(params);
+				}
 				break;
+			case 'session/todoListChanged': {
+				const items = Array.isArray(params.items) ? params.items as Params[] : [];
+				this.listener.onTodo?.(items.map(item => ({ text: String(item.activeForm && item.status === 'inProgress' ? item.activeForm : item.text ?? ''), status: String(item.status ?? 'pending') })));
+				break;
+			}
+			case 'session/tokenUsage': {
+				const cumulative = (params.cumulative ?? {}) as Params;
+				const cost = cumulative.cost as Params | undefined;
+				this.listener.onUsage?.({ totalTokens: Number(cumulative.totalTokens) || 0, costUsd: typeof cost?.usd === 'number' ? cost.usd : undefined });
+				break;
+			}
 			case 'approval/resolved':
 				this.listener.onApprovalResolved?.(String(params.approvalId), String(params.decision ?? ''));
 				break;
@@ -317,6 +386,29 @@ class MuseSession implements AgentSession {
 
 	async setModel(modelId: string): Promise<void> {
 		await this.msp.connection.command('session/setModel', { sessionId: this.sessionId, model: { modelId } });
+	}
+
+	async messageSubagent(subagentId: string, body: string, followUp: boolean): Promise<void> {
+		const params = { sessionId: this.sessionId, subagentId, body };
+		if (!followUp) {
+			await this.msp.connection.command('subagent/sendMessage', params);
+			return;
+		}
+		try {
+			await this.msp.connection.command('subagent/followupTask', params);
+		} catch {
+			// A closed child is reopened first, then given the task.
+			await this.msp.connection.command('subagent/reopen', { sessionId: this.sessionId, subagentId });
+			await this.msp.connection.command('subagent/followupTask', params);
+		}
+	}
+
+	async stopSubagent(subagentId: string): Promise<void> {
+		await this.msp.connection.command('subagent/interrupt', { sessionId: this.sessionId, subagentId, reason: 'Stopped by the developer in Active' });
+	}
+
+	async setApprovalMode(mode: string): Promise<void> {
+		await this.msp.connection.command('session/setApprovalMode', { sessionId: this.sessionId, mode });
 	}
 
 	async steer(turnId: string, text: string): Promise<void> {

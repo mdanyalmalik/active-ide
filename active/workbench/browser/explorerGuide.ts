@@ -10,7 +10,6 @@ import { ResourceSet } from '../../../../base/common/map.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IAccessibilityService } from '../../../../platform/accessibility/common/accessibility.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
-import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
@@ -404,7 +403,6 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 	constructor(
 		@IEditorService private readonly editorService: IEditorService,
 		@IViewsService private readonly viewsService: IViewsService,
-		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IExplorerService private readonly explorerService: IExplorerService,
 		@IActiveService private readonly activeService: IActiveService,
 		@IAccessibilityService private readonly accessibilityService: IAccessibilityService,
@@ -444,9 +442,9 @@ export class ExplorerGuide extends Disposable implements IWorkbenchContribution 
 			this.mapInput = mapInput;
 			this.inputListener.value = input?.onDidChangeFile(() => this.update()) ?? mapInput?.onDidChangeSelection(() => this.update());
 		}
-		const folder = this.workspaceService.getWorkspace().folders[0];
 		const files = input?.file ? [input.file] : mapInput?.selectedFiles ?? [];
-		void this.guide(folder ? files.map(file => folder.toResource(file)) : []);
+		// Paths are relative to the agent whose work (or map) this is: the highlighted one.
+		void this.guide(files.map(file => this.activeService.resolveAgentPath(file)).filter((uri): uri is URI => !!uri));
 	}
 
 	private explorer(): Attachment | undefined {

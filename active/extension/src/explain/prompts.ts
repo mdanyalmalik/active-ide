@@ -24,6 +24,56 @@ export interface PlanningContext {
 	readonly chapter?: { readonly index: number; readonly earlier: ReadonlyArray<{ readonly title: string; readonly summary: string }> };
 	/** The explainer's memory (`ExplainerMemory.describe`), if any. */
 	readonly memory?: string;
+	/** With several agents running: which one did this work, and what the others are doing. */
+	readonly agents?: AgentContext;
+}
+
+/** Who did the work, when more than one agent is involved. */
+export interface AgentContext {
+	/** The top-level agent this turn belongs to, e.g. "Agent 2". */
+	readonly name: string;
+	/** Helpers the agent spawned this turn, and what came of them. */
+	readonly subagents: readonly SubagentWork[];
+	/** Other agents' work merged into this one's folder before or during the turn. */
+	readonly mergedIn: readonly MergedWork[];
+	/** Files another top-level agent is also changing (`sameLines`: the same lines). */
+	readonly overlaps: ReadonlyArray<{ readonly agent: string; readonly path: string; readonly sameLines: boolean }>;
+}
+
+export interface SubagentWork {
+	readonly name: string;
+	readonly objective: string;
+	readonly status: string;
+	readonly result?: string;
+	/** Files the subagent's own tool calls touched. */
+	readonly files: readonly string[];
+	/** Where its own lines are in the final versions (`intact`: the file is exactly as it left it). */
+	readonly lines?: ReadonlyArray<{ readonly path: string; readonly ranges: string; readonly intact: boolean }>;
+}
+
+export interface MergedWork {
+	readonly from: string;
+	readonly task?: string;
+	readonly files: readonly string[];
+	readonly conflicts: readonly string[];
+}
+
+/** The multi-agent section of a planning prompt (empty with a single agent and nothing merged or spawned). */
+export function agentSection(agents: AgentContext | undefined): string {
+	if (!agents) {
+		return '';
+	}
+	const parts = [`AGENT\nThis work was done by ${agents.name}, one of several coding agents the developer runs in parallel, each in its own copy of the project. Refer to it as "${agents.name}" where it helps (e.g. in the title or summary), so the developer knows whose work this is.`];
+	if (agents.subagents.length) {
+		parts.push(`SUBAGENTS (${agents.name} handed parts of the work to helpers with their own, narrower context. Say so where it matters, e.g. "a subagent wrote these tests": the developer wants to know who was involved, which helps when hunting issues. Attribute only what the evidence supports.\n${agents.subagents.map(sub => `- ${sub.name}: "${sub.objective.replace(/\s+/g, ' ').slice(0, 300)}" (${sub.status})${sub.lines?.length ? `; wrote ${sub.lines.map(line => `${line.path} lines ${line.ranges}${line.intact ? '' : ' (partly changed afterwards)'}`).join(', ')}` : sub.files.length ? `; touched ${sub.files.join(', ')}` : ''}${sub.result ? `; reported: ${sub.result.replace(/\s+/g, ' ').slice(0, 400)}` : ''}`).join('\n')}`);
+	}
+	if (agents.mergedIn.length) {
+		parts.push(`MERGED IN (not ${agents.name}'s work, and already explained separately: do NOT explain these changes. If ${agents.name} resolved conflicts or adapted code to fit the merged work, explain only that.\n${agents.mergedIn.map(merge => `- From ${merge.from}${merge.task ? ` ("${merge.task.split('\n')[0].slice(0, 120)}")` : ''}: ${merge.files.join(', ') || '(no files)'}${merge.conflicts.length ? `; conflicts in ${merge.conflicts.join(', ')}` : ''}`).join('\n')}`);
+	}
+	if (agents.overlaps.length) {
+		parts.push(`OVERLAPS (other agents are changing the same files in their own copies; mention it in a sentence where it matters, e.g. "Agent 3 is also changing this function", without explaining their work\n${agents.overlaps.map(overlap => `- ${overlap.path}: also ${overlap.agent}${overlap.sameLines ? ' (the same lines: likely to conflict on merge)' : ''}`).join('\n')}`);
+	}
+	return parts.join('\n\n');
 }
 
 const MAX_FILE_CHARS = 24000;
@@ -160,6 +210,7 @@ export function buildPlanningPrompt(context: PlanningContext, previous?: Walkthr
 		`DEVELOPER PROFILE\n${describeProfile(context.profile)}\nAdapt what you cover, detail, vocabulary and pacing to this profile: skim what they want skimmed, spend scenes on what they follow closely, and don't explain what they already know well. ${context.profile.math === 'avoid' ? 'Avoid equations.' : ''}`,
 		memorySection(context.memory, true),
 		lengthGuidance(context),
+		agentSection(context.agents),
 		`TASK (turn ${context.turnIndex})\n${context.task}`,
 		`AGENT MESSAGES\n${context.agentMessages.join('\n---\n') || '(none)'}`,
 		`EXPOSED REASONING SUMMARIES\n${context.reasoningSummaries.join('\n---\n') || '(none)'}`,
@@ -248,6 +299,8 @@ export function buildCheckpointPrompt(context: CheckpointContext): string {
 }
 
 export interface BriefingTurn {
+	/** The agent that did it, when several are running. */
+	readonly agent?: string;
 	readonly task: string;
 	readonly outcome: string;
 	/** "Walkthrough: …", "Chapter 2: …", "Explained in a short note.", "Not explained: …". */
@@ -268,12 +321,17 @@ export interface BriefingContext {
 	readonly running?: { readonly task: string; readonly progress: readonly string[] };
 	/** Approvals or questions waiting on the developer. */
 	readonly waiting: readonly string[];
+	/** A very short catch-up on one agent (on opening it after a while): two or three lines at most. */
+	readonly short?: boolean;
+	/** One briefing across several agents, grouped by agent (`agents` names them; `running` is per agent there). */
+	readonly allAgents?: ReadonlyArray<{ readonly agentId: string; readonly name: string; readonly running?: { readonly task: string; readonly progress: readonly string[] }; readonly waiting: readonly string[] }>;
+	readonly overlaps?: readonly string[];
 }
 
 /** The return briefing: what happened while the developer was away, in a minute's reading. */
 export function buildBriefingPrompt(context: BriefingContext): string {
 	const turns = context.turns.map((turn, index) => [
-		`${index + 1}. TASK: ${turn.task}`,
+		`${index + 1}. ${turn.agent ? `[${turn.agent}] ` : ''}TASK: ${turn.task}`,
 		`   outcome: ${turn.outcome}; explanation: ${turn.explanation}`,
 		turn.summary ? `   walkthrough summary: ${turn.summary}` : '',
 		turn.notes.length ? `   notes: ${turn.notes.join(' | ')}` : '',
@@ -282,6 +340,25 @@ export function buildBriefingPrompt(context: BriefingContext): string {
 		turn.pendingChecks.length ? `   checks still pending: ${turn.pendingChecks.join(', ')}` : '',
 		turn.files.length ? `   files: ${turn.files.map(file => `${file.path} (+${file.added} -${file.removed})`).join(', ')}` : '',
 	].filter(Boolean).join('\n')).join('\n');
+	if (context.allAgents) {
+		return [
+			`ALL-AGENTS BRIEFING. The developer runs several coding agents in parallel, each in its own copy of the project, and was away for ${context.minutesAway} minutes. Write one short catch-up across all of them, grouped by agent: per agent, what got done that matters, what needs the developer, what's unresolved. Top-level lists hold what spans agents (e.g. two agents changing the same files, an order to merge in). One line per point, plain words, at the level of their profile. Mention only what the material supports; leave lists empty rather than padding them. Agents with nothing to report may be left out.`,
+			`Reply with only JSON: {"headline": string, "done": [string], "attention": [string], "problems": [string], "next": string, "agents": [{"agentId": string, "name": string, "headline": string, "done": [string], "attention": [string], "problems": [string]}]}`,
+			`DEVELOPER PROFILE\n${describeProfile(context.profile)}`,
+			`AGENTS\n${context.allAgents.map(agent => `- ${agent.name} (agentId ${agent.agentId})${agent.running ? `: still working on "${agent.running.task.split('\n')[0].slice(0, 120)}"; latest: ${agent.running.progress.join(' | ') || '(none)'}` : ''}${agent.waiting.length ? `; waiting on the developer: ${agent.waiting.join('; ')}` : ''}`).join('\n')}`,
+			`WHAT HAPPENED (oldest first; each task is labelled with its agent)\n${turns || '(no finished tasks)'}`,
+			context.overlaps?.length ? `OVERLAPS\n${context.overlaps.map(line => `- ${line}`).join('\n')}` : '',
+		].filter(Boolean).join('\n\n');
+	}
+	if (context.short) {
+		return [
+			`SHORT CATCH-UP. The developer is coming back to one coding agent after ${context.minutesAway} minutes away from it (other agents may have been running too). In at most three short lines total, tell them what this agent finished and anything waiting on them. Nothing else: no retelling, no advice.`,
+			`Reply with only JSON: {"headline": string, "done": [string], "attention": [string], "problems": [string], "next": string}`,
+			`WHAT HAPPENED (oldest first)\n${turns || '(no finished tasks)'}`,
+			context.running ? `STILL RUNNING\nTASK: ${context.running.task}` : '',
+			context.waiting.length ? `WAITING ON THE DEVELOPER\n${context.waiting.map(item => `- ${item}`).join('\n')}` : '',
+		].filter(Boolean).join('\n\n');
+	}
 	return [
 		`RETURN BRIEFING. The developer was away for ${context.minutesAway} minutes while a coding agent worked. Write the short briefing they read when they come back: what got done that matters, what needs them, what's unresolved, and where to pick up. They can open the detailed walkthroughs separately, so don't retell them; one line per point, in plain words, at the level of their profile. Mention only what the material below supports. Leave a list empty rather than padding it.`,
 		`Reply with only JSON: {"headline": string, "done": [string], "attention": [string], "problems": [string], "next": string}`,

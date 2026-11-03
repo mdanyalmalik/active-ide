@@ -30,6 +30,32 @@ export interface AgentItem {
 	readonly backgroundCompletion?: { readonly command: string; readonly output: string; readonly terminalStatus: string; readonly toolCallId: string };
 	readonly callId?: string;
 	readonly fallbackText?: string;
+	/** A `subagent` item: a helper the coding agent spawned, with its own session. */
+	readonly subagent?: AgentSubagentInfo;
+}
+
+export interface AgentSubagentInfo {
+	readonly subagentId: string;
+	readonly childSessionId?: string;
+	readonly objective?: string;
+	readonly role?: string;
+	readonly agentPath?: string;
+	/** Muse's child status (`running`, `resultReady`, `closed`, …). */
+	readonly controlStatus?: string;
+	readonly resultSummary?: string;
+	readonly failureReason?: string;
+	readonly depth?: number;
+}
+
+export interface AgentTodoItem {
+	readonly text: string;
+	readonly status: string;
+}
+
+export interface AgentUsage {
+	readonly totalTokens: number;
+	/** Estimated USD for the session so far, when the provider prices it. */
+	readonly costUsd?: number;
 }
 
 export interface AgentApproval {
@@ -57,6 +83,10 @@ export interface AgentSessionListener {
 	onTurnCompleted?(turnId: string, terminal: string, error?: string, errorKind?: string): void;
 	onApproval?(approval: AgentApproval): void;
 	onApprovalResolved?(approvalId: string, decision: string): void;
+	/** The agent's plan (replaced wholesale). */
+	onTodo?(items: readonly AgentTodoItem[]): void;
+	/** Running totals for the session. */
+	onUsage?(usage: AgentUsage): void;
 }
 
 export interface AgentSession {
@@ -72,6 +102,12 @@ export interface AgentSession {
 	accountSummary?(): Promise<string | undefined>;
 	/** Stops a running turn, when the provider supports it. */
 	interruptTurn?(turnId: string): Promise<void>;
+	/** Sends a subagent this session spawned a message (while it runs) or a follow-up task (once it's finished). */
+	messageSubagent?(subagentId: string, body: string, followUp: boolean): Promise<void>;
+	/** Interrupts a subagent this session spawned. */
+	stopSubagent?(subagentId: string): Promise<void>;
+	/** Switches how the agent's actions are approved (Muse's `ApprovalMode`), when the provider supports it. */
+	setApprovalMode?(mode: string): Promise<void>;
 	/** Adds a message to the running turn `turnId` (the agent reads it at its next step), when the provider supports it. */
 	steer?(turnId: string, text: string): Promise<void>;
 }
@@ -80,6 +116,13 @@ export interface AgentSessionOptions {
 	readonly workspaceRoot: string;
 	readonly readOnly: boolean;
 	readonly listener: AgentSessionListener;
+	/** Tool servers (MCP over HTTP) for this session only, by name: e.g. an agent's debugger in its own folder. */
+	readonly mcpServers?: Readonly<Record<string, SessionToolServer>>;
+}
+
+export interface SessionToolServer {
+	readonly url: string;
+	readonly headers?: Readonly<Record<string, string>>;
 }
 
 export interface AgentHost {
@@ -91,4 +134,11 @@ export interface AgentHost {
 	resumeSession?(sessionId: string, options: AgentSessionOptions): Promise<AgentSession>;
 	readonly exited: Promise<string>;
 	dispose(): Promise<void>;
+	/** Whether sessions can be given their own tool servers (`AgentSessionOptions.mcpServers`); unknown when absent. */
+	readonly sessionTools?: boolean;
+	/**
+	 * Follows a session Active didn't start (a subagent's), read-only: its items reach `listener`. Resolves with its
+	 * worktree, when it runs in one.
+	 */
+	watchSession?(sessionId: string, listener: AgentSessionListener): Promise<{ readonly worktreeRoot?: string; dispose(): void }>;
 }

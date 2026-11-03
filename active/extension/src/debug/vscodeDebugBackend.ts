@@ -83,7 +83,8 @@ export class VscodeDebugBackend implements DebugBackend, vscode.Disposable {
 	async start(options: { runId: string; command: string; plan: LaunchPlan; cwd: string }, onEvent: (event: DebugBackendEvent) => void): Promise<BackendSession> {
 		const run: Run = { onEvent, root: undefined, sessions: new Map() };
 		this.runs.set(options.runId, run);
-		const started = await vscode.debug.startDebugging(this.folder, {
+		// An agent's worktree isn't a workspace folder: run without one (the configuration carries its own cwd).
+		const started = await vscode.debug.startDebugging(vscode.workspace.getWorkspaceFolder(this.folder.uri), {
 			...launchConfiguration(options.plan, options.cwd),
 			name: `Active: ${options.command}`,
 			[RUN_KEY]: options.runId,

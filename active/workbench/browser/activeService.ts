@@ -21,12 +21,17 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkspaceTrustManagementService } from '../../../../platform/workspace/common/workspaceTrust.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { ILifecycleService, ShutdownReason } from '../../../services/lifecycle/common/lifecycle.js';
 import { ViewContainerLocation } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../files/common/files.js';
+import { AgentApprovalMode, AgentInfo, AgentInitialState, AgentOverlap, MAIN_AGENT_ID, MergeAgentsResult, NewAgentRequest } from '../common/activeProtocol.js';
+import { INotificationHandle } from '../../../../platform/notification/common/notification.js';
+import { URI } from '../../../../base/common/uri.js';
 import { ActiveEvent, CodeTrace, MapSelection, SystemMapTextEdit, TraceRequest, TraceSummary, TaskRequest, CodeSelection, describeCodeSelection, ActiveFeatures, ActiveSetting, Briefing, DiagramFolderMode, DiagramState, SystemMapRevision, ExplainMode, AgentModelInfo, AgentProviderInfo, AgentState, AskRequest, SignInMethod, ChatEntry, DEFAULT_PROFILE, DetailFeedback, ExtensionCommand, FileChangeStat, HistoryDetail, InitialState, KnowledgeProfile, MemoryNote, NarrationStatus, PendingCheck, SynthesizeResult, TurnSummary, VoiceInfo, Walkthrough, WalkthroughStatus, REASONING_EFFORTS, applyDetailFeedback, applySkipSignal, sceneTopics } from '../common/activeProtocol.js';
 import { ActiveChatInput, KnowledgeProfileInput, SystemMapInput, WalkthroughInput, TraceInput } from './activeInputs.js';
 import { ClipOutcome, ClipPlayer } from './clipPlayer.js';
@@ -119,8 +124,10 @@ export interface BriefingState {
 	readonly since: number;
 	readonly minutes: number;
 	/** Walkthroughs and chapters made in the period, oldest first (history record ids). */
-	readonly items: ReadonlyArray<{ readonly recordId: string; readonly title: string; readonly chapter?: number; readonly task: string }>;
+	readonly items: ReadonlyArray<{ readonly recordId: string; readonly title: string; readonly chapter?: number; readonly task: string; readonly agentId?: string }>;
 	readonly status: 'loading' | 'ready';
+	/** The very short "while you were away" given on opening an agent that wasn't watched for a while. */
+	readonly short?: boolean;
 	readonly briefing?: Briefing;
 }
 
@@ -317,7 +324,101 @@ export interface IActiveService {
 	readonly controlsHeight: number;
 	readonly onDidChangeControlsHeight: Event<void>;
 	setControlsHeight(height: number): void;
+
+	// ------------------------------------------------------------- agents
+
+	/** Every agent: top-level ones in the order they were started, each followed by its nested ones. */
+	readonly agents: readonly AgentInfo[];
+	/** Top-level agents that changed the same files. */
+	readonly overlaps: readonly AgentOverlap[];
+	readonly onDidChangeAgents: Event<void>;
+	/**
+	 * The agent everything shows: chat, the Explorer, Source Control, Search, terminals and open files follow its
+	 * worktree. Messages go to it.
+	 */
+	readonly highlightedAgentId: string;
+	readonly highlightedAgent: AgentInfo | undefined;
+	readonly onDidChangeHighlight: Event<AgentHighlightChange>;
+	/** `explanation`: an explanation (or Show in Code) switched to the agent whose work it is. */
+	highlightAgent(agentId: string, reason?: AgentHighlightReason): void;
+	agentInfo(agentId: string): AgentInfo | undefined;
+	/** The folder an agent works in (the workspace folder for the main agent). */
+	agentRoot(agentId?: string): URI | undefined;
+	/** A path relative to an agent's folder (default: the highlighted agent's) as a URI. */
+	resolveAgentPath(relative: string, agentId?: string): URI | undefined;
+	/** One agent's transcript (`chat` is the highlighted one's). */
+	chatOf(agentId: string): readonly ChatEntry[];
+	agentStateOf(agentId: string): AgentState | undefined;
+	readonly onDidChangeAgentChat: Event<{ readonly agentId: string; readonly entry: ChatEntry | undefined }>;
+	/** Starts another top-level agent in its own worktree and highlights it; its id, or undefined when it couldn't. */
+	newAgent(request?: NewAgentRequest): Promise<string | undefined>;
+	/** Merges `sourceId`'s work into `targetId`, as if it had been its subagent (dragging one box onto another). */
+	mergeAgents(sourceId: string, targetId: string, options?: { commit?: boolean }): Promise<MergeAgentsResult>;
+	/** Stops an agent and removes its worktree. */
+	/** `keep`: commit its work on its branch and keep the branch. */
+	closeAgent(agentId: string, options?: { keep?: boolean }): Promise<void>;
+	renameAgent(agentId: string, name: string): Promise<void>;
+	interruptAgent(agentId: string): Promise<void>;
+	submitTaskTo(agentId: string, text: string | TaskRequest): Promise<void>;
+	decideApprovalFor(agentId: string, approvalId: string, choiceId: string): Promise<void>;
+	/** How an agent's actions get approved (applied to its session from its next action). */
+	setAgentApprovalMode(agentId: string, mode: AgentApprovalMode): Promise<void>;
+	/** Each agent has its own explanation mode (`mode` is the highlighted one's). */
+	modeOf(agentId: string): ExplainMode;
+	setAgentMode(agentId: string, mode: ExplainMode): Promise<void>;
+	/** Walkthroughs made while the developer wasn't looking at that agent (or was in the grid): its box's badge. */
+	readyWalkthroughs(agentId: string): readonly Walkthrough[];
+	/** A walkthrough became ready for an agent's badge: the badge pulses once. */
+	readonly onDidReceiveWalkthrough: Event<{ readonly agentId: string; readonly walkthrough: Walkthrough }>;
+	/** Plays an agent's ready walkthroughs, oldest first (highlighting it). */
+	playReady(agentId: string): Promise<void>;
+	/** Finished helpers stay listed (otherwise they fade out a few seconds after finishing). */
+	readonly showFinishedHelpers: boolean;
+	setShowFinishedHelpers(show: boolean): void;
+	/** The grid of all agents is showing: walkthroughs never pop up over it. */
+	readonly gridOpen: boolean;
+	setGridOpen(open: boolean): void;
+	readonly onDidChangeGridOpen: Event<void>;
+	/** The all-agents Catch Me Up, shown above the grid until dismissed. */
+	readonly allBriefing: BriefingState | undefined;
+	readonly onDidChangeAllBriefing: Event<void>;
+	catchUpAll(): Promise<void>;
+	dismissAllBriefing(): void;
+	/** Another agent can be started here (the folder is a git repository); otherwise why not. */
+	readonly multiAgentBlocker: string | undefined;
 }
+
+export type AgentHighlightReason = 'user' | 'explanation';
+
+export interface AgentHighlightChange {
+	readonly agentId: string;
+	readonly previousId: string;
+	readonly reason: AgentHighlightReason;
+}
+
+/** What the service keeps per agent; the highlighted agent's is what `agent`, `chat` and the rest show. */
+interface AgentBucket {
+	agent: AgentState;
+	readonly chat: ChatEntry[];
+	readonly turnChanges: Map<string, FileChangeStat>;
+	walkthroughStatus: WalkthroughStatus | undefined;
+	diagram: DiagramState;
+	/** Walkthroughs waiting on the agent's badge. */
+	readonly ready: Walkthrough[];
+	/** Held while in Away mode. */
+	readonly held: Walkthrough[];
+	briefing: BriefingState | undefined;
+	/** When the developer last stopped looking at it in full-screen chat. */
+	lastViewedAt: number | undefined;
+	lastMode: ExplainMode;
+}
+
+/** How long an agent must go unwatched before opening it starts with a short "while you were away". */
+const SHORT_BRIEFING_AFTER_MS = 3 * 60_000;
+const AGENT_MODES_KEY = 'active.agents.modes';
+const HIGHLIGHTED_AGENT_KEY = 'active.agents.highlighted';
+const CAUGHT_UP_ALL_KEY = 'active.away.caughtUpAllAt';
+const SHOW_FINISHED_HELPERS_KEY = 'active.agents.showFinishedHelpers';
 
 export class ActiveService extends Disposable implements IActiveService {
 	declare readonly _serviceBrand: undefined;
@@ -353,8 +454,9 @@ export class ActiveService extends Disposable implements IActiveService {
 	readonly onDidChangeMemory = this._onDidChangeMemory.event;
 	private readonly _onDidChangeDiagram = this._register(new Emitter<void>());
 	readonly onDidChangeDiagram = this._onDidChangeDiagram.event;
-	private _diagram: DiagramState = { status: 'empty', history: [], touched: [] };
 	get diagram(): DiagramState { return this._diagram; }
+	private get _diagram(): DiagramState { return this.current.diagram; }
+	private set _diagram(value: DiagramState) { this.current.diagram = value; }
 	private readonly _onDidChangeElaboration = this._register(new Emitter<Elaboration>());
 	readonly onDidChangeElaboration = this._onDidChangeElaboration.event;
 	private readonly _onDidChangeRecentWalkthrough = this._register(new Emitter<void>());
@@ -368,8 +470,33 @@ export class ActiveService extends Disposable implements IActiveService {
 	private readonly _onDidChangeControlsHeight = this._register(new Emitter<void>());
 	readonly onDidChangeControlsHeight = this._onDidChangeControlsHeight.event;
 
-	private _agent: AgentState = { status: 'starting', provider: DEFAULT_PROVIDER, workspaceName: '', backgroundTasks: 0 };
-	private readonly _chat: ChatEntry[] = [];
+	private readonly buckets = new Map<string, AgentBucket>();
+	private _highlighted: string = MAIN_AGENT_ID;
+	private get current(): AgentBucket { return this.bucket(this._highlighted); }
+	private bucket(agentId: string = MAIN_AGENT_ID): AgentBucket {
+		let bucket = this.buckets.get(agentId);
+		if (!bucket) {
+			const main = this.buckets.get(MAIN_AGENT_ID)?.agent;
+			bucket = {
+				agent: { status: 'starting', provider: main?.provider ?? DEFAULT_PROVIDER, workspaceName: main?.workspaceName ?? '', backgroundTasks: 0 },
+				chat: [],
+				turnChanges: new Map(),
+				walkthroughStatus: undefined,
+				diagram: { status: 'empty', history: [], touched: [] },
+				ready: [],
+				held: [],
+				briefing: undefined,
+				lastViewedAt: undefined,
+				lastMode: 'auto',
+			};
+			this.buckets.set(agentId, bucket);
+			bucket.lastMode = this.modeOf(agentId);
+		}
+		return bucket;
+	}
+	private get _agent(): AgentState { return this.current.agent; }
+	private set _agent(value: AgentState) { this.current.agent = value; }
+	private get _chat(): ChatEntry[] { return this.current.chat; }
 	private _profile: KnowledgeProfile = DEFAULT_PROFILE;
 	private _stateLoaded = false;
 	get stateLoaded(): boolean { return this._stateLoaded; }
@@ -377,7 +504,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	private readonly _onDidChangeModels = this._register(new Emitter<void>());
 	readonly onDidChangeModels = this._onDidChangeModels.event;
 	private _history: TurnSummary[] = [];
-	private readonly _turnChanges = new Map<string, FileChangeStat>();
+	private get _turnChanges(): Map<string, FileChangeStat> { return this.current.turnChanges; }
 	private readonly _gitChanges = new Map<string, FileChangeStat>();
 	private _gitAvailable = true;
 	private readonly _onDidChangeExplorerCounts = this._register(new Emitter<void>());
@@ -385,7 +512,8 @@ export class ActiveService extends Disposable implements IActiveService {
 	private readonly gitRefresh = this._register(new RunOnceScheduler(() => void this.refreshGitChanges(), 600));
 	private readonly gitPoll = this._register(new MutableDisposable());
 	private _narration: NarrationStatus = { available: false, detail: localize('narrationStarting', "Starting narration") };
-	private _walkthroughStatus: WalkthroughStatus | undefined;
+	private get _walkthroughStatus(): WalkthroughStatus | undefined { return this.current.walkthroughStatus; }
+	private set _walkthroughStatus(value: WalkthroughStatus | undefined) { this.current.walkthroughStatus = value; }
 	private readonly playerRef = this._register(new MutableDisposable<WalkthroughPlayer>());
 	private readonly inputs = new Map<string, WalkthroughInput>();
 	/** Saved positions so leaving and returning resumes where the user was. */
@@ -412,6 +540,8 @@ export class ActiveService extends Disposable implements IActiveService {
 		@IStorageService private readonly storageService: IStorageService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IContextKeyService contextKeyService: IContextKeyService,
+		@ILifecycleService lifecycleService: ILifecycleService,
+		@IDialogService private readonly dialogService: IDialogService,
 	) {
 		super();
 		this.lastMode = this.mode;
@@ -441,6 +571,13 @@ export class ActiveService extends Disposable implements IActiveService {
 			}
 		}));
 		this.availableKey = ActiveWalkthroughAvailable.bindTo(contextKeyService);
+		// Reloading or closing the window ends every agent's running turn: ask first.
+		this._register(lifecycleService.onBeforeShutdown(event => {
+			const working = this.workingAgents();
+			if (working.length) {
+				event.veto(this.confirmShutdown(working, event.reason), 'active.agentsWorking');
+			}
+		}));
 		this._register(this.trustService.onDidChangeTrust(trusted => {
 			if (trusted) {
 				this.initialized = undefined;
@@ -594,8 +731,39 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	private applyInitialState(state: InitialState): void {
-		this._agent = state.agent;
-		this._chat.splice(0, this._chat.length, ...state.chat);
+		if (state.agents) {
+			this._agents = [...state.agents];
+			this._overlaps = [...(state.overlaps ?? [])];
+			this._multiAgentBlocker = state.multiAgentBlocker;
+		}
+		if (state.agentStates) {
+			this.applyAgentStates(state.agentStates);
+		}
+		// Back to the agent highlighted before the reload, once its state is in.
+		const remembered = this.storageService.get(HIGHLIGHTED_AGENT_KEY, StorageScope.WORKSPACE);
+		const bucket = this.bucket(MAIN_AGENT_ID);
+		bucket.agent = state.agent;
+		bucket.chat.splice(0, bucket.chat.length, ...state.chat);
+		if (remembered && remembered !== MAIN_AGENT_ID && this.agentInfo(remembered)) {
+			this.setTurnChangesOf(MAIN_AGENT_ID, state.turnChanges);
+			if (state.diagram) {
+				bucket.diagram = state.diagram;
+			}
+			this._highlighted = remembered;
+			void this.commandService.executeCommand(ExtensionCommand.AgentFocus, remembered).then(undefined, () => undefined);
+			this._profile = state.profile;
+			this._stateLoaded = true;
+			this._history = [...state.history];
+			this._narration = state.narration;
+			this.watchGitChanges();
+			this.fireAllForHighlight();
+			this._onDidChangeProfile.fire();
+			this._onDidChangeHistory.fire();
+			this._onDidChangeNarration.fire();
+			this._onDidChangeRecentWalkthrough.fire();
+			this._onDidChangeHighlight.fire({ agentId: remembered, previousId: MAIN_AGENT_ID, reason: 'user' });
+			return;
+		}
 		this._profile = state.profile;
 		this._stateLoaded = true;
 		this._history = [...state.history];
@@ -621,6 +789,21 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	handleEvent(event: ActiveEvent): void {
+		if (event.type === 'agents') {
+			this.setAgents(event.agents, event.overlaps);
+			return;
+		}
+		const agentId = event.agentId ?? MAIN_AGENT_ID;
+		if (event.type === 'chat' && event.entry.approval) {
+			this.alertApproval(agentId, event.entry);
+		}
+		if (event.type === 'chat' || event.type === 'chatReset') {
+			// Fired after the bucket is updated, below.
+			queueMicrotask(() => this._onDidChangeAgentChat.fire({ agentId, entry: event.type === 'chat' ? event.entry : undefined }));
+		}
+		if (agentId !== this._highlighted && this.handleBackgroundEvent(agentId, event)) {
+			return;
+		}
 		switch (event.type) {
 			case 'agent':
 				this._agent = event.agent;
@@ -667,6 +850,11 @@ export class ActiveService extends Disposable implements IActiveService {
 				this._onDidChangeWalkthroughStatus.fire();
 				break;
 			case 'walkthroughReady':
+				if (this._gridOpen) {
+					// The grid never pops anything up: the agent's box gets a badge.
+					this.holdReady(agentId, event.walkthrough);
+					break;
+				}
 				// Start synthesizing the whole narration now, before (or instead of) handoff.
 				if (!this.voiceOff) {
 					this.narrationCache.prefetchFrom(event.walkthrough, { scene: 0, segment: 0 });
@@ -717,6 +905,376 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 	}
 
+	/** Events about an agent other than the highlighted one only update what's kept for it. True when handled. */
+	private handleBackgroundEvent(agentId: string, event: ActiveEvent): boolean {
+		const bucket = this.bucket(agentId);
+		switch (event.type) {
+			case 'agent':
+				bucket.agent = event.agent;
+				this._onDidChangeAgents.fire();
+				return true;
+			case 'chat': {
+				const index = bucket.chat.findIndex(entry => entry.id === event.entry.id);
+				if (index >= 0) {
+					bucket.chat[index] = event.entry;
+				} else {
+					bucket.chat.push(event.entry);
+				}
+				return true;
+			}
+			case 'chatReset':
+				bucket.chat.splice(0, bucket.chat.length, ...event.chat);
+				bucket.walkthroughStatus = undefined;
+				return true;
+			case 'turnChanges':
+				bucket.turnChanges.clear();
+				for (const file of event.files) {
+					bucket.turnChanges.set(file.path, file);
+				}
+				return true;
+			case 'walkthroughStatus':
+				bucket.walkthroughStatus = event.status;
+				this._onDidChangeAgents.fire();
+				return true;
+			case 'walkthroughReady':
+				// Only the agent in full-screen chat pops walkthroughs up; the others badge their row and box.
+				if (this.modeOf(agentId) === 'away') {
+					bucket.held.push(event.walkthrough);
+				}
+				this.holdReady(agentId, event.walkthrough);
+				return true;
+			case 'diagram':
+				bucket.diagram = event.state;
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private holdReady(agentId: string, walkthrough: Walkthrough): void {
+		const bucket = this.bucket(agentId);
+		if (!bucket.ready.some(candidate => candidate.id === walkthrough.id)) {
+			bucket.ready.push(walkthrough);
+		}
+		this._onDidReceiveWalkthrough.fire({ agentId, walkthrough });
+		this._onDidChangeAgents.fire();
+	}
+
+	// ------------------------------------------------------------- agents
+
+	/** Agents (and helpers) in the middle of a task. */
+	private workingAgents(): AgentInfo[] {
+		const running = this._agents.filter(agent => !agent.finished && (agent.status === 'running' || agent.waitingForApproval));
+		if (!running.length && (this.bucket(MAIN_AGENT_ID).agent.status === 'running')) {
+			return [{ id: MAIN_AGENT_ID, name: this._agent.provider.name } as AgentInfo];
+		}
+		return running;
+	}
+
+	/** True vetoes the shutdown (Cancel); discarding stops the running turns first. */
+	private async confirmShutdown(working: readonly AgentInfo[], reason: ShutdownReason): Promise<boolean> {
+		const names = working.map(agent => agent.name);
+		const what = reason === ShutdownReason.RELOAD ? localize('reloading', "Reloading") : localize('closing', "Closing");
+		const { result } = await this.dialogService.prompt<boolean>({
+			type: Severity.Warning,
+			message: names.length === 1 ? localize('agentWorking', "{0} is still working.", names[0]) : localize('agentsWorking', "{0} agents are still working: {1}.", names.length, names.join(', ')),
+			detail: names.length === 1
+				? localize('agentWorkingDetail', "{0} stops it and its unfinished work is lost. Changes already written to files stay.", what)
+				: localize('agentsWorkingDetail', "{0} stops them and their unfinished work is lost. Changes already written to files stay.", what),
+			buttons: [{ label: localize('discardWork', "&&Discard Work"), run: () => false }],
+			cancelButton: { label: localize('cancelShutdown', "Cancel"), run: () => true },
+		});
+		if (!result) {
+			await Promise.all(working.map(agent => this.interruptAgent(agent.id).catch(() => undefined)));
+		}
+		return result;
+	}
+
+	private _agents: AgentInfo[] = [];
+	private _overlaps: AgentOverlap[] = [];
+	private readonly _onDidChangeAgents = this._register(new Emitter<void>());
+	readonly onDidChangeAgents = this._onDidChangeAgents.event;
+	private readonly _onDidChangeHighlight = this._register(new Emitter<AgentHighlightChange>());
+	readonly onDidChangeHighlight = this._onDidChangeHighlight.event;
+	private readonly _onDidChangeAgentChat = this._register(new Emitter<{ readonly agentId: string; readonly entry: ChatEntry | undefined }>());
+	readonly onDidChangeAgentChat = this._onDidChangeAgentChat.event;
+	private readonly _onDidReceiveWalkthrough = this._register(new Emitter<{ readonly agentId: string; readonly walkthrough: Walkthrough }>());
+	readonly onDidReceiveWalkthrough = this._onDidReceiveWalkthrough.event;
+	private _gridOpen = false;
+	private readonly _onDidChangeGridOpen = this._register(new Emitter<void>());
+	readonly onDidChangeGridOpen = this._onDidChangeGridOpen.event;
+	private _allBriefing: BriefingState | undefined;
+	private readonly _onDidChangeAllBriefing = this._register(new Emitter<void>());
+	readonly onDidChangeAllBriefing = this._onDidChangeAllBriefing.event;
+	private _multiAgentBlocker: string | undefined;
+
+	get agents(): readonly AgentInfo[] { return this._agents; }
+	get overlaps(): readonly AgentOverlap[] { return this._overlaps; }
+	get highlightedAgentId(): string { return this._highlighted; }
+	get highlightedAgent(): AgentInfo | undefined { return this.agentInfo(this._highlighted); }
+	get gridOpen(): boolean { return this._gridOpen; }
+	get showFinishedHelpers(): boolean { return this.storageService.getBoolean(SHOW_FINISHED_HELPERS_KEY, StorageScope.WORKSPACE, false); }
+	setShowFinishedHelpers(show: boolean): void {
+		this.storageService.store(SHOW_FINISHED_HELPERS_KEY, show, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		this._onDidChangeAgents.fire();
+	}
+	get allBriefing(): BriefingState | undefined { return this._allBriefing; }
+	get multiAgentBlocker(): string | undefined { return this._multiAgentBlocker; }
+
+	agentInfo(agentId: string): AgentInfo | undefined {
+		return this._agents.find(agent => agent.id === agentId);
+	}
+
+	agentRoot(agentId: string = this._highlighted): URI | undefined {
+		const info = this.agentInfo(agentId);
+		if (info && !info.inMainFolder) {
+			return URI.file(info.root);
+		}
+		return this.workspaceService.getWorkspace().folders[0]?.uri;
+	}
+
+	resolveAgentPath(relative: string, agentId?: string): URI | undefined {
+		if (relative.startsWith('/')) {
+			return URI.file(relative);
+		}
+		const root = this.agentRoot(agentId);
+		return root && URI.joinPath(root, relative);
+	}
+
+	chatOf(agentId: string): readonly ChatEntry[] {
+		return this.bucket(agentId).chat;
+	}
+
+	agentStateOf(agentId: string): AgentState | undefined {
+		return this.buckets.get(agentId)?.agent;
+	}
+
+	private setAgents(agents: readonly AgentInfo[], overlaps: readonly AgentOverlap[]): void {
+		this._agents = [...agents];
+		this._overlaps = [...overlaps];
+		for (const agent of agents) {
+			this.bucket(agent.id);
+		}
+		this._onDidChangeAgents.fire();
+		if (!this.agentInfo(this._highlighted) && agents.length) {
+			this.highlightAgent(MAIN_AGENT_ID);
+		}
+	}
+
+	private applyAgentStates(states: readonly AgentInitialState[]): void {
+		for (const state of states) {
+			const bucket = this.bucket(state.agentId);
+			bucket.agent = state.agent;
+			bucket.chat.splice(0, bucket.chat.length, ...state.chat);
+			bucket.turnChanges.clear();
+			for (const file of state.turnChanges) {
+				bucket.turnChanges.set(file.path, file);
+			}
+			if (state.diagram) {
+				bucket.diagram = state.diagram;
+			}
+			if (state.pendingWalkthrough && !bucket.ready.some(candidate => candidate.id === state.pendingWalkthrough!.id)) {
+				bucket.ready.push(state.pendingWalkthrough);
+			}
+		}
+	}
+
+	highlightAgent(agentId: string, reason: AgentHighlightReason = 'user'): void {
+		if (agentId === this._highlighted || (!this.agentInfo(agentId) && agentId !== MAIN_AGENT_ID)) {
+			return;
+		}
+		const previousId = this._highlighted;
+		const previous = this.current;
+		if (!this._gridOpen) {
+			previous.lastViewedAt = Date.now();
+		}
+		this._highlighted = agentId;
+		this.storageService.store(HIGHLIGHTED_AGENT_KEY, agentId, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		void this.commandService.executeCommand(ExtensionCommand.AgentFocus, agentId).then(undefined, () => undefined);
+		// Chat and its questions belong to the agent they were about.
+		this._chatContext = undefined;
+		this.fireAllForHighlight();
+		this._onDidChangeHighlight.fire({ agentId, previousId, reason });
+		if (!this._gridOpen && reason === 'user') {
+			this.maybeShortBriefing(agentId);
+		}
+	}
+
+	private fireAllForHighlight(): void {
+		this._onDidChangeAgent.fire();
+		this._onDidChangeChat.fire(undefined);
+		this._onDidChangeTurnChanges.fire();
+		this._onDidChangeExplorerCounts.fire();
+		this._onDidChangeWalkthroughStatus.fire();
+		this._onDidChangeDiagram.fire();
+		this._onDidChangeMode.fire();
+		this._onDidChangeBriefing.fire();
+		this._onDidChangePlayer.fire();
+		this._onDidChangeAgents.fire();
+		if (this.explorerCountsMode === 'git') {
+			this.gitRefresh.schedule();
+		}
+	}
+
+	/** Opening an agent that went unwatched for a while (and did something meanwhile) starts with a very short catch-up. */
+	private maybeShortBriefing(agentId: string): void {
+		const bucket = this.bucket(agentId);
+		const since = bucket.lastViewedAt;
+		if (since === undefined || Date.now() - since < SHORT_BRIEFING_AFTER_MS || bucket.briefing || this.modeOf(agentId) === 'off') {
+			return;
+		}
+		if (this._history.some(turn => (turn.agentId ?? MAIN_AGENT_ID) === agentId && (turn.endedAt ?? 0) >= since)) {
+			void this.startBriefing(since, agentId, true);
+		}
+	}
+
+	setGridOpen(open: boolean): void {
+		if (open === this._gridOpen) {
+			return;
+		}
+		if (open) {
+			this.current.lastViewedAt = Date.now();
+		}
+		this._gridOpen = open;
+		this._onDidChangeGridOpen.fire();
+		if (!open) {
+			this.maybeShortBriefing(this._highlighted);
+		}
+	}
+
+	async newAgent(request: NewAgentRequest = {}): Promise<string | undefined> {
+		await this.initialize();
+		const result: { id?: string; error?: string } | undefined = await this.commandService.executeCommand<{ id?: string; error?: string }>(ExtensionCommand.AgentNew, request).catch(error => ({ error: String(error) }));
+		if (!result?.id) {
+			this.notificationService.warn(localize('newAgentFailed', "Couldn't start another agent: {0}", result?.error ?? localize('unknownError', "unknown error")));
+			return undefined;
+		}
+		const states = await this.commandService.executeCommand<AgentInitialState[]>(ExtensionCommand.AgentStates).catch(() => undefined);
+		if (states) {
+			this.applyAgentStates(states.filter(state => state.agentId === result.id));
+		}
+		this.highlightAgent(result.id);
+		return result.id;
+	}
+
+	async mergeAgents(sourceId: string, targetId: string, options: { commit?: boolean } = {}): Promise<MergeAgentsResult> {
+		const result = await this.commandService.executeCommand<MergeAgentsResult>(ExtensionCommand.AgentMerge, { sourceId, targetId, commit: options.commit }).catch(error => ({ ok: false, message: String(error) }));
+		const outcome = result ?? { ok: false, message: localize('mergeNoAnswer', "No answer from Active's agent services.") };
+		if (!outcome.ok) {
+			this.notificationService.warn(outcome.message);
+		}
+		return outcome;
+	}
+
+	async closeAgent(agentId: string, options: { keep?: boolean } = {}): Promise<void> {
+		if (agentId === MAIN_AGENT_ID) {
+			return;
+		}
+		if (this._highlighted === agentId) {
+			this.highlightAgent(this.agentInfo(agentId)?.parentId ?? MAIN_AGENT_ID);
+		}
+		const result = await this.commandService.executeCommand<{ ok: boolean; message: string }>(ExtensionCommand.AgentClose, agentId, options);
+		if (result && !result.ok) {
+			this.notificationService.warn(result.message);
+		} else if (result && options.keep) {
+			this.notificationService.info(result.message);
+		}
+	}
+
+	async renameAgent(agentId: string, name: string): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.AgentRename, { agentId, name });
+	}
+
+	async interruptAgent(agentId: string): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.AgentInterrupt, agentId);
+	}
+
+	async submitTaskTo(agentId: string, text: string | TaskRequest): Promise<void> {
+		if (agentId !== this._highlighted) {
+			this.highlightAgent(agentId);
+		}
+		await this.submitTask(text);
+	}
+
+	async setAgentApprovalMode(agentId: string, mode: AgentApprovalMode): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.AgentSetApprovalMode, { agentId, mode });
+	}
+
+	/** Alerts for approvals waiting on the developer, by approval id (closed once it's answered anywhere). */
+	private readonly approvalAlerts = new Map<string, INotificationHandle>();
+
+	/**
+	 * An agent needs approval and the developer isn't looking at its chat (another agent, the grid, or another tab):
+	 * a notification they can answer from, so the agent isn't left waiting.
+	 */
+	private alertApproval(agentId: string, entry: ChatEntry): void {
+		const approval = entry.approval;
+		if (!approval) {
+			return;
+		}
+		if (approval.resolved) {
+			this.approvalAlerts.get(approval.approvalId)?.close();
+			this.approvalAlerts.delete(approval.approvalId);
+			return;
+		}
+		const watching = agentId === this._highlighted && !this._gridOpen && this.editorService.activeEditor instanceof ActiveChatInput;
+		if (watching || this.approvalAlerts.has(approval.approvalId)) {
+			return;
+		}
+		const name = this.agentInfo(agentId)?.name ?? this._agent.provider.shortName;
+		const handle = this.notificationService.prompt(Severity.Warning, localize('approvalAlert', "{0} needs approval: {1}", name, approval.detail ? `${approval.title} (${approval.detail.slice(0, 120)})` : approval.title), [
+			...approval.choices.map(choice => ({ label: choice.label, run: () => this.decideApprovalFor(agentId, approval.approvalId, choice.choiceId) })),
+			{ label: localize('approvalOpen', "Open {0}", name), run: () => { this.highlightAgent(agentId); void this.openChat(false); } },
+		], { sticky: true });
+		this.approvalAlerts.set(approval.approvalId, handle);
+		this._register(handle.onDidClose(() => this.approvalAlerts.delete(approval.approvalId)));
+	}
+
+	async decideApprovalFor(agentId: string, approvalId: string, choiceId: string): Promise<void> {
+		await this.commandService.executeCommand(ExtensionCommand.DecideApproval, { approvalId, choiceId, agentId });
+	}
+
+	readyWalkthroughs(agentId: string): readonly Walkthrough[] {
+		return this.buckets.get(agentId)?.ready ?? [];
+	}
+
+	async playReady(agentId: string): Promise<void> {
+		const bucket = this.bucket(agentId);
+		const [first, ...rest] = bucket.ready.splice(0);
+		this._onDidChangeAgents.fire();
+		if (!first) {
+			return;
+		}
+		this.queuedWalkthroughs.splice(0, this.queuedWalkthroughs.length, ...rest);
+		await this.openWalkthrough(first, { scene: 0, segment: 0 });
+	}
+
+	async catchUpAll(since?: number): Promise<void> {
+		const from = since ?? this.storageService.getNumber(CAUGHT_UP_ALL_KEY, StorageScope.WORKSPACE) ?? Date.now() - 12 * 60 * 60_000;
+		const state: BriefingState = { since: from, minutes: Math.max(1, Math.round((Date.now() - from) / 60_000)), items: this.briefingItems(from), status: 'loading' };
+		this._allBriefing = state;
+		this._onDidChangeAllBriefing.fire();
+		const briefing = await this.commandService.executeCommand<Briefing>(ExtensionCommand.Brief, { since: from, allAgents: true }).catch(() => undefined);
+		if (this._allBriefing === state) {
+			this._allBriefing = { ...state, status: 'ready', briefing: briefing ?? { headline: localize('briefingUnavailable', "Couldn't write the briefing"), done: [], attention: [], problems: [], next: '', fallback: true } };
+			this._onDidChangeAllBriefing.fire();
+		}
+	}
+
+	dismissAllBriefing(): void {
+		this.storageService.store(CAUGHT_UP_ALL_KEY, Date.now(), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		this._allBriefing = undefined;
+		this._onDidChangeAllBriefing.fire();
+	}
+
+	private setTurnChangesOf(agentId: string, files: readonly FileChangeStat[]): void {
+		const bucket = this.bucket(agentId);
+		bucket.turnChanges.clear();
+		for (const file of files) {
+			bucket.turnChanges.set(file.path, file);
+		}
+	}
+
 	private setTurnChanges(files: readonly FileChangeStat[]): void {
 		this._turnChanges.clear();
 		for (const file of files) {
@@ -736,7 +1294,7 @@ export class ActiveService extends Disposable implements IActiveService {
 	 * offered instead of taking over.
 	 */
 	private async onWalkthroughReady(walkthrough: Walkthrough): Promise<void> {
-		if (this.mode !== 'auto') {
+		if (this.modeOf(walkthrough.agentId ?? MAIN_AGENT_ID) !== 'auto') {
 			// Away: keep it for the briefing instead of popping it up.
 			this.heldWalkthroughs.push(walkthrough);
 			this.offer(walkthrough);
@@ -780,22 +1338,49 @@ export class ActiveService extends Disposable implements IActiveService {
 	// ------------------------------------------------------------- away mode
 
 	/** Held walkthroughs while in Away mode (the briefing lists everything from history anyway). */
-	private readonly heldWalkthroughs: Walkthrough[] = [];
-	private _briefing: BriefingState | undefined;
+	private get heldWalkthroughs(): Walkthrough[] { return this.current.held; }
+	private get _briefing(): BriefingState | undefined { return this.current.briefing; }
+	private set _briefing(value: BriefingState | undefined) { this.current.briefing = value; }
 	private readonly _onDidChangeBriefing = this._register(new Emitter<void>());
 	readonly onDidChangeBriefing = this._onDidChangeBriefing.event;
 	get briefing(): BriefingState | undefined { return this._briefing; }
 	private readonly _onDidChangeMode = this._register(new Emitter<void>());
 	readonly onDidChangeMode = this._onDidChangeMode.event;
-	private lastMode: ExplainMode = 'auto';
+	private get lastMode(): ExplainMode { return this.current.lastMode; }
+	private set lastMode(value: ExplainMode) { this.current.lastMode = value; }
 
 	get mode(): ExplainMode {
-		const value = this.configurationService.getValue<string>(ActiveSetting.ExplainMode);
-		return value === 'away' || value === 'off' ? value : 'auto';
+		return this.modeOf(this._highlighted);
 	}
 
 	async setMode(mode: ExplainMode): Promise<void> {
-		await this.configurationService.updateValue(ActiveSetting.ExplainMode, mode, ConfigurationTarget.USER);
+		await this.setAgentMode(this._highlighted, mode);
+	}
+
+	modeOf(agentId: string): ExplainMode {
+		const value = agentId === MAIN_AGENT_ID
+			? this.configurationService.getValue<string>(ActiveSetting.ExplainMode)
+			: this.agentModes()[agentId] ?? this.configurationService.getValue<string>(ActiveSetting.ExplainMode);
+		return value === 'away' || value === 'off' ? value : 'auto';
+	}
+
+	private agentModes(): Record<string, ExplainMode> {
+		try {
+			return JSON.parse(this.storageService.get(AGENT_MODES_KEY, StorageScope.WORKSPACE, '{}')) as Record<string, ExplainMode>;
+		} catch {
+			return {};
+		}
+	}
+
+	async setAgentMode(agentId: string, mode: ExplainMode): Promise<void> {
+		if (agentId === MAIN_AGENT_ID) {
+			// The main agent's mode is the setting (the status bar and settings show it); the change listener does the rest.
+			await this.configurationService.updateValue(ActiveSetting.ExplainMode, mode, ConfigurationTarget.USER);
+			return;
+		}
+		this.storageService.store(AGENT_MODES_KEY, JSON.stringify({ ...this.agentModes(), [agentId]: mode }), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		await this.commandService.executeCommand(ExtensionCommand.AgentSetMode, { agentId, mode }).then(undefined, () => undefined);
+		this.onAgentModeChanged(agentId);
 	}
 
 	get features(): ActiveFeatures {
@@ -882,23 +1467,40 @@ export class ActiveService extends Disposable implements IActiveService {
 
 	/** Entering Away starts the period a briefing covers; leaving it shows the briefing if anything happened. */
 	private onModeChanged(): void {
-		const mode = this.mode;
-		const previous = this.lastMode;
+		// The setting is the main agent's mode, and the default of agents that have none of their own.
+		for (const agentId of this.buckets.keys()) {
+			this.onAgentModeChanged(agentId);
+		}
+	}
+
+	private onAgentModeChanged(agentId: string): void {
+		const bucket = this.bucket(agentId);
+		const mode = this.modeOf(agentId);
+		const previous = bucket.lastMode;
 		if (mode === previous) {
 			return;
 		}
-		this.lastMode = mode;
+		bucket.lastMode = mode;
+		const key = agentId === MAIN_AGENT_ID ? AWAY_SINCE_KEY : `${AWAY_SINCE_KEY}.${agentId}`;
 		if (mode === 'away') {
-			this.storageService.store(AWAY_SINCE_KEY, Date.now(), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+			this.storageService.store(key, Date.now(), StorageScope.WORKSPACE, StorageTarget.MACHINE);
 		} else if (previous === 'away') {
-			const since = this.storageService.getNumber(AWAY_SINCE_KEY, StorageScope.WORKSPACE);
-			this.storageService.remove(AWAY_SINCE_KEY, StorageScope.WORKSPACE);
-			const held = this.heldWalkthroughs.splice(0);
-			if (since !== undefined && (held.length || this._history.some(turn => (turn.endedAt ?? 0) >= since))) {
-				void this.startBriefing(since);
+			const since = this.storageService.getNumber(key, StorageScope.WORKSPACE);
+			this.storageService.remove(key, StorageScope.WORKSPACE);
+			const held = bucket.held.splice(0);
+			if (since !== undefined && (held.length || this._history.some(turn => (turn.agentId ?? MAIN_AGENT_ID) === agentId && (turn.endedAt ?? 0) >= since))) {
+				// From the grid, everyone's catch-up; otherwise this agent's own, in its chat.
+				if (this._gridOpen) {
+					void this.catchUpAll(since);
+				} else {
+					void this.startBriefing(since, agentId);
+				}
 			}
 		}
-		this._onDidChangeMode.fire();
+		if (agentId === this._highlighted) {
+			this._onDidChangeMode.fire();
+		}
+		this._onDidChangeAgents.fire();
 	}
 
 	async catchUp(): Promise<void> {
@@ -906,19 +1508,30 @@ export class ActiveService extends Disposable implements IActiveService {
 		await this.startBriefing(since);
 	}
 
-	private async startBriefing(since: number): Promise<void> {
+	private briefingItems(since: number, agentId?: string): BriefingState['items'] {
+		return this._history
+			// Notes are already in the briefing text; Play All is for walkthroughs.
+			.filter(turn => turn.walkthroughId && !turn.walkthroughIsNote && (turn.endedAt ?? turn.startedAt) >= since && (!agentId || (turn.agentId ?? MAIN_AGENT_ID) === agentId))
+			.reverse()
+			.map(turn => ({ recordId: turn.turnId, title: turn.walkthroughTitle ?? turn.task, chapter: /^Chapter (\d+)/.exec(turn.explanationNote)?.[1] ? Number(/^Chapter (\d+)/.exec(turn.explanationNote)![1]) : undefined, task: turn.task, agentId: turn.agentId ?? MAIN_AGENT_ID }));
+	}
+
+	private async startBriefing(since: number, agentId: string = this._highlighted, short = false): Promise<void> {
+		const bucket = this.bucket(agentId);
 		const items = this._history
 			// Notes are already in the briefing text; Play All is for walkthroughs.
-			.filter(turn => turn.walkthroughId && !turn.walkthroughIsNote && (turn.endedAt ?? turn.startedAt) >= since)
+			.filter(turn => turn.walkthroughId && !turn.walkthroughIsNote && (turn.endedAt ?? turn.startedAt) >= since && (turn.agentId ?? MAIN_AGENT_ID) === agentId)
 			.reverse()
 			.map(turn => ({ recordId: turn.turnId, title: turn.walkthroughTitle ?? turn.task, chapter: /^Chapter (\d+)/.exec(turn.explanationNote)?.[1] ? Number(/^Chapter (\d+)/.exec(turn.explanationNote)![1]) : undefined, task: turn.task }));
-		const state: BriefingState = { since, minutes: Math.max(1, Math.round((Date.now() - since) / 60_000)), items, status: 'loading' };
-		this._briefing = state;
+		const state: BriefingState = { since, minutes: Math.max(1, Math.round((Date.now() - since) / 60_000)), items, status: 'loading', short };
+		bucket.briefing = state;
 		this._onDidChangeBriefing.fire();
-		await this.openChat(false);
-		const briefing = await this.commandService.executeCommand<Briefing>(ExtensionCommand.Brief, { since }).catch(() => undefined);
-		if (this._briefing === state) {
-			this._briefing = { ...state, status: 'ready', briefing: briefing ?? { headline: localize('briefingUnavailable', "Couldn't write the briefing"), done: [], attention: [], problems: [], next: '', fallback: true } };
+		if (!short && agentId === this._highlighted && !this._gridOpen) {
+			await this.openChat(false);
+		}
+		const briefing = await this.commandService.executeCommand<Briefing>(ExtensionCommand.Brief, { since, agentId, short }).catch(() => undefined);
+		if (bucket.briefing === state) {
+			bucket.briefing = { ...state, status: 'ready', briefing: briefing ?? { headline: localize('briefingUnavailable', "Couldn't write the briefing"), done: [], attention: [], problems: [], next: '', fallback: true } };
 			this._onDidChangeBriefing.fire();
 		}
 	}
@@ -1005,15 +1618,15 @@ export class ActiveService extends Disposable implements IActiveService {
 			this.dismissedPlayer = this.player?.walkthrough.id;
 			this._onDidChangePlayer.fire();
 		}
-		await this.commandService.executeCommand(ExtensionCommand.SubmitTask, text);
+		await this.commandService.executeCommand(ExtensionCommand.SubmitTask, text, this._highlighted);
 	}
 
 	async ask(request: AskRequest): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.Ask, request);
+		await this.commandService.executeCommand(ExtensionCommand.Ask, request, this._highlighted);
 	}
 
 	async decideApproval(approvalId: string, choiceId: string): Promise<void> {
-		await this.commandService.executeCommand(ExtensionCommand.DecideApproval, { approvalId, choiceId });
+		await this.commandService.executeCommand(ExtensionCommand.DecideApproval, { approvalId, choiceId, agentId: this._highlighted });
 	}
 
 	async synthesize(text: string, voice = this.narrationVoice): Promise<SynthesizeResult> {
@@ -1149,6 +1762,17 @@ export class ActiveService extends Disposable implements IActiveService {
 	}
 
 	async openWalkthrough(walkthrough: Walkthrough, start?: PlaybackPosition, playDelayMs = 0): Promise<void> {
+		// One explanation belongs to one agent: watching it switches everything to that agent's worktree.
+		const owner = walkthrough.agentId ?? MAIN_AGENT_ID;
+		if (owner !== this._highlighted && (owner === MAIN_AGENT_ID || this.agentInfo(owner))) {
+			this.highlightAgent(owner, 'explanation');
+		}
+		const ready = this.buckets.get(owner)?.ready;
+		const readyIndex = ready?.findIndex(candidate => candidate.id === walkthrough.id) ?? -1;
+		if (ready && readyIndex >= 0) {
+			ready.splice(readyIndex, 1);
+			this._onDidChangeAgents.fire();
+		}
 		const queued = this.queuedWalkthroughs.findIndex(candidate => candidate.id === walkthrough.id);
 		if (queued >= 0) {
 			this.queuedWalkthroughs.splice(queued, 1);
@@ -1204,8 +1828,8 @@ export class ActiveService extends Disposable implements IActiveService {
 	/** Pauses the walkthrough and opens the editable file at the focused location. */
 	async openCurrentFile(): Promise<void> {
 		const player = this.player;
-		const folder = this.workspaceService.getWorkspace().folders[0];
-		if (!player || !folder) {
+		const root = this.agentRoot(player?.walkthrough.agentId ?? MAIN_AGENT_ID);
+		if (!player || !root) {
 			return;
 		}
 		player.pause();
@@ -1213,7 +1837,12 @@ export class ActiveService extends Disposable implements IActiveService {
 		const scene = player.walkthrough.scenes[player.position.scene];
 		const visual = player.visual;
 		const range = scene.focus[visual.focus ?? 0] ?? { startLine: scene.anchorLine || 1, endLine: scene.anchorLine || 1 };
-		const resource = folder.toResource(scene.file);
+		// Show in Code opens the file in the folder of the agent whose work this is (and switches to that agent).
+		const owner = player.walkthrough.agentId ?? MAIN_AGENT_ID;
+		if (owner !== this._highlighted && (owner === MAIN_AGENT_ID || this.agentInfo(owner))) {
+			this.highlightAgent(owner, 'explanation');
+		}
+		const resource = URI.joinPath(root, scene.file);
 		await this.editorService.openEditor({ resource, options: { pinned: true, revealIfOpened: true, selection: { startLineNumber: range.startLine, startColumn: 1, endLineNumber: range.startLine, endColumn: 1 } } });
 		const captured = player.walkthrough.files[scene.file]?.[scene.version];
 		try {
@@ -1561,4 +2190,18 @@ export class ActiveService extends Disposable implements IActiveService {
 			await this.openWalkthrough(walkthrough, walkthrough.id === currentId ? undefined : { scene: 0, segment: 0 });
 		}
 	}
+}
+
+/**
+ * Who did the work an explanation or history entry is about, when there's more than one top-level agent (with one,
+ * nothing is labelled). Falls back to the saved name when the agent is gone.
+ */
+export function agentLabel(activeService: IActiveService, agentId: string | undefined, savedName: string | undefined): { name: string; colorIndex: number } | undefined {
+	const topLevel = activeService.agents.filter(agent => agent.kind === 'agent');
+	if (topLevel.length < 2 && !activeService.history.some(turn => (turn.agentId ?? MAIN_AGENT_ID) !== MAIN_AGENT_ID)) {
+		return undefined;
+	}
+	const info = activeService.agentInfo(agentId ?? MAIN_AGENT_ID);
+	const name = info?.name ?? savedName;
+	return name ? { name, colorIndex: info?.colorIndex ?? 0 } : undefined;
 }

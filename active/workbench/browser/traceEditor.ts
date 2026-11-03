@@ -17,7 +17,6 @@ import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
-import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
@@ -81,7 +80,6 @@ export class TraceEditor extends EditorPane {
 		@IActiveService private readonly activeService: IActiveService,
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IEditorService private readonly editorService: IEditorService,
-		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 	) {
 		super(TraceEditor.ID, group, telemetryService, themeService, storage);
 	}
@@ -606,12 +604,13 @@ export class TraceEditor extends EditorPane {
 	}
 
 	private async openStep(step: TraceStep): Promise<void> {
-		const folder = this.workspaceService.getWorkspace().folders[0];
-		if (!folder) {
+		// Traces are made in the highlighted agent's folder.
+		const resource = this.activeService.resolveAgentPath(step.file);
+		if (!resource) {
 			return;
 		}
 		await this.editorService.openEditor({
-			resource: folder.toResource(step.file),
+			resource,
 			options: { pinned: true, selection: { startLineNumber: step.startLine, startColumn: 1, endLineNumber: step.endLine, endColumn: 1 } },
 		});
 	}

@@ -13,8 +13,11 @@ import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ScrollbarVisibility } from '../../../../base/common/scrollable.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
-import { localize } from '../../../../nls.js';
+import { localize, localize2 } from '../../../../nls.js';
 import { Separator, SubmenuAction, toAction } from '../../../../base/common/actions.js';
+import { IAccessibilityService } from '../../../../platform/accessibility/common/accessibility.js';
+import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -27,7 +30,8 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { ActiveSetting, REASONING_EFFORTS, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
+import { ActiveSetting, REASONING_EFFORTS, type AgentInfo, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
+import { agentColor, agentOneLiner, agentStatus, agentStatusLabel, AgentGridView, approvalModeActions, explainModeActions, helperOf, shownAgents, formatCost, GRID_PRESETS, GridPreset, nestedUnder, OverscrollGesture, overlapMarkers, setPullProgress, topLevelOf, wheelPixels, DEFAULT_OVERSCROLL } from './agentGrid.js';
 import { effortLabel } from './activeSettings.js';
 import { ActiveChatInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
@@ -43,6 +47,9 @@ const HANDOFF_SECONDS = 4;
  * Full-work-area chat with the coding agent. Auto mode shows messages, compact tool
  * rows and approvals — never a scrolling reasoning trace.
  */
+/** The chat's width from which agent cards sit in columns on both sides of the chat box. */
+const SIDE_CARDS_MIN_WIDTH = 1340;
+
 export class ActiveChatEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.activeChat';
 
@@ -76,6 +83,29 @@ export class ActiveChatEditor extends EditorPane {
 	private readonly setupView: SetupPanelViewState = { showLog: false, apiKeyDraft: '' };
 	private handoffCard!: HTMLElement;
 
+	// Many agents: the list under the transcript, the grid it zooms out to, and who the composer sends to.
+	private stage!: HTMLElement;
+	private grid!: AgentGridView;
+	private agentList!: HTMLElement;
+	/** Wide screens: cards on both sides of the chat box (alternating, so both sides fill evenly). */
+	private agentListRight!: HTMLElement;
+	private sideBySide = false;
+	private headerKey = '';
+	private helperTimer: ReturnType<typeof setTimeout> | undefined;
+	private leavingCards = new Set<string>();
+	private chatPull!: HTMLElement;
+	private chatPullLabel!: HTMLElement;
+	private composerTarget!: HTMLButtonElement;
+	private gridMode = false;
+	private zooming = false;
+	private readonly chatGesture = new OverscrollGesture();
+	private chatPullTimer: ReturnType<typeof setTimeout> | undefined;
+	private readonly agentListStore = this._register(new DisposableStore());
+	/** Agents whose list row should pulse its walkthrough badge (once, as it arrives). */
+	private readonly pulsing = new Set<string>();
+	private targetShown: string | undefined;
+	private agentListFrame: { dispose(): void } | undefined;
+
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -87,6 +117,8 @@ export class ActiveChatEditor extends EditorPane {
 		@ICommandService private readonly commandService: ICommandService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IAccessibilityService private readonly accessibilityService: IAccessibilityService,
 	) {
 		super(ActiveChatEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -96,7 +128,27 @@ export class ActiveChatEditor extends EditorPane {
 		this.header = dom.append(this.root, $('.active-chat-header'));
 		this.content = $('.active-chat-content');
 		this.scrollable = this._register(new DomScrollableElement(this.content, { vertical: ScrollbarVisibility.Auto, horizontal: ScrollbarVisibility.Hidden, useShadows: true }));
-		dom.append(this.root, this.scrollable.getDomNode()).classList.add('active-chat-scroll');
+		// The chat and the grid of all agents share the stage between the header and the dock, so zooming
+		// between them never moves the composer.
+		this.stage = dom.append(this.root, $('.active-chat-viewport'));
+		dom.append(this.stage, this.scrollable.getDomNode()).classList.add('active-chat-scroll');
+		this.grid = this._register(this.instantiationService.createInstance(AgentGridView, this.stage, {
+			open: (agentId: string) => void this.zoomIn(agentId),
+			layoutChanged: () => this.renderChrome(),
+		}));
+		this.chatPull = dom.append(this.stage, $('.active-agent-pull.bottom'));
+		this.chatPull.setAttribute('aria-hidden', 'true');
+		dom.append(this.chatPull, $('span.pull-icon')).classList.add(...ThemeIcon.asClassNameArray(Codicon.dashboard));
+		this.chatPullLabel = dom.append(this.chatPull, $('span.pull-label'));
+		this.chatPullLabel.textContent = localize('pullAllAgents', "Keep scrolling for all agents");
+		dom.append(dom.append(this.chatPull, $('.pull-track')), $('.pull-bar'));
+		this._register(dom.addDisposableListener(this.content, 'wheel', (event: WheelEvent) => this.onChatWheel(event), { passive: true }));
+		this._register(toDisposable(() => {
+			if (this.chatPullTimer !== undefined) {
+				clearTimeout(this.chatPullTimer);
+			}
+			this.agentListFrame?.dispose();
+		}));
 
 		const column = dom.append(this.content, $('.active-chat-column'));
 		this.intro = dom.append(column, $('.active-chat-intro'));
@@ -116,7 +168,9 @@ export class ActiveChatEditor extends EditorPane {
 		const dock = dom.append(dom.append(this.root, $('.active-chat-dock')), $('.active-chat-dock-column'));
 		this.handoffCard = dom.append(dock, $('.active-chat-handoff.hidden'));
 		this.stageLine = dom.append(dock, $('.active-chat-stage'));
-		const composer = dom.append(dock, $('.active-chat-composer'));
+		// The chat box and the agents: the agents sit under it, or to its left when there's room.
+		const composerRow = dom.append(dock, $('.active-composer-row'));
+		const composer = dom.append(composerRow, $('.active-chat-composer'));
 		this.composerContext = dom.append(composer, $('.composer-context'));
 		this.textarea = dom.append(composer, $('textarea')) as HTMLTextAreaElement;
 		this.textarea.rows = 4;
@@ -128,7 +182,11 @@ export class ActiveChatEditor extends EditorPane {
 		}));
 		this._register(dom.addDisposableListener(this.textarea, dom.EventType.INPUT, () => this.updateSendState()));
 		const bar = dom.append(composer, $('.composer-bar'));
-		this.modeLabel = dom.append(bar, $('.composer-mode'));
+		const left = dom.append(bar, $('.composer-left'));
+		// Who gets the message: always the highlighted agent. The label is all that changes between chat and grid.
+		this.composerTarget = dom.append(left, $('button.composer-target.hidden')) as HTMLButtonElement;
+		this._register(dom.addDisposableListener(this.composerTarget, dom.EventType.CLICK, () => this.showTargetMenu()));
+		this.modeLabel = dom.append(left, $('.composer-mode'));
 		this._register(this.activeService.onDidChangeMode(() => this.renderComposerContext()));
 		const tools = dom.append(bar, $('.composer-tools'));
 		// The coding agent's model and effort, one click from where the task is typed.
@@ -149,6 +207,9 @@ export class ActiveChatEditor extends EditorPane {
 		this.sendButton.textContent = localize('send', "Send ↑");
 		this._register(dom.addDisposableListener(this.sendButton, dom.EventType.CLICK, () => this.send()));
 
+		// Every agent as a small card, under the chat box or to its left. Keep scrolling the chat for the full grid.
+		this.agentList = dom.append(composerRow, $('.active-agent-list.left.hidden'));
+		this.agentListRight = dom.append(composerRow, $('.active-agent-list.right.hidden'));
 		this.footerRow = dom.append(dock, $('.active-chat-footer'));
 		dom.append(this.intro, $('p.active-chat-tagline')).textContent = localize('tagline', "Code, visuals and narration, right in the editor.");
 
@@ -179,6 +240,33 @@ export class ActiveChatEditor extends EditorPane {
 			}
 		}));
 		this._register(toDisposable(() => this.stopCountdown()));
+
+		this._register(this.activeService.onDidChangeAgents(() => this.scheduleAgentList()));
+		this._register(this.activeService.onDidChangeAllBriefing(() => {
+			if (this.gridMode) {
+				this.renderChrome();
+			}
+		}));
+		this._register(this.activeService.onDidChangeHighlight(() => {
+			this.scheduleAgentList();
+			this.renderComposerTarget();
+		}));
+		this._register(this.activeService.onDidReceiveWalkthrough(({ agentId }) => {
+			this.pulsing.add(agentId);
+			setTimeout(() => this.pulsing.delete(agentId), 1600);
+			this.scheduleAgentList();
+		}));
+		// Something else asked for the grid (or for chat): follow it while showing.
+		this._register(this.activeService.onDidChangeGridOpen(() => {
+			if (!this.isVisible() || this.zooming) {
+				return;
+			}
+			if (this.activeService.gridOpen && !this.gridMode) {
+				void this.zoomOut();
+			} else if (!this.activeService.gridOpen && this.gridMode) {
+				void this.zoomIn(this.activeService.highlightedAgentId);
+			}
+		}));
 	}
 
 	override async setInput(input: ActiveChatInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -193,6 +281,12 @@ export class ActiveChatEditor extends EditorPane {
 		this.renderChrome();
 		this.renderWorking();
 		this.renderHandoff();
+		this.renderAgentList();
+		this.renderComposerTarget();
+		// Opened by "Show All Agents": straight out to the grid once chat has laid out.
+		if (this.activeService.gridOpen && !this.gridMode) {
+			dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => void this.zoomOut());
+		}
 	}
 
 	protected override setEditorVisible(visible: boolean): void {
@@ -200,6 +294,10 @@ export class ActiveChatEditor extends EditorPane {
 		if (!visible && this.activeService.pendingHandoff) {
 			// The user moved elsewhere during the countdown: offer the walkthrough instead.
 			this.activeService.declineHandoff();
+		}
+		if (!visible && this.gridMode) {
+			// Leaving (e.g. to play a walkthrough from a box) comes back to that agent's chat, not the grid.
+			this.leaveGridNow();
 		}
 	}
 
@@ -297,7 +395,15 @@ export class ActiveChatEditor extends EditorPane {
 		this.root.style.height = `${dimension.height}px`;
 		this.root.style.width = `${dimension.width}px`;
 		this.root.classList.toggle('compact', dimension.height < 560 || dimension.width < 640);
+		// Room for a column of cards on each side of the (760px) chat box.
+		const sideBySide = dimension.width >= SIDE_CARDS_MIN_WIDTH;
+		if (sideBySide !== this.sideBySide) {
+			this.sideBySide = sideBySide;
+			this.root.classList.toggle('agent-cards-sides', sideBySide);
+			this.renderAgentList();
+		}
 		this.scrollable.scanDomNode();
+		this.grid.layout();
 	}
 
 	private renderChrome(): void {
@@ -306,8 +412,47 @@ export class ActiveChatEditor extends EditorPane {
 		}
 		const agent = this.activeService.agent;
 		dom.clearNode(this.header);
-		dom.append(this.header, $('span.title')).textContent = localize('headerTitle', "{0} · {1}", agent.provider.name, agent.workspaceName || localize('noWorkspace', "no folder"));
+		this.headerStore.clear();
+		if (this.gridMode) {
+			this.renderGridHeader();
+		} else {
+			this.renderChatHeader();
+		}
 		this.introLead.textContent = localize('introLead', "{0} writes the code. Active walks you through what changed.", agent.provider.name);
+		this.renderNotices();
+		this.renderStage();
+		this.renderComposerContext();
+		this.renderFooter();
+		this.intro.classList.toggle('compact', this.activeService.chat.length > 0);
+	}
+
+	private headerAction(icon: ThemeIcon, label: string, title: string, run: () => unknown, extraClass?: string): HTMLButtonElement {
+		const button = dom.append(this.header, $('button.header-action')) as HTMLButtonElement;
+		if (extraClass) {
+			button.classList.add(extraClass);
+		}
+		dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(icon));
+		dom.append(button, $('span.label')).textContent = label;
+		button.title = title;
+		this.headerStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => run()));
+		return button;
+	}
+
+	/** Starting another agent needs a git repository (for its worktree): otherwise disabled, saying why. */
+	private newAgentButton(button: HTMLButtonElement): void {
+		const blocker = this.activeService.multiAgentBlocker;
+		button.disabled = !!blocker;
+		button.title = blocker ?? localize('newAgentTitle', "Start another agent");
+	}
+
+	private renderChatHeader(): void {
+		const agent = this.activeService.agent;
+		const highlighted = this.activeService.highlightedAgent;
+		// With several agents the header says whose chat this is.
+		const many = this.activeService.agents.length > 1;
+		dom.append(this.header, $('span.title')).textContent = many && highlighted
+			? localize('headerTitleAgent', "{0} · {1}", highlighted.name, agent.provider.name)
+			: localize('headerTitle', "{0} · {1}", agent.provider.name, agent.workspaceName || localize('noWorkspace', "no folder"));
 		if (agent.account) {
 			const account = dom.append(this.header, $('span.agent-account'));
 			account.textContent = agent.account;
@@ -326,21 +471,55 @@ export class ActiveChatEditor extends EditorPane {
 			error: localize('statusError', "Error"),
 		}[agent.status];
 		// Chats are sessions: start a new one, or go back to an earlier one from this folder.
-		this.headerStore.clear();
-		const headerAction = (icon: ThemeIcon, label: string, title: string, run: () => unknown) => {
-			const button = dom.append(this.header, $('button.header-action')) as HTMLButtonElement;
-			dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(icon));
-			dom.append(button, $('span.label')).textContent = label;
-			button.title = title;
-			this.headerStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => run()));
+		this.headerAction(Codicon.history, localize('resumeChat', "Chats"), localize('resumeChatTitle', "Resume an earlier chat in this folder"), () => this.activeService.pickChatToResume(), 'collapsible');
+		this.headerAction(Codicon.add, localize('newChat', "New Chat"), localize('newChatTitle', "Start a new chat (a new {0} session)", agent.provider.name), () => this.activeService.newChat(), 'collapsible');
+		this.newAgentButton(this.headerAction(Codicon.personAdd, localize('newAgent', "New Agent"), '', () => this.activeService.newAgent(), 'collapsible'));
+		this.headerAction(Codicon.dashboard, localize('allAgents', "All Agents"), localize('allAgentsTitle', "Show all agents"), () => this.zoomOut(), 'collapsible');
+	}
+
+	/** The grid's top bar: layout presets, the overflow toggle, catching up, new agents, and the way back. */
+	private renderGridHeader(): void {
+		const top = this.activeService.agents.filter(agent => !nestedUnder(agent));
+		dom.append(this.header, $('span.title')).textContent = localize('gridTitle', "All Agents · {0}", top.length);
+		const presets = dom.append(this.header, $('.agent-grid-presets'));
+		presets.setAttribute('role', 'radiogroup');
+		presets.setAttribute('aria-label', localize('gridPresets', "Grid layout"));
+		const labels: Record<GridPreset, { label: string; title: string; icon: ThemeIcon }> = {
+			auto: { label: localize('presetAuto', "Auto"), title: localize('presetAutoTitle', "Arrange boxes to fit"), icon: Codicon.editorLayout },
+			columns: { label: localize('presetColumns', "Columns"), title: localize('presetColumnsTitle', "One column per agent"), icon: Codicon.splitHorizontal },
+			rows: { label: localize('presetRows', "Rows"), title: localize('presetRowsTitle', "One row per agent"), icon: Codicon.splitVertical },
+			focus: { label: localize('presetFocus', "Focus"), title: localize('presetFocusTitle', "Highlighted agent large"), icon: Codicon.layoutSidebarRight },
+			custom: { label: localize('presetCustom', "Custom"), title: localize('presetCustomTitle', "Your arrangement: drag headers, resize from corners"), icon: Codicon.move },
 		};
-		headerAction(Codicon.history, localize('resumeChat', "Chats"), localize('resumeChatTitle', "Resume an earlier chat in this folder"), () => this.activeService.pickChatToResume());
-		headerAction(Codicon.add, localize('newChat', "New Chat"), localize('newChatTitle', "Start a new chat (a new {0} session)", agent.provider.name), () => this.activeService.newChat());
-		this.renderNotices();
-		this.renderStage();
-		this.renderComposerContext();
-		this.renderFooter();
-		this.intro.classList.toggle('compact', this.activeService.chat.length > 0);
+		for (const preset of GRID_PRESETS) {
+			const button = dom.append(presets, $('button')) as HTMLButtonElement;
+			dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(labels[preset].icon));
+			dom.append(button, $('span.label')).textContent = labels[preset].label;
+			button.title = labels[preset].title;
+			button.setAttribute('role', 'radio');
+			button.setAttribute('aria-checked', String(this.grid.preset === preset));
+			button.classList.toggle('selected', this.grid.preset === preset);
+			button.disabled = preset === 'custom' && !this.grid.hasCustom;
+			this.headerStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => this.grid.setPreset(preset)));
+		}
+		const overflow = this.headerAction(Codicon.arrowBoth, localize('gridOverflow', "Overflow"), this.grid.overflow
+			? localize('gridOverflowOn', "Boxes extend off screen (Shift+scroll to pan). Click to fit all.")
+			: localize('gridOverflowOff', "Boxes shrink to fit. Click to let them extend off screen."), () => this.grid.setOverflow(!this.grid.overflow), 'toggle');
+		overflow.classList.toggle('on', this.grid.overflow);
+		overflow.setAttribute('aria-pressed', String(this.grid.overflow));
+		dom.append(this.header, $('span.header-spacer'));
+		if (!this.activeService.allBriefing) {
+			this.headerAction(Codicon.history, localize('catchUpAll', "Catch Me Up"), localize('catchUpAllTitle', "What every agent did"), () => this.activeService.catchUpAll(), 'collapsible');
+		// Finished helpers fade out a few seconds after they're done; this keeps them.
+		if (this.activeService.agents.some(agent => agent.kind === 'subagent' && agent.finished)) {
+			const showing = this.activeService.showFinishedHelpers;
+			const toggle = this.headerAction(showing ? Codicon.eye : Codicon.eyeClosed, showing ? localize('hideFinishedHelpers', "Hide Finished Helpers") : localize('showFinishedHelpers', "Show Finished Helpers"), '', () => this.activeService.setShowFinishedHelpers(!showing), 'collapsible');
+			toggle.classList.toggle('active', showing);
+		}
+		}
+		this.newAgentButton(this.headerAction(Codicon.add, localize('newAgent', "New Agent"), '', () => this.activeService.newAgent()));
+		const name = this.activeService.highlightedAgent?.name;
+		this.headerAction(Codicon.screenFull, name ? localize('openAgent', "Open {0}", name) : localize('backToChat', "Back to Chat"), localize('openAgentTitle', "Open the highlighted agent"), () => this.zoomIn(this.activeService.highlightedAgentId));
 	}
 
 	/** The return briefing: what happened while they were away, with the walkthroughs one click away. */
@@ -521,7 +700,9 @@ export class ActiveChatEditor extends EditorPane {
 		const kind = this.activeService.chatContext?.kind;
 		this.sendButton.textContent = this.mode === 'ask' && kind !== 'mapEdit' && kind !== 'change' ? localize('askSend', "Ask ↑") : localize('send', "Send ↑");
 		this.renderExplainMode();
-		this.textarea.placeholder = this.mode !== 'ask' ? localize('taskPlaceholder', "Describe a coding task…")
+		const highlighted = this.activeService.highlightedAgent;
+		this.textarea.placeholder = this.mode !== 'ask' && highlighted?.kind === 'subagent' ? localize('subagentPlaceholder', "Message {0}…", highlighted.name)
+			: this.mode !== 'ask' ? localize('taskPlaceholder', "Describe a coding task…")
 			: kind === 'mapEdit' ? localize('mapEditPlaceholder', "Describe how to restructure the map: split or merge parts, regroup them, change the level of detail…")
 				: kind === 'map' ? localize('askMapPlaceholder', "Ask about these parts of the system…")
 					: kind === 'code' ? localize('askCodePlaceholder', "Ask about this code…")
@@ -536,6 +717,10 @@ export class ActiveChatEditor extends EditorPane {
 		this.modeStore.clear();
 		dom.clearNode(this.modeLabel);
 		const kind = this.activeService.chatContext?.kind;
+		// A subagent's work is explained as part of its parent's: no explanation mode to show.
+		if (this.activeService.highlightedAgent?.kind === 'subagent') {
+			return;
+		}
 		// A change request is a coding task, so how its work gets explained still applies.
 		if (this.mode === 'ask' && kind !== 'change') {
 			this.modeLabel.textContent = kind === 'code' ? localize('codeQuestionSession', "Asking about code") : kind === 'mapEdit' ? localize('mapEditSession', "Changing the system map") : kind === 'map' ? localize('mapQuestionSession', "Asking about the system map") : localize('explanationSession', "Asking about the walkthrough");
@@ -618,6 +803,317 @@ export class ActiveChatEditor extends EditorPane {
 		const profile = dom.append(this.footerRow, $('button.link'));
 		profile.textContent = localize('knowledgeProfile', "Knowledge Profile");
 		this.footerStore.add(dom.addDisposableListener(profile, dom.EventType.CLICK, () => this.activeService.openProfile()));
+	}
+
+	// ----------------------------------------------------------------- agents: list, target, grid
+
+	private scheduleAgentList(): void {
+		// Agents change with every background event: render the list (and the target label) once a frame at most.
+		this.agentListFrame ??= dom.scheduleAtNextAnimationFrame(dom.getWindow(this.root), () => {
+			this.agentListFrame = undefined;
+			this.renderAgentList();
+			this.renderComposerTarget();
+			// The grid's top bar shows the agent count and the finished-helpers toggle: redo it when those change.
+			const agents = this.activeService.agents;
+			const headerKey = `${agents.filter(agent => !nestedUnder(agent)).length}/${agents.some(agent => agent.kind === 'subagent' && agent.finished)}/${this.activeService.showFinishedHelpers}`;
+			if (headerKey !== this.headerKey) {
+				this.headerKey = headerKey;
+				this.renderChrome();
+			}
+		});
+	}
+
+	/** One row per agent, nested ones indented under theirs; a click switches the chat in place. */
+	private renderAgentList(): void {
+		this.agentListStore.clear();
+		dom.clearNode(this.agentList);
+		dom.clearNode(this.agentListRight);
+		// Compact: only with more than one agent, one short line each; finished helpers stay in the grid.
+		// Every agent and subagent (subagents are agents you can open and message too); merged ones live in the grid.
+		const all = this.activeService.agents;
+		const { shown, leaving, next } = shownAgents(all, this.activeService.highlightedAgentId, this.activeService.showFinishedHelpers);
+		const agents = shown.filter(agent => !agent.mergedInto);
+		// Re-render when the next finished helper starts or finishes fading out.
+		clearTimeout(this.helperTimer);
+		if (next !== undefined) {
+			this.helperTimer = setTimeout(() => this.scheduleAgentList(), Math.max(0, next - Date.now()) + 16);
+		}
+		this.agentList.classList.toggle('hidden', agents.length < 2);
+		this.agentListRight.classList.toggle('hidden', agents.length < 2 || !this.sideBySide);
+		if (this.agentList.classList.contains('hidden')) {
+			return;
+		}
+		this.leavingCards = leaving;
+		const highlighted = this.activeService.highlightedAgentId;
+		// Side by side, each agent stays with its helpers: whole groups go to whichever side has fewer cards, so both
+		// columns grow together.
+		const groups: AgentInfo[][] = [];
+		for (const agent of agents) {
+			// (With one top-level agent its helpers are peers: each card counts on its own.)
+			const group = agent.kind === 'subagent' && helperOf(agent, all) ? groups.find(candidate => candidate[0].id === agent.parentId) : undefined;
+			if (group) {
+				group.push(agent);
+			} else {
+				groups.push([agent]);
+			}
+		}
+		let left = 0;
+		let right = 0;
+		for (const group of groups) {
+			const toRight = this.sideBySide && right < left;
+			for (const agent of group) {
+				this.renderAgentRow(agent, all, highlighted === agent.id, toRight ? this.agentListRight : this.agentList);
+			}
+			if (toRight) {
+				right += group.length;
+			} else {
+				left += group.length;
+			}
+		}
+		// The highlighted agent's card stays in view when a column scrolls.
+		const current = [this.agentList, this.agentListRight].map(list => list.querySelector<HTMLElement>('.active-agent-row.highlighted')).find(Boolean);
+		current?.scrollIntoView({ block: 'nearest' });
+		for (const list of [this.agentList, this.agentListRight]) {
+			const mark = () => list.classList.toggle('overflowing', list.scrollTop > 2);
+			mark();
+			this.agentListStore.add(dom.addDisposableListener(list, dom.EventType.SCROLL, mark));
+		}
+		this.scrollable.scanDomNode();
+	}
+
+	private renderAgentRow(agent: AgentInfo, agents: readonly AgentInfo[], highlighted: boolean, list: HTMLElement): void {
+		// With several top-level agents a subagent's card is marked as a helper; with one, it's just another agent.
+		const nested = agent.kind === 'subagent' && !!helperOf(agent, agents);
+		const row = dom.append(list, $('.active-agent-row'));
+		row.tabIndex = 0;
+		row.setAttribute('role', 'button');
+		row.classList.toggle('nested', nested);
+		row.classList.toggle('highlighted', highlighted);
+		row.classList.toggle('leaving', this.leavingCards.has(agent.id));
+		const status = agentStatus(agent);
+		row.dataset.status = status;
+		row.style.setProperty('--agent-color', agentColor(agent));
+		dom.append(row, $('span.agent-dot'));
+		dom.append(row, $('span.row-name')).textContent = agent.name;
+		const helper = helperOf(agent, agents);
+		if (helper) {
+			row.title = helper;
+		}
+		// Second line: what it's doing (or its status), and what it has cost.
+		const line = agentOneLiner(agent) || agentStatusLabel(agent, agents);
+		const cost = formatCost(agent.cost);
+		const lineNode = dom.append(row, $('span.row-line'));
+		lineNode.textContent = cost ? `${line} · ${cost}` : line;
+		lineNode.title = line;
+		const meta = dom.append(row, $('.row-meta'));
+		const ready = this.activeService.readyWalkthroughs(agent.id);
+		if (ready.length) {
+			const badge = dom.append(meta, $('button.agent-ready-badge')) as HTMLButtonElement;
+			dom.append(badge, $('span')).classList.add(...ThemeIcon.asClassNameArray(Codicon.playCircle));
+			dom.append(badge, $('span')).textContent = ready.length === 1 ? localize('rowReady', "Ready") : String(ready.length);
+			badge.title = localize('rowReadyTitle', "Walkthrough ready: {0}. Click to play.", ready.map(walkthrough => walkthrough.title).join(', '));
+			badge.classList.toggle('pulse', this.pulsing.has(agent.id));
+			this.agentListStore.add(dom.addDisposableListener(badge, dom.EventType.CLICK, event => {
+				event.stopPropagation();
+				void this.activeService.playReady(agent.id);
+			}));
+		}
+		for (const marker of overlapMarkers(agent.id, this.activeService.overlaps)) {
+			const other = this.activeService.agentInfo(marker.otherId);
+			const icon = dom.append(meta, $(`span.agent-row-overlap${marker.conflict ? '.conflict' : ''}`));
+			icon.classList.add(...ThemeIcon.asClassNameArray(marker.conflict ? Codicon.warning : Codicon.gitCompare));
+			icon.style.color = marker.conflict ? 'var(--vscode-editorWarning-foreground)' : agentColor(other);
+			icon.title = `${marker.conflict ? localize('rowConflict', "Likely conflict with {0}", other?.name ?? marker.otherId) : localize('rowOverlap', "Also changed by {0}", other?.name ?? marker.otherId)}\n${marker.files.join('\n')}`;
+		}
+		row.setAttribute('aria-label', localize('rowAria', "{0}, {1}", agent.name, agentStatusLabel(agent, agents)));
+		const select = () => this.activeService.highlightAgent(agent.id);
+		this.agentListStore.add(dom.addDisposableListener(row, dom.EventType.CLICK, select));
+		// Right-click: this agent's explanation and approval modes.
+		if (agent.kind === 'agent') {
+			this.agentListStore.add(dom.addDisposableListener(row, dom.EventType.CONTEXT_MENU, (event: MouseEvent) => {
+				event.preventDefault();
+				this.contextMenuService.showContextMenu({ getAnchor: () => ({ x: event.clientX, y: event.clientY }), getActions: () => [explainModeActions(this.activeService, agent.id), approvalModeActions(this.activeService, agent)] });
+			}));
+		}
+		this.agentListStore.add(dom.addStandardDisposableListener(row, dom.EventType.KEY_DOWN, (event: StandardKeyboardEvent) => {
+			if (event.keyCode === KeyCode.Enter || event.keyCode === KeyCode.Space) {
+				event.preventDefault();
+				select();
+			}
+		}));
+	}
+
+	/** "To: <agent>" in the composer, shown once there's more than one agent (or in the grid). */
+	private renderComposerTarget(): void {
+		const agent = this.activeService.highlightedAgent;
+		const visible = !!agent && (this.gridMode || this.activeService.agents.length > 1);
+		this.composerTarget.classList.toggle('hidden', !visible);
+		if (!agent || !visible) {
+			this.targetShown = undefined;
+			return;
+		}
+		const changed = this.targetShown !== undefined && this.targetShown !== agent.id;
+		this.targetShown = agent.id;
+		dom.clearNode(this.composerTarget);
+		this.composerTarget.style.setProperty('--agent-color', agentColor(agent));
+		dom.append(this.composerTarget, $('span.target-to')).textContent = localize('composerTo', "To:");
+		dom.append(this.composerTarget, $('span.agent-dot'));
+		const name = dom.append(this.composerTarget, $('span.target-name'));
+		name.textContent = agent.name;
+		name.classList.toggle('changed', changed);
+		dom.append(this.composerTarget, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		this.composerTarget.title = localize('composerToTitle', "Messages go to {0}", agent.name);
+	}
+
+	private showTargetMenu(): void {
+		const agents = this.activeService.agents;
+		this.contextMenuService.showContextMenu({
+			getAnchor: () => this.composerTarget,
+			getActions: () => agents.map(agent => toAction({
+				id: `active.composerTarget.${agent.id}`,
+				label: topLevelOf(agent, agents).id === agent.id ? agent.name : `    ${agent.name}`,
+				checked: agent.id === this.activeService.highlightedAgentId,
+				run: () => this.activeService.highlightAgent(agent.id),
+			})),
+		});
+	}
+
+	/** Past the end of the chat, more scrolling pulls out to the grid (never the momentum that reached the end). */
+	private onChatWheel(event: WheelEvent): void {
+		if (this.gridMode || this.zooming || event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+			return;
+		}
+		const { scrollTop } = this.scrollable.getScrollPosition();
+		const { height, scrollHeight } = this.scrollable.getScrollDimensions();
+		const step = this.chatGesture.wheel(wheelPixels(event, 'y'), scrollTop + height >= scrollHeight - 2, Date.now());
+		this.setChatPull(step.progress);
+		if (step.committed) {
+			void this.zoomOut();
+		}
+	}
+
+	private setChatPull(progress: number): void {
+		setPullProgress(this.chatPull, progress);
+		const scroll = this.scrollable.getDomNode();
+		scroll.style.setProperty('--pull', String(progress));
+		scroll.classList.toggle('pulling', progress > 0);
+		scroll.classList.toggle('released', progress === 0);
+		if (this.chatPullTimer !== undefined) {
+			clearTimeout(this.chatPullTimer);
+			this.chatPullTimer = undefined;
+		}
+		if (progress > 0 && progress < 1) {
+			// Stopping short lets go: the indicator sinks back.
+			this.chatPullTimer = setTimeout(() => this.setChatPull(this.chatGesture.idle(Date.now())), DEFAULT_OVERSCROLL.releaseMs + 20);
+		}
+	}
+
+	/** Zoom out: the chat shrinks into its agent's box while the other boxes fade in around it. */
+	private async zoomOut(): Promise<void> {
+		if (this.gridMode || this.zooming) {
+			return;
+		}
+		this.gridMode = true;
+		this.activeService.setGridOpen(true);
+		this.grid.show();
+		this.grid.revealFocus();
+		this.renderChrome();
+		this.renderComposerTarget();
+		const scroll = this.scrollable.getDomNode();
+		// The pull's lean is the start of the zoom; drop it without a transition so the two don't fight.
+		scroll.classList.remove('pulling', 'released');
+		setPullProgress(this.chatPull, 0);
+		await this.runZoom('out', () => this.root.classList.add('grid-mode'));
+		this.grid.focus();
+	}
+
+	/** Zoom in: the reverse, from the agent's box to its full-screen chat. */
+	private async zoomIn(agentId: string): Promise<void> {
+		if (!this.gridMode || this.zooming) {
+			return;
+		}
+		this.activeService.highlightAgent(agentId);
+		this.grid.revealFocus();
+		this.gridMode = false;
+		await this.runZoom('in', () => {
+			this.root.classList.remove('grid-mode');
+			this.renderChrome();
+			this.renderComposerTarget();
+		});
+		this.grid.hide();
+		this.chatGesture.block(Date.now());
+		// After the highlight, so opening an agent left alone for a while starts with its short catch-up.
+		this.activeService.setGridOpen(false);
+		this.textarea.focus();
+	}
+
+	/** Out of the grid at once (the editor is being hidden). */
+	private leaveGridNow(): void {
+		this.gridMode = false;
+		this.root.classList.remove('grid-mode', 'zooming');
+		this.grid.hide();
+		this.activeService.setGridOpen(false);
+		this.renderChrome();
+		this.renderComposerTarget();
+	}
+
+	/**
+	 * FLIP between the full-screen chat (the stage) and the highlighted agent's box: both get the same transform
+	 * path, the chat fading out as the box fades in (or the reverse), the other boxes scaling in around it.
+	 * Reduced motion: a cross-fade.
+	 */
+	private async runZoom(direction: 'in' | 'out', swap: () => void): Promise<void> {
+		this.zooming = true;
+		this.root.classList.add('zooming');
+		const scroll = this.scrollable.getDomNode();
+		const grid = this.grid.element;
+		const target = this.grid.focusElement();
+		const animations: Animation[] = [];
+		const out = direction === 'out';
+		const stage = this.stage.getBoundingClientRect();
+		const box = target?.getBoundingClientRect();
+		if (this.accessibilityService.isMotionReduced() || !target || !box || !box.width || !box.height || !stage.width || !stage.height) {
+			const fade = { duration: 180, easing: 'ease', fill: 'both' as const };
+			animations.push(scroll.animate({ opacity: out ? [1, 0] : [0, 1] }, fade));
+			animations.push(grid.animate({ opacity: out ? [0, 1] : [1, 0] }, fade));
+		} else {
+			const duration = out ? 460 : 420;
+			const easing = 'cubic-bezier(0.2, 0.7, 0.2, 1)';
+			const tx = box.left - stage.left;
+			const ty = box.top - stage.top;
+			const sx = box.width / stage.width;
+			const sy = box.height / stage.height;
+			const shrunk = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+			// The box's inverse: from its own top-left corner, scaled up to cover the stage.
+			const grown = `translate(${-tx}px, ${-ty}px) scale(${1 / sx}, ${1 / sy})`;
+			const move = { duration, easing, fill: 'both' as const };
+			animations.push(scroll.animate({ transform: out ? ['none', shrunk] : [shrunk, 'none'], transformOrigin: ['0 0', '0 0'] }, move));
+			animations.push(target.animate({ transform: out ? [grown, 'none'] : ['none', grown], transformOrigin: ['0 0', '0 0'] }, move));
+			// Cross-fade the transcript and the box's compact content while they travel together.
+			animations.push(scroll.animate({ opacity: out ? [1, 0] : [0, 1] }, { duration: duration * 0.6, delay: out ? duration * 0.1 : duration * 0.3, easing: 'ease', fill: 'both' }));
+			animations.push(target.animate({ opacity: out ? [0, 1] : [1, 0] }, { duration: duration * 0.6, delay: out ? duration * 0.3 : 0, easing: 'ease', fill: 'both' }));
+			// The other boxes scale and fade in around it, nearest first (or all out together).
+			const centre = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+			const others = this.grid.otherElements().map(node => {
+				const rect = node.getBoundingClientRect();
+				return { node, distance: Math.hypot(rect.left + rect.width / 2 - centre.x, rect.top + rect.height / 2 - centre.y) };
+			}).sort((a, b) => a.distance - b.distance);
+			others.forEach(({ node }, index) => animations.push(node.animate(
+				{ opacity: out ? [0, 1] : [1, 0], transform: out ? ['scale(0.9)', 'none'] : ['none', 'scale(0.94)'] },
+				{ duration: out ? 380 : 240, delay: out ? 90 + Math.min(index, 8) * 30 : 0, easing, fill: 'both' },
+			)));
+			const briefing = this.grid.briefingElement;
+			if (briefing) {
+				animations.push(briefing.animate({ opacity: out ? [0, 1] : [1, 0] }, { duration: 260, delay: out ? 200 : 0, fill: 'both' }));
+			}
+		}
+		swap();
+		await Promise.all(animations.map(animation => animation.finished.catch(() => undefined)));
+		for (const animation of animations) {
+			animation.cancel();
+		}
+		this.root.classList.remove('zooming');
+		this.zooming = false;
 	}
 
 	private updateSendState(): void {
@@ -863,3 +1359,21 @@ function appendDots(parent: HTMLElement): void {
 export function escapeIdentifierUnderscores(text: string): string {
 	return text.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map((part, index) => index % 2 ? part : part.replace(/(?<![\w\\])[\w.]*__\w*/g, name => name.replace(/_/g, '\\_'))).join('');
 }
+
+/** Out to the grid of every agent from anywhere (the chat's button and overscroll do the same). */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'active.agents.showAll',
+			title: localize2('showAllAgents', "Show All Agents"),
+			category: localize2('activeCategory', "Active"),
+			f1: true,
+		});
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const service = accessor.get(IActiveService);
+		// Chat follows the service: if it's showing it zooms out now, otherwise as soon as it opens.
+		service.setGridOpen(true);
+		await service.openChat(false);
+	}
+});

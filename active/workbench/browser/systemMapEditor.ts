@@ -18,7 +18,6 @@ import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
-import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
@@ -94,7 +93,6 @@ export class SystemMapEditor extends EditorPane {
 		@IStorageService private readonly storage: IStorageService,
 		@IActiveService private readonly activeService: IActiveService,
 		@IEditorService private readonly editorService: IEditorService,
-		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
@@ -1015,13 +1013,14 @@ export class SystemMapEditor extends EditorPane {
 	}
 
 	private async openFile(ref: SystemFileRef): Promise<void> {
-		const folder = this.workspaceService.getWorkspace().folders[0];
-		if (!folder) {
+		// The map is the highlighted agent's: its files are in that agent's folder.
+		const resource = this.activeService.resolveAgentPath(ref.path);
+		if (!resource) {
 			return;
 		}
 		const line = ref.startLine ?? 1;
 		await this.editorService.openEditor({
-			resource: folder.toResource(ref.path),
+			resource,
 			options: { pinned: true, revealIfOpened: true, selection: { startLineNumber: line, startColumn: 1, endLineNumber: ref.endLine ?? line, endColumn: 1 } },
 		});
 	}

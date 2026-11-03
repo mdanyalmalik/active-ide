@@ -4,21 +4,63 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createHash } from 'node:crypto';
-import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener } from './agents/agentTypes';
+import type { AgentApproval, AgentHost, AgentItem, AgentSession, AgentSessionListener, AgentTodoItem, AgentUsage, SessionToolServer } from './agents/agentTypes';
+import type { MergeOutcome } from './agents/worktrees';
 import { CONDENSE_TARGET_CHARS, condensedOf, ExplainerMemory, MemoryInput } from './explain/memory';
-import { ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner } from './explain/planner';
-import { buildBriefingPrompt, buildCodeQuestionPrompt, buildElaborationPrompt, buildMapQuestionPrompt, composeCodeTask, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
+import { ExplainerGate, ExplanationAgent, NoteBrief, noteDraft, PlanResult, WalkthroughPlanner } from './explain/planner';
+import { AgentContext, MergedWork, SubagentWork, buildBriefingPrompt, buildCodeQuestionPrompt, buildElaborationPrompt, buildMapQuestionPrompt, composeCodeTask, buildMemoryCondensePrompt, buildQuestionPrompt, buildSpokenQuestionPrompt, BriefingTurn, PlanningContext } from './explain/prompts';
 import { assessWorthiness, WorthinessVerdict } from './explain/worthiness';
 import type { DiagramSnapshot } from './diagram/diagramAgent';
 import { describeDebugCall } from './debug/debugTools';
 import { debuggerSuggestion, stuckReason } from './debug/stuck';
 import { HistoryStore } from './history/historyStore';
-import { describeCodeSelection, extractJsonObject, REASONING_EFFORTS } from './shared/activeProtocol';
+import { describeCodeSelection, extractJsonObject, MAIN_AGENT_ID, REASONING_EFFORTS } from './shared/activeProtocol';
+import type { AgentApprovalMode, AgentTodo } from './shared/activeProtocol';
+
+/** Active's approval modes as Muse's. */
+const MUSE_APPROVAL_MODES: Record<AgentApprovalMode, string> = { auto: 'onRequest', ask: 'promptUnmatched', allowAll: 'allowAll' };
 import type { ActiveEvent, Briefing, BriefingRequest, AgentModelInfo, AgentProviderInfo, AgentRunSettings, AgentState, AgentStatus, SetupState, AskRequest, CapturedFile, ChatEntry, ElaborateRequest, FileChangeStat, InitialState, KnowledgeProfile, MemoryNote, PendingCheck, ToolOutcome, ReasoningEffort, SystemMap, TaskRequest, TurnSummary, Walkthrough, WalkthroughDraft, WalkthroughStage } from './shared/activeProtocol';
 import { ChangeTracker, NetFileChange, RecordedEdit } from './tracking/changeTracker';
 import { diffStats } from './tracking/lineDiff';
 
+/** Live details of an agent for the agent list and grid (merged into its `AgentInfo`). */
+export interface AgentActivity {
+	readonly activity?: string;
+	readonly reasoning?: string;
+	readonly todo?: readonly AgentTodo[];
+	readonly cost?: number;
+	readonly costBreakdown?: { readonly coding: number; readonly explanations: number };
+	readonly waitingForApproval?: boolean;
+	readonly task?: string;
+}
+
+/** A helper the coding agent spawned, as the controller reports it. */
+export interface SubagentEvent {
+	readonly subagentId: string;
+	readonly childSessionId?: string;
+	readonly name: string;
+	readonly objective: string;
+	readonly status: string;
+	readonly result?: string;
+	readonly finished: boolean;
+	/** Started by one of Muse's workflow scripts (these don't take direct messages). */
+	readonly viaWorkflow?: boolean;
+}
+
 export interface ControllerOptions {
+	/** Which agent this controller runs (`main` for the one in the developer's folder). */
+	readonly agentId?: string;
+	readonly agentName?: () => string;
+	/** More than one top-level agent exists (explanations then say whose work it is). */
+	readonly multiAgent?: () => boolean;
+	/** The agent hosts are shared with other agents' controllers: a reconnect here doesn't stop them. */
+	readonly sharedHosts?: boolean;
+	/** Shared by all agents' explainers: one request at a time, the highlighted agent's first. */
+	readonly gate?: ExplainerGate;
+	/** Files another top-level agent is also changing. */
+	readonly overlaps?: () => ReadonlyArray<{ readonly agent: string; readonly path: string; readonly sameLines: boolean }>;
+	readonly onActivity?: (activity: AgentActivity) => void;
+	readonly onSubagent?: (event: SubagentEvent) => void;
 	readonly workspaceName: string;
 	readonly backgroundTimeoutMs: () => number;
 	/** Minimum time between "chapter now, or wait?" questions during a turn. */
@@ -56,7 +98,11 @@ export interface ControllerOptions {
 	readonly rememberSession?: (sessionId: string) => void;
 	/** The diagram agent hears about every checkpoint and the end of every turn (on its own timeline). */
 	readonly onDiagramCheckpoint?: (snapshot: DiagramSnapshot) => void;
-	/** The coding agent's debug tools (an Active MCP server on the coding host), when they're on. */
+	/** This agent's approval mode (Active's names), applied to its coding session when it opens and when changed. */
+	readonly approvalMode?: () => AgentApprovalMode;
+	/** Tool servers for this agent's coding session only (its debugger, in its own folder), asked for at session start. */
+	readonly sessionTools?: () => Promise<Readonly<Record<string, SessionToolServer>> | undefined>;
+	/** The coding agent's debug tools (an Active MCP server given to its session), when they're on. */
 	readonly debugTools?: {
 		/** The tools are on and the coding host was given them. */
 		readonly available: () => boolean;
@@ -102,7 +148,25 @@ interface LogicalTurn {
 	checkTimer?: NodeJS.Timeout;
 	/** Active already suggested the debugger this turn. */
 	debugSuggested?: boolean;
+	/** Helpers the agent spawned this turn (by subagent id). */
+	readonly subagents: Map<string, SubagentWork>;
+	/** Other agents' work merged in for this turn (not explained as this agent's). */
+	readonly mergedIn: MergedWork[];
+	/** Helpers still working (by subagent id), and when the turn last launched one. */
+	readonly runningHelpers: Set<string>;
+	helpersLaunchedAt?: number;
+	helpersLastChange?: number;
+	/** When the coding agent's first message or tool call of the turn arrived (how long it took to start). */
+	firstActivityAt?: number;
+	/** The coding agent's turn ended while helpers it started were still at work: finish once they're done. */
+	waitingForHelpers?: { terminal: string; since: number; timer: NodeJS.Timeout };
 }
+
+/** How long to wait for a helper the turn launched to show up, and at most for helpers to finish. */
+const HELPER_APPEAR_MS = 30_000;
+const HELPER_MAX_WAIT_MS = 20 * 60_000;
+/** After the last helper finishes, the agent usually checks its work in a follow-up turn: give it time to start. */
+const HELPER_FOLLOW_UP_MS = 20_000;
 
 /**
  * Identifies everything a walkthrough plan is based on: the captured files and the
@@ -163,6 +227,85 @@ function toolCommand(item: AgentItem): string | undefined {
 	return undefined;
 }
 
+/**
+ * Where a subagent's own lines are in the final captured files: the lines its edits added (in its `after` but not its
+ * `before`), found in the final version. Robust to the parent agent changing the file afterwards: lines it rewrote
+ * simply aren't found, and the file is marked as partly changed.
+ */
+export function subagentLines(edits: ReadonlyMap<string, { before: string | null | undefined; after: string | null }> | undefined, files: Readonly<Record<string, CapturedFile>>): Array<{ path: string; ranges: string; intact: boolean }> {
+	const out: Array<{ path: string; ranges: string; intact: boolean }> = [];
+	for (const [file, edit] of edits ?? []) {
+		const final = files[file]?.final;
+		if (!final || edit.after === null) {
+			continue;
+		}
+		const added = new Map<string, number>();
+		const before = new Map<string, number>();
+		for (const line of (edit.before ?? '').split('\n')) {
+			before.set(line, (before.get(line) ?? 0) + 1);
+		}
+		for (const line of edit.after.split('\n')) {
+			const left = before.get(line) ?? 0;
+			if (left > 0) {
+				before.set(line, left - 1);
+			} else if (line.trim().length > 2) {
+				added.set(line, (added.get(line) ?? 0) + 1);
+			}
+		}
+		const numbers: number[] = [];
+		final.split('\n').forEach((line, index) => {
+			const left = added.get(line) ?? 0;
+			if (left > 0) {
+				added.set(line, left - 1);
+				numbers.push(index + 1);
+			}
+		});
+		if (!numbers.length) {
+			continue;
+		}
+		const ranges: string[] = [];
+		let start = numbers[0];
+		let previous = numbers[0];
+		for (const number of [...numbers.slice(1), Infinity]) {
+			// Lines a gap of one apart (a blank line, a brace) still read as one block.
+			if (number - previous <= 2) {
+				previous = number;
+				continue;
+			}
+			ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+			start = previous = number;
+		}
+		out.push({ path: file, ranges: ranges.join(', '), intact: final === edit.after });
+	}
+	return out;
+}
+
+/** The `input` strings a Muse workflow script passes to `host.agent(...)`, in order. */
+export function workflowInputs(args: string | undefined): string[] {
+	if (!args) {
+		return [];
+	}
+	let script = args;
+	try {
+		const parsed = JSON.parse(args) as Record<string, unknown>;
+		script = typeof parsed.script === 'string' ? parsed.script : typeof parsed.code === 'string' ? parsed.code : typeof parsed.source === 'string' ? parsed.source : args;
+	} catch {
+		// the script itself
+	}
+	const inputs: string[] = [];
+	for (const match of script.matchAll(/input\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`)/g)) {
+		const raw = match[1] ?? match[2] ?? match[3] ?? '';
+		inputs.push(raw.replace(/\\n/g, '\n').replace(/\\(["'`\\])/g, '$1').trim());
+	}
+	return inputs.filter(Boolean);
+}
+
+/** The first line of a message, short enough for one row of the agent list. */
+function oneLine(text: string): string {
+	const line = text.trim().split('\n').find(candidate => candidate.trim())?.trim() ?? '';
+	return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+}
+
 let entrySeq = 0;
 function entryId(prefix: string): string {
 	return `${prefix}-${Date.now().toString(36)}-${(entrySeq++).toString(36)}`;
@@ -202,15 +345,50 @@ export class ActiveController implements AgentSessionListener {
 	constructor(private readonly options: ControllerOptions, private readonly tracker: ChangeTracker, private readonly history: HistoryStore) {
 		this.explainer = new ExplanationAgent(async listener => {
 			this.explanationHost ??= await options.startExplanationHost();
-			// The explanation session reads the live project under Muse's read-only permission profile.
+			// The explanation session reads the live project under Muse's read-only permission profile. Each agent's
+			// explainer is rooted in that agent's own folder, so it can't read another agent's version of a file.
 			const session = await this.explanationHost.startSession({ workspaceRoot: options.workspaceRoot, readOnly: true, listener });
 			await this.applyModel(session, 'explanation');
 			return session;
-		}, undefined, () => this.effortFor('explanation'));
+		}, undefined, () => this.effortFor('explanation'), options.gate && { instance: options.gate, owner: this.agentId });
 		this.planner = new WalkthroughPlanner(this.explainer, options.log);
+		this.explainer.onCostChange = () => this.reportCost();
 	}
 
 	// ---------------------------------------------------------------- state
+
+	get agentId(): string {
+		return this.options.agentId ?? MAIN_AGENT_ID;
+	}
+
+	private get agentName(): string | undefined {
+		return this.options.agentName?.();
+	}
+
+	/** Whether a saved turn belongs to this agent (turns saved before multi-agent support are the main agent's). */
+	private owns(turn: { readonly agentId?: string }): boolean {
+		return (turn.agentId ?? MAIN_AGENT_ID) === this.agentId;
+	}
+
+	/** This agent's live details, for the agent list and grid. */
+	private activity: AgentActivity = {};
+	private report(update: AgentActivity): void {
+		this.activity = { ...this.activity, ...update };
+		this.options.onActivity?.(update);
+	}
+
+	get currentActivity(): AgentActivity {
+		return this.activity;
+	}
+
+	/** Whether a coding turn is running. */
+	get busy(): boolean {
+		return !!this.turn && !this.turn.codingDone;
+	}
+
+	get lastTask(): string | undefined {
+		return this.turn?.task ?? this.activity.task;
+	}
 
 	private account: string | undefined;
 
@@ -228,6 +406,11 @@ export class ActiveController implements AgentSessionListener {
 		};
 	}
 
+	/** This agent's state, for the agent list. */
+	currentState(): AgentState {
+		return this.agentState();
+	}
+
 	/** The coding session in use (tests). */
 	get sessionIdForTest(): string | undefined {
 		return this.coding?.sessionId;
@@ -241,7 +424,7 @@ export class ActiveController implements AgentSessionListener {
 	/** Resumes `resumeId` when given (and its chat from history), otherwise starts a new session. */
 	private async openCodingSession(resumeId: string | undefined): Promise<AgentSession> {
 		const host = this.codingHost!;
-		const options = { workspaceRoot: this.options.workspaceRoot, readOnly: false, listener: this };
+		const options = { workspaceRoot: this.options.workspaceRoot, readOnly: false, listener: this, mcpServers: await this.options.sessionTools?.() };
 		if (resumeId && host.resumeSession) {
 			try {
 				const session = await host.resumeSession(resumeId, options);
@@ -304,6 +487,7 @@ export class ActiveController implements AgentSessionListener {
 		}
 		try {
 			this.coding = await this.openCodingSession(resumeId);
+			await this.applyApprovalMode();
 			if (!resumeId || this.coding.sessionId !== resumeId) {
 				this.replaceChat([]);
 			}
@@ -369,7 +553,8 @@ export class ActiveController implements AgentSessionListener {
 			const session = await this.explanationHost.startSession({ workspaceRoot: this.options.workspaceRoot, readOnly: true, listener });
 			await this.applyModel(session, 'explanation');
 			return session;
-		}, undefined, () => this.effortFor('explanation'));
+		}, undefined, () => this.effortFor('explanation'), this.options.gate && { instance: this.options.gate, owner: this.agentId });
+		agent.onCostChange = () => this.reportCost();
 		this.sideAgents.push(agent);
 		return agent;
 	}
@@ -416,8 +601,10 @@ export class ActiveController implements AgentSessionListener {
 		for (const agent of this.sideAgents) {
 			agent.reset();
 		}
-		for (const host of hosts) {
-			await host?.dispose().catch(() => undefined);
+		if (!this.options.sharedHosts) {
+			for (const host of hosts) {
+				await host?.dispose().catch(() => undefined);
+			}
 		}
 		await this.connect();
 	}
@@ -468,7 +655,7 @@ export class ActiveController implements AgentSessionListener {
 		}
 		if (!this.agentChanges) {
 			// After a reload: the newest saved turn (not a chapter record) that changed files.
-			const turn = (await this.history.list()).find(summary => summary.outcome !== 'chapter' && summary.files.length);
+			const turn = (await this.history.list()).find(summary => this.owns(summary) && summary.outcome !== 'chapter' && summary.files.length);
 			const captured = turn ? (await this.history.get(turn.turnId))?.files ?? [] : [];
 			const created = new Set(captured.filter(file => file.baseline === null).map(file => file.path));
 			this.agentChanges = turn?.files.map(file => ({ ...file, ...(created.has(file.path) ? { created: true } : {}) })) ?? [];
@@ -520,7 +707,7 @@ export class ActiveController implements AgentSessionListener {
 			const history = await this.history.list();
 			this.turnCounter = history.reduce((max, turn) => Math.max(max, turn.index), 0);
 			// Remember what earlier agent turns wrote, oldest first so the latest content wins.
-			for (const summary of [...history].reverse()) {
+			for (const summary of [...history].reverse().filter(summary => this.owns(summary))) {
 				for (const file of (await this.history.get(summary.turnId))?.files ?? []) {
 					this.tracker.noteAgentAuthored(file.path, file.final);
 				}
@@ -532,7 +719,8 @@ export class ActiveController implements AgentSessionListener {
 			}
 			this.codingHost = await this.options.startCodingHost();
 			// Pick up where this folder left off: the last session open here, else the one its latest turn used.
-			this.coding = await this.openCodingSession(this.options.lastSessionId?.() ?? history[0]?.sessionId);
+			this.coding = await this.openCodingSession(this.options.lastSessionId?.() ?? history.find(summary => this.owns(summary))?.sessionId);
+			await this.applyApprovalMode();
 			this.models = (await this.codingHost.listModels?.().catch(() => undefined)) ?? [];
 			if (this.models.length) {
 				this.options.emit({ type: 'models', models: this.models });
@@ -601,9 +789,15 @@ export class ActiveController implements AgentSessionListener {
 			messagesAtLastChapter: 0,
 			toolsAtLastChapter: 0,
 			checkPending: false,
+			subagents: new Map(this.laterSubagents),
+			mergedIn: this.pendingMerges.splice(0),
+			runningHelpers: new Set(),
 		};
+		this.laterSubagents.clear();
 		this.turn = turn;
 		this.backgroundTasks = 0;
+		// Until Muse's first message or tool call, it's thinking (with several agents running this can take a while).
+		this.report({ task: shown.text, activity: agentInitiated ? 'Following up' : 'Thinking…', reasoning: undefined, waitingForApproval: false });
 		if (!agentInitiated) {
 			this.upsertChat({ id: entryId('user'), turnId: turn.id, role: 'user', ...shown, at: Date.now() });
 		}
@@ -613,7 +807,9 @@ export class ActiveController implements AgentSessionListener {
 		this.setStatus('running');
 		if (!agentInitiated) {
 			try {
-				const protocolTurn = await this.coding!.startTurn(task, undefined, this.effortFor('coding'));
+				// Work merged in since the last task: the agent hears about it before its next task.
+				const mergedNote = turn.mergedIn.filter(merge => !merge.conflicts.length).map(merge => `Note: another agent's work (${merge.from}${merge.task ? `: "${merge.task.split('\n')[0].slice(0, 120)}"` : ''}) was merged into this working copy since your last task; files: ${merge.files.join(', ')}.`).join('\n');
+				const protocolTurn = await this.coding!.startTurn(mergedNote ? `${mergedNote}\n\n${task}` : task, mergedNote ? task : undefined, this.effortFor('coding'));
 				turn.protocolTurns.add(protocolTurn);
 			} catch (error) {
 				this.system(`${this.options.provider.name} rejected the task: ${error instanceof Error ? error.message : String(error)}`, turn.id);
@@ -870,6 +1066,8 @@ export class ActiveController implements AgentSessionListener {
 		return {
 			id: `wt-${turn.id}${chapter ? `-c${chapter}` : ''}`,
 			sessionId: this.coding?.sessionId ?? 'unknown',
+			agentId: this.agentId,
+			agentName: this.agentName,
 			turnId: turn.id,
 			turnIndex: turn.index,
 			task: turn.task,
@@ -889,6 +1087,8 @@ export class ActiveController implements AgentSessionListener {
 		await this.history.save({
 			summary: {
 				sessionId: this.coding?.sessionId ?? 'unknown',
+				agentId: this.agentId,
+				agentName: this.agentName,
 				turnId: `${turn.id}-c${walkthrough.chapter}`,
 				index: turn.index,
 				task: turn.task,
@@ -996,6 +1196,7 @@ export class ActiveController implements AgentSessionListener {
 			preferNotes: this.options.preferNotes(),
 			chapter: chapter ? { index: chapter, earlier: turn.chapters.map(entry => ({ title: entry.title, summary: entry.summary })) } : undefined,
 			memory: await this.options.memory?.describe(),
+			agents: this.agentContext(turn, files),
 		};
 	}
 
@@ -1077,6 +1278,15 @@ export class ActiveController implements AgentSessionListener {
 		if (this.turn?.protocolTurns.has(turnId)) {
 			return;
 		}
+		// The agent's follow-up after its helpers finished belongs to the turn that started them.
+		const waiting = this.turn?.waitingForHelpers;
+		if (this.turn && waiting) {
+			clearTimeout(waiting.timer);
+			this.turn.waitingForHelpers = undefined;
+			this.turn.protocolTurns.add(turnId);
+			this.setStatus('running');
+			return;
+		}
 		if (this.turn && !this.turn.codingDone) {
 			this.turn.protocolTurns.add(turnId);
 			return;
@@ -1088,10 +1298,15 @@ export class ActiveController implements AgentSessionListener {
 	onItem(item: AgentItem, completed: boolean): void {
 		const turn = this.turn;
 		const turnId = turn?.id;
+		if (turn && !turn.firstActivityAt && item.kind !== 'userMessage') {
+			turn.firstActivityAt = Date.now();
+			this.options.log(`turn ${turn.index}: first activity after ${((turn.firstActivityAt - turn.startedAt) / 1000).toFixed(1)}s`);
+		}
 		switch (item.kind) {
 			case 'agentMessage': {
 				if (completed && item.text && turn) {
 					turn.agentMessages.set(item.id, item.text);
+					this.report({ activity: oneLine(item.text) });
 					// Progress notes (`commentary`) are checkpoints; the final answer carries no such phase.
 					if (item.phase === 'commentary') {
 						this.checkpoint(turn);
@@ -1106,13 +1321,59 @@ export class ActiveController implements AgentSessionListener {
 				// Exposed reasoning summaries feed the explainer; auto mode never shows a reasoning trace.
 				if (turn && item.reasoningSummary?.length) {
 					turn.reasoning.set(item.id, [...item.reasoningSummary]);
+					this.report({ reasoning: item.reasoningSummary[item.reasoningSummary.length - 1] });
 				}
+				break;
+			}
+			case 'subagent': {
+				const sub = item.subagent;
+				if (!sub) {
+					break;
+				}
+				// Muse's background helpers are all "workflow-agent": call them helpers.
+				const name = sub.role && sub.role !== 'workflow-agent' ? sub.role : 'Helper';
+				const finished = item.status !== 'inProgress' || /resultReady|closed|closing/.test(sub.controlStatus ?? '');
+				const status = sub.failureReason ? `failed: ${sub.failureReason}` : sub.controlStatus ?? item.status;
+				const reported = sub.objective && !/^workflow result handoff/i.test(sub.objective) ? sub.objective : undefined;
+				if (!this.helperObjectives.has(sub.subagentId)) {
+					this.helperObjectives.set(sub.subagentId, reported ?? this.workflowObjectives.shift() ?? sub.objective ?? '');
+				}
+				const objective = reported ?? this.helperObjectives.get(sub.subagentId) ?? '';
+				// Helpers can outlive the turn that started them (Muse runs them in the background): their work then
+				// belongs to this agent's next turn.
+				if (turn && !turn.codingDone) {
+					if (finished) {
+						turn.runningHelpers.delete(sub.subagentId);
+					} else {
+						turn.runningHelpers.add(sub.subagentId);
+					}
+					turn.helpersLastChange = Date.now();
+				}
+				const subagents = turn && !turn.codingDone ? turn.subagents : this.laterSubagents;
+				const known = subagents.get(sub.subagentId) ?? turn?.subagents.get(sub.subagentId);
+				subagents.set(sub.subagentId, { name, objective: objective || known?.objective || '', status, result: sub.resultSummary ?? known?.result, files: known?.files ?? [] });
+				this.upsertAgentEntry(item.id, { role: 'tool', text: `${finished ? 'Subagent finished' : 'Subagent'}: ${name}${objective ? ` — ${oneLine(objective)}` : ''}`, status: finished ? 'completed' : 'inProgress', turnId });
+				this.options.onSubagent?.({ subagentId: sub.subagentId, childSessionId: sub.childSessionId, name, objective, status, result: sub.resultSummary, finished, viaWorkflow: sub.role === 'workflow-agent' || /workflow/.test(sub.agentPath ?? '') });
 				break;
 			}
 			case 'toolCall': {
 				const command = toolCommand(item);
-				const label = describeDebugCall(item.tool ?? '', item.args) ?? item.label ?? (item.tool ? `${item.tool}${command ? ` ${command}` : ''}` : 'Tool');
+				// Muse starts its helpers with a workflow script: say so instead of showing the script.
+				const label = item.tool === 'workflow' ? (item.status === 'inProgress' ? 'Starting a helper' : 'Started a helper')
+					: describeDebugCall(item.tool ?? '', item.args) ?? item.label ?? (item.tool ? `${item.tool}${command ? ` ${command}` : ''}` : 'Tool');
 				this.upsertAgentEntry(item.id, { role: 'tool', text: label, status: item.status === 'inProgress' && item.background ? 'background' : item.status, turnId });
+				if (item.status === 'inProgress') {
+					this.report({ activity: oneLine(label) });
+				}
+				if (item.tool === 'workflow' && turn) {
+					turn.helpersLaunchedAt = Date.now();
+				}
+				// The helpers' real tasks are in the workflow script (`host.agent({ input: "…" })`); Muse only reports a
+				// handoff reference as their objective. Kept in order, for the helpers as they appear.
+				if (item.tool === 'workflow' && completed && !this.parsedWorkflows.has(item.id)) {
+					this.parsedWorkflows.add(item.id);
+					this.workflowObjectives.push(...workflowInputs(item.args));
+				}
 				if (turn) {
 					turn.tools.set(item.id, { id: item.id, tool: item.tool ?? 'tool', label, status: item.status, command, output: item.output?.slice(-4000), background: item.background === true });
 				}
@@ -1195,6 +1456,7 @@ export class ActiveController implements AgentSessionListener {
 	}
 
 	onApproval(approval: AgentApproval): void {
+		this.report({ waitingForApproval: true, activity: `Waiting for you: ${approval.title}` });
 		this.upsertChat({
 			id: `approval-${approval.approvalId}`,
 			turnId: this.turn?.id,
@@ -1210,6 +1472,9 @@ export class ActiveController implements AgentSessionListener {
 		if (entry?.approval) {
 			this.upsertChat({ ...entry, approval: { ...entry.approval, resolved: decision || 'resolved' } });
 		}
+		if (!this.chat.some(candidate => candidate.approval && !candidate.approval.resolved)) {
+			this.report({ waitingForApproval: false });
+		}
 	}
 
 	onTurnCompleted(protocolTurnId: string, terminal: string, error?: string, errorKind?: string): void {
@@ -1223,7 +1488,44 @@ export class ActiveController implements AgentSessionListener {
 		} else if (error) {
 			this.system(`${this.options.provider.name}: ${error}`, turn.id);
 		}
+		if (terminal === 'completed' && this.helpersPending(turn)) {
+			this.waitForHelpers(turn, terminal);
+			return;
+		}
 		void this.finishCoding(turn, terminal);
+	}
+
+	/** Helpers the turn started are still at work (or one was just launched and hasn't shown up yet). */
+	private helpersPending(turn: LogicalTurn): boolean {
+		if (turn.runningHelpers.size) {
+			return true;
+		}
+		const launched = turn.helpersLaunchedAt;
+		return launched !== undefined && !turn.subagents.size && Date.now() - launched < HELPER_APPEAR_MS;
+	}
+
+	/**
+	 * Muse runs helpers in the background: its turn ends while they work, and it checks their work in a follow-up
+	 * turn. The logical turn stays open until then, so their edits are captured and explained with it.
+	 */
+	private waitForHelpers(turn: LogicalTurn, terminal: string): void {
+		const since = turn.waitingForHelpers?.since ?? Date.now();
+		clearTimeout(turn.waitingForHelpers?.timer);
+		this.setStage(turn, 'collecting', `Waiting for ${turn.runningHelpers.size > 1 ? `${turn.runningHelpers.size} helpers` : 'a helper'}`);
+		this.report({ activity: 'Waiting for helpers' });
+		const check = () => {
+			if (this.turn !== turn || turn.codingDone || !turn.waitingForHelpers) {
+				return;
+			}
+			const settled = !this.helpersPending(turn) && Date.now() - (turn.helpersLastChange ?? since) > HELPER_FOLLOW_UP_MS;
+			if (settled || Date.now() - since > HELPER_MAX_WAIT_MS) {
+				turn.waitingForHelpers = undefined;
+				void this.finishCoding(turn, terminal);
+				return;
+			}
+			turn.waitingForHelpers = { terminal, since, timer: setTimeout(check, 2000) };
+		};
+		turn.waitingForHelpers = { terminal, since, timer: setTimeout(check, 2000) };
 	}
 
 	// ---------------------------------------------------------------- end of turn
@@ -1234,7 +1536,7 @@ export class ActiveController implements AgentSessionListener {
 	 */
 	private maybeSuggestDebugger(turn: LogicalTurn, protocolTurnId: string): void {
 		const tools = this.options.debugTools;
-		if (turn.debugSuggested || turn.codingDone || this.turn !== turn || !tools?.available() || !tools.suggestWhenStuck() || !this.coding?.steer) {
+		if (turn.debugSuggested || turn.codingDone || this.turn !== turn || !tools?.available() || this.codingHost?.sessionTools === false || !tools.suggestWhenStuck() || !this.coding?.steer) {
 			return;
 		}
 		const reason = stuckReason([...turn.tools.values()], this.tracker.currentNetChanges().filter(change => !change.userOnly));
@@ -1269,6 +1571,7 @@ export class ActiveController implements AgentSessionListener {
 			this.options.emit({ type: 'turnChanges', turnId: turn.id, files: agentFiles });
 		}
 		this.setStatus('idle');
+		this.report({ activity: terminal === 'completed' ? 'Done' : `Turn ${terminal}`, waitingForApproval: false });
 		this.tellDiagram(turn, changes, true);
 
 		const next = this.queuedTasks.shift();
@@ -1333,6 +1636,8 @@ export class ActiveController implements AgentSessionListener {
 
 		const summary: TurnSummary = {
 			sessionId: this.coding?.sessionId ?? 'unknown',
+			agentId: this.agentId,
+			agentName: this.agentName,
 			turnId: turn.id,
 			index: turn.index,
 			task: turn.task,
@@ -1487,8 +1792,44 @@ export class ActiveController implements AgentSessionListener {
 	 * pending checks, anything waiting on the developer), condensed by the explanation model. Falls
 	 * back to a plain summary when the model can't answer, so there's always something to show.
 	 */
+	/** What a briefing about this agent would be written from (for the all-agents briefing). */
+	async briefingMaterial(since: number): Promise<{ turns: BriefingTurn[]; running?: { task: string; progress: string[] }; waiting: string[] }> {
+		const summaries = (await this.history.list()).filter(turn => this.owns(turn) && (turn.endedAt ?? turn.startedAt) >= since).reverse();
+		const turns: BriefingTurn[] = [];
+		for (const summary of summaries) {
+			turns.push(await this.briefingTurn(summary));
+		}
+		const turn = this.turn && !this.turn.codingDone ? this.turn : undefined;
+		return {
+			turns,
+			running: turn ? { task: turn.task, progress: [...turn.agentMessages.values()].slice(-3) } : undefined,
+			waiting: this.chat.filter(entry => entry.approval && !entry.approval.resolved).map(entry => `${entry.approval!.title}: ${entry.approval!.detail}`.slice(0, 200)),
+		};
+	}
+
+	private async briefingTurn(summary: TurnSummary): Promise<BriefingTurn> {
+		const detail = await this.history.get(summary.turnId);
+		const agentMessages = detail?.chat.filter(entry => entry.role === 'agent' && entry.phase !== 'commentary' && entry.text) ?? [];
+		return {
+			task: summary.task,
+			outcome: summary.outcome,
+			explanation: summary.explanationNote,
+			summary: detail?.walkthrough?.summary,
+			finalMessage: agentMessages[agentMessages.length - 1]?.text,
+			notes: detail?.chat.filter(entry => entry.role === 'explainer' && entry.id.startsWith('note')).map(entry => entry.text) ?? [],
+			failedCommands: (detail?.tools ?? []).filter(tool => tool.command && /fail|error/i.test(tool.status)).map(tool => tool.command!),
+			pendingChecks: (detail?.walkthrough?.pending ?? []).filter(check => check.state === 'running').map(check => check.label),
+			files: summary.files,
+		};
+	}
+
+	/** One prompt to this agent's explainer (e.g. the all-agents briefing). */
+	askExplainer(prompt: string): Promise<string> {
+		return this.explainer.ask(prompt);
+	}
+
 	async brief(request: BriefingRequest): Promise<Briefing> {
-		const summaries = (await this.history.list()).filter(turn => (turn.endedAt ?? turn.startedAt) >= request.since).reverse();
+		const summaries = (await this.history.list()).filter(turn => this.owns(turn) && (turn.endedAt ?? turn.startedAt) >= request.since).reverse();
 		const turns: BriefingTurn[] = [];
 		for (const summary of summaries) {
 			const detail = await this.history.get(summary.turnId);
@@ -1521,7 +1862,7 @@ export class ActiveController implements AgentSessionListener {
 			return fallback;
 		}
 		try {
-			const reply = await this.explainer.ask(buildBriefingPrompt({ profile: this.options.profile(), minutesAway, turns, running, waiting }));
+			const reply = await this.explainer.ask(buildBriefingPrompt({ profile: this.options.profile(), minutesAway, turns, running, waiting, short: request.short }));
 			const parsed = extractJsonObject(reply) as Partial<Record<keyof Briefing, unknown>> | undefined;
 			const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && !!item.trim()) : [];
 			if (!parsed || typeof parsed.headline !== 'string') {
@@ -1556,7 +1897,167 @@ export class ActiveController implements AgentSessionListener {
 	}
 
 	async dispose(): Promise<void> {
-		await this.codingHost?.dispose();
-		await this.explanationHost?.dispose();
+		if (!this.options.sharedHosts) {
+			await this.codingHost?.dispose();
+			await this.explanationHost?.dispose();
+		}
+	}
+
+	// ---------------------------------------------------------------- multi-agent
+
+	/** Workflow scripts already read, and the helper tasks found in them not yet matched to a helper. */
+	private readonly parsedWorkflows = new Set<string>();
+	private readonly workflowObjectives: string[] = [];
+	/** Each helper's task, once matched (by subagent id). */
+	private readonly helperObjectives = new Map<string, string>();
+
+	/** Helpers still at work (or reporting) after their turn ended: they go with the next turn. */
+	private readonly laterSubagents = new Map<string, SubagentWork>();
+
+	/** Other agents' work merged into this folder, waiting for the next turn's context. */
+	private readonly pendingMerges: MergedWork[] = [];
+
+	/**
+	 * Another agent's work is merged into this agent's folder (dragging its box onto this one), as if it had been
+	 * this agent's subagent. `apply` writes the files. Clean merges are only noted (the agent hears about them with
+	 * its next task); conflicts start a turn for this agent to resolve them. The merged work isn't explained again.
+	 */
+	async receiveMerge(from: { name: string; task?: string }, apply: () => Promise<MergeOutcome>): Promise<MergeOutcome> {
+		if (this.busy) {
+			throw new Error(`${this.agentName ?? 'This agent'} is still working; merge when it's finished.`);
+		}
+		const outcome = await apply();
+		// Merged content is the starting point of what this agent does next, not its own change.
+		await this.tracker.refresh();
+		for (const file of outcome.files) {
+			this.tracker.noteAgentAuthored(file, await this.tracker.files.read(file) ?? null);
+		}
+		const merged: MergedWork = { from: from.name, task: from.task, files: outcome.files, conflicts: outcome.conflicts };
+		this.system(outcome.files.length
+			? `Merged in ${from.name}'s work (${outcome.files.length} file${outcome.files.length === 1 ? '' : 's'}${outcome.conflicts.length ? `; conflicts in ${outcome.conflicts.join(', ')}` : ''}). Already explained, so not explained again.`
+			: `${from.name} had nothing to merge.`);
+		if (outcome.conflicts.length) {
+			const task = [
+				`Another agent (${from.name}) worked in parallel${from.task ? ` on: "${from.task.split('\n')[0].slice(0, 200)}"` : ''}, and its work has just been merged into this working copy.`,
+				`These files have merge conflicts to resolve (look for <<<<<<< / ======= / >>>>>>> markers, or a "${'.from-'}…" copy next to a file that one side deleted): ${outcome.conflicts.join(', ')}.`,
+				`Resolve them keeping the intent of both changes, remove any leftover copies, and check that the project still builds and its tests pass. Merged files without conflicts: ${outcome.files.filter(file => !outcome.conflicts.includes(file)).join(', ') || '(none)'}.`,
+			].join('\n');
+			this.pendingMerges.push(merged);
+			await this.beginLogicalTurn(task, false, { text: `Resolve the merge with ${from.name}` });
+		} else if (outcome.files.length) {
+			this.pendingMerges.push(merged);
+		}
+		return outcome;
+	}
+
+	/** Talks to one of this agent's subagents directly (the developer messaging it from its own chat). */
+	async messageSubagent(subagentId: string, text: string, followUp: boolean): Promise<void> {
+		if (!this.coding?.messageSubagent) {
+			throw new Error(`${this.options.provider.name} can't message its subagents here.`);
+		}
+		await this.coding.messageSubagent(subagentId, text, followUp);
+	}
+
+	/** Passes the developer's words about a helper to this agent: into its running turn, else as a new task. */
+	async relayToAgent(text: string): Promise<void> {
+		const turn = this.turn;
+		const protocolTurn = turn && !turn.codingDone ? [...turn.protocolTurns].pop() : undefined;
+		if (protocolTurn && this.coding?.steer) {
+			try {
+				await this.coding.steer(protocolTurn, text);
+				return;
+			} catch (error) {
+				// Muse's own turn may already be over while Active waits for its helpers: queue it as the next task.
+				this.options.log(`couldn't add that to the running turn (${error instanceof Error ? error.message : String(error)}); queued as the next task`);
+			}
+		}
+		await this.submitTask(text);
+	}
+
+	async stopSubagent(subagentId: string): Promise<void> {
+		await this.coding?.stopSubagent?.(subagentId);
+	}
+
+	/** Applies the approval mode to the coding session (on open, and when the developer changes it). */
+	async applyApprovalMode(): Promise<void> {
+		const mode = this.options.approvalMode?.() ?? 'auto';
+		if (!this.coding?.setApprovalMode) {
+			return;
+		}
+		try {
+			await this.coding.setApprovalMode(MUSE_APPROVAL_MODES[mode]);
+			this.options.log(`approvals: ${mode}`);
+		} catch (error) {
+			this.options.log(`couldn't set the approval mode to ${mode}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/** Stops the running turn, if any. */
+	async interrupt(): Promise<void> {
+		const turn = this.turn;
+		if (!turn || turn.codingDone || !this.coding?.interruptTurn) {
+			return;
+		}
+		for (const protocolTurn of turn.protocolTurns) {
+			await this.coding.interruptTurn(protocolTurn).catch(error => this.options.log(`couldn't interrupt: ${error instanceof Error ? error.message : String(error)}`));
+		}
+	}
+
+	/** The coding session, for watching its subagents' sessions. */
+	get codingHostForWatching(): AgentHost | undefined {
+		return this.codingHost;
+	}
+
+	/** Files a subagent's own tool calls touched (seen in its session), for attributing its part of the work. */
+	/** A file just before and after one of a subagent's edits (the first `before` and latest `after` are kept). */
+	private readonly subagentEdits = new Map<string, Map<string, { before: string | null | undefined; after: string | null }>>();
+
+	noteSubagentEdit(subagentId: string, file: string, before: string | null | undefined, after: string | null): void {
+		const edits = this.subagentEdits.get(subagentId) ?? new Map();
+		const known = edits.get(file);
+		edits.set(file, { before: known ? known.before : before, after });
+		this.subagentEdits.set(subagentId, edits);
+	}
+
+	noteSubagentFiles(subagentId: string, files: readonly string[]): void {
+		for (const subagents of [this.turn?.subagents, this.laterSubagents]) {
+			const work = subagents?.get(subagentId);
+			if (subagents && work && files.length) {
+				subagents.set(subagentId, { ...work, files: [...new Set([...work.files, ...files])] });
+			}
+		}
+	}
+
+	private agentContext(turn: LogicalTurn, files: Readonly<Record<string, CapturedFile>> = {}): AgentContext | undefined {
+		const multi = this.options.multiAgent?.() ?? false;
+		if (!multi && !turn.subagents.size && !turn.mergedIn.length) {
+			return undefined;
+		}
+		return {
+			name: this.agentName ?? 'the agent',
+			subagents: [...turn.subagents.entries()].map(([subagentId, work]) => ({ ...work, lines: subagentLines(this.subagentEdits.get(subagentId), files) })),
+			mergedIn: turn.mergedIn,
+			overlaps: this.options.overlaps?.() ?? [],
+		};
+	}
+
+	// AgentSessionListener extras
+	onTodo(items: readonly AgentTodoItem[]): void {
+		this.report({ todo: items.map(item => ({ text: item.text, status: item.status === 'completed' ? 'done' : item.status === 'inProgress' ? 'inProgress' : 'pending' })) });
+	}
+
+	private codingCost = 0;
+
+	onUsage(usage: AgentUsage): void {
+		if (usage.costUsd !== undefined) {
+			this.codingCost = usage.costUsd;
+			this.reportCost();
+		}
+	}
+
+	/** This agent's whole spend: its coding session plus its explainer, map and trace sessions. */
+	private reportCost(): void {
+		const explanations = this.explainer.cost + this.sideAgents.reduce((sum, agent) => sum + agent.cost, 0);
+		this.report({ cost: this.codingCost + explanations, costBreakdown: { coding: this.codingCost, explanations } });
 	}
 }

@@ -21,7 +21,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewDescriptorService } from '../../../common/views.js';
 import type { HistoryDetail, TurnSummary } from '../common/activeProtocol.js';
-import { IActiveService } from './activeService.js';
+import { agentLabel, IActiveService } from './activeService.js';
 
 const $ = dom.$;
 
@@ -110,6 +110,12 @@ export class ActiveHistoryView extends ViewPane {
 	private renderTurn(turn: TurnSummary): void {
 		const item = dom.append(this.list, $('.turn'));
 		const head = dom.append(item, $('.turn-head'));
+		const owner = agentLabel(this.activeService, turn.agentId, turn.agentName);
+		if (owner) {
+			const chip = dom.append(head, $('span.active-agent-chip'));
+			chip.style.setProperty('--agent-color', `var(--active-agent-${owner.colorIndex}, var(--vscode-charts-blue))`);
+			chip.textContent = owner.name;
+		}
 		dom.append(head, $('span.index')).textContent = localize('turnIndex', "Turn {0}", turn.index);
 		this.timeLabel(dom.append(head, $('span.when')), () => fromNow(turn.startedAt, true));
 		dom.append(item, $('.task')).textContent = turn.task;

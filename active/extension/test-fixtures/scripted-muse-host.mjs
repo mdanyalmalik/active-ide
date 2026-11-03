@@ -42,6 +42,8 @@ if (process.env.ACTIVE_SCRIPTED_MCP_FILE && process.argv.some(arg => arg.startsW
 let cursor = 0;
 const nextCursor = () => `v1:scripted:${++cursor}`;
 const sessions = new Map();
+/** Subagents by id: their session, their parent's, and their item (so messages can reach them). */
+const subagents = new Map();
 const pendingApprovals = new Map();
 
 function send(message) {
@@ -353,6 +355,34 @@ async function runCoding(session, turnId, text) {
 			case 'wait':
 				await sleep(step.ms);
 				break;
+			case 'todo':
+				notify('session/todoListChanged', { sessionId: session.id, items: step.items, revision: index, sourceTool: 'todo_write', sourceRange: { start: 0, end: 0 } });
+				break;
+			case 'subagent': {
+				// A helper with its own session: it works (messages, edits) and reports back, as Muse's subagents do.
+				const child = { id: randomUUID(), workspaceRoot: root, readOnly: false, tasks: new Map(), cancelled: new Set() };
+				sessions.set(child.id, child);
+				const subagentId = randomUUID();
+				const spawned = item(session, turnId, 'subagent', { subagentId, childSessionId: child.id, objective: step.objective, role: step.role ?? 'helper', controlStatus: 'running', depth: 1 });
+				subagents.set(subagentId, { child, parent: session.id, item: spawned });
+				notify('item/started', { sessionId: session.id, item: spawned });
+				await sleep(400);
+				const childTurn = randomUUID();
+				for (const message of step.messages ?? []) {
+					await streamMessage(child, childTurn, message, 'commentary');
+					await sleep(300);
+				}
+				for (const edit of step.edits ?? []) {
+					const call = item(child, childTurn, 'toolCall', { tool: 'edit_file', args: JSON.stringify({ path: edit.path }), displayLabel: { active: `Editing ${edit.path}`, done: `Edited ${edit.path}`, neutral: `Edit ${edit.path}` } });
+					notify('item/started', { sessionId: child.id, item: call });
+					await sleep(250);
+					mkdirSync(path.dirname(path.join(root, edit.path)), { recursive: true });
+					writeFileSync(path.join(root, edit.path), edit.content);
+					notify('item/completed', { sessionId: child.id, item: { ...call, status: 'completed', revision: 2, patchSummary: { added: edit.content.split('\n').length, removed: 0, files: 1 } } });
+				}
+				notify('item/completed', { sessionId: session.id, item: { ...spawned, status: 'completed', controlStatus: 'resultReady', revision: 2, result: { summary: step.result ?? 'Done.', artifactRefs: [], evidenceRefs: [] } } });
+				break;
+			}
 		}
 	}
 	notify('turn/completed', { sessionId: session.id, turnId, terminal: 'completed', durationMs: 1000, sourceRange: { start: 0, end: 0 } });
@@ -376,7 +406,7 @@ input.on('line', line => {
 			reply({
 				serverInfo: { name: 'scripted-muse-host (test double)', version: '0.0.0' },
 				userAgent: 'scripted-muse-host/0.0.0', museHome: '/tmp/scripted-muse', platformFamily: 'unix', platformOs: process.platform,
-				schema: { version: 1, fingerprint: 'sha256:scripted' }, grantedCapabilities: [], experimentalApi: false, sessionDurability: 'ephemeral',
+				schema: { version: 1, fingerprint: 'sha256:scripted' }, grantedCapabilities: (params.capabilities?.requestedCapabilities ?? []).filter(name => name === 'sessionMcp'), experimentalApi: false, sessionDurability: 'ephemeral',
 			});
 			break;
 		case 'initialized':
@@ -390,6 +420,10 @@ input.on('line', line => {
 			}
 			const session = { id: randomUUID(), workspaceRoot: params.workspaceRoot, readOnly, tasks: new Map(), cancelled: new Set() };
 			sessions.set(session.id, session);
+			// Tests of the coding agent's debug tools: record the tool server Active gave this session.
+			if (process.env.ACTIVE_SCRIPTED_MCP_FILE && params.config?.mcpServers) {
+				writeFileSync(process.env.ACTIVE_SCRIPTED_MCP_FILE, JSON.stringify({ sessions: { ...(existsSync(process.env.ACTIVE_SCRIPTED_MCP_FILE) ? JSON.parse(readFileSync(process.env.ACTIVE_SCRIPTED_MCP_FILE, 'utf8')).sessions : {}), [params.workspaceRoot]: params.config.mcpServers } }));
+			}
 			reply({ session: { sessionId: session.id, status: 'idle', workspaceRoot: params.workspaceRoot }, viewCursor: nextCursor() });
 			break;
 		}
@@ -441,6 +475,38 @@ input.on('line', line => {
 		case 'userInput/cancel':
 			reply({ commandId: params.commandId, status: 'accepted' });
 			break;
+		case 'subagent/sendMessage':
+		case 'subagent/followupTask':
+		case 'subagent/reopen':
+		case 'subagent/interrupt': {
+			reply({ commandId: params.commandId, status: 'accepted' });
+			const helper = subagents.get(params.subagentId);
+			if (helper && params.body) {
+				// The helper answers in its own session, and (for a follow-up) reports a fresh result to its parent.
+				setTimeout(async () => {
+					const childTurn = randomUUID();
+					await streamMessage(helper.child, childTurn, `On it: ${params.body}`, 'commentary');
+					await sleep(800);
+					await streamMessage(helper.child, childTurn, `Done: ${params.body}`, 'finalAnswer');
+					if (method === 'subagent/followupTask') {
+						notify('item/completed', { sessionId: helper.parent, item: { ...helper.item, status: 'completed', controlStatus: 'resultReady', revision: helper.item.revision + 2, result: { summary: `Follow-up done: ${params.body}`, artifactRefs: [], evidenceRefs: [] } } });
+					}
+				}, 300);
+			}
+			break;
+		}
+		case 'session/setApprovalMode':
+			reply({ commandId: params.commandId, status: 'accepted', applyOutcome: 'completed', effectiveMode: { mode: params.mode, source: 'approvalReconfigure' } });
+			break;
+		case 'view/subscribe':
+		case 'view/unsubscribe':
+			reply({ viewCursor: nextCursor() });
+			break;
+		case 'session/read': {
+			const session = sessions.get(params.sessionId);
+			reply({ session: { sessionId: params.sessionId, status: 'idle', workspaceRoot: session?.workspaceRoot }, history: { mode: 'none', items: [] }, pendingRequests: [], viewCursor: nextCursor() });
+			break;
+		}
 		default:
 			if (id !== undefined) {
 				send({ id, error: { code: -32601, message: `method not found: ${method}`, data: { kind: 'methodNotFound', retryable: false } } });

@@ -6,6 +6,7 @@
 import './media/active.css';
 import './activeSettings.js';
 import './selectionAsk.js';
+import './worktreeFollow.js';
 import * as dom from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';

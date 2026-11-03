@@ -1,0 +1,61 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Active contributors. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Whose tree the Explorer shows: a chip after its title (worktreeFollow.ts). */
+.active-worktree-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	margin-left: 6px;
+	padding: 0 6px;
+	border-radius: 9px;
+	line-height: 18px;
+	font-size: 11px;
+	text-transform: none;
+	font-weight: normal;
+	white-space: nowrap;
+	overflow: hidden;
+	color: var(--vscode-descriptionForeground);
+	background: color-mix(in srgb, var(--active-worktree-color) 14%, transparent);
+	cursor: pointer;
+}
+
+.active-worktree-chip:hover {
+	color: var(--vscode-foreground);
+}
+
+.active-worktree-chip .dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--active-worktree-color);
+}
+
+.active-worktree-chip .branch,
+.active-worktree-chip .lock,
+.active-worktree-chip .name {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.active-worktree-chip .codicon {
+	font-size: 12px;
+}
+
+/* `--active-agent-N` is the shared agent palette when it's defined; the registered theme colours otherwise. */
+.active-worktree-chip.agent-color-0 { --active-worktree-color: var(--active-agent-0, var(--vscode-activeWorktree-agent0)); }
+.active-worktree-chip.agent-color-1 { --active-worktree-color: var(--active-agent-1, var(--vscode-activeWorktree-agent1)); }
+.active-worktree-chip.agent-color-2 { --active-worktree-color: var(--active-agent-2, var(--vscode-activeWorktree-agent2)); }
+.active-worktree-chip.agent-color-3 { --active-worktree-color: var(--active-agent-3, var(--vscode-activeWorktree-agent3)); }
+.active-worktree-chip.agent-color-4 { --active-worktree-color: var(--active-agent-4, var(--vscode-activeWorktree-agent4)); }
+.active-worktree-chip.agent-color-5 { --active-worktree-color: var(--active-agent-5, var(--vscode-activeWorktree-agent5)); }
+.active-worktree-chip.agent-color-6 { --active-worktree-color: var(--active-agent-6, var(--vscode-activeWorktree-agent6)); }
+.active-worktree-chip.agent-color-7 { --active-worktree-color: var(--active-agent-7, var(--vscode-activeWorktree-agent7)); }

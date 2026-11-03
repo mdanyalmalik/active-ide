@@ -144,6 +144,364 @@ patch(
     "if (!this.suppressDebugView && (focusedThreadDoesNotExist",
 )
 
+# 8. The workbench follows the highlighted agent's worktree (Active's worktreeFollow.ts) without changing the workspace
+#    folders, which would restart the extension host and the agents with it. A small override in platform/workspace
+#    re-roots the Explorer, Search, Quick Open and new terminals, labels worktree paths like workspace paths, and makes
+#    subagents' worktrees read-only. With no override set (the agent in the developer's folder), all of it is stock.
+def write(path, content):
+    file = root / path
+    if not file.exists() or file.read_text() != content:
+        file.write_text(content)
+        print(f"wrote {path}")
+
+
+write("src/vs/platform/workspace/common/workspaceRootOverride.ts", '''/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Active contributors. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+// Active: written by scripts/apply_patches.py (edit it there).
+
+import { Emitter, Event } from '../../../base/common/event.js';
+import { IMarkdownString } from '../../../base/common/htmlContent.js';
+import { basename, extUriBiasedIgnorePathCase } from '../../../base/common/resources.js';
+import { URI } from '../../../base/common/uri.js';
+import { IWorkspaceFolder, WorkspaceFolder } from './workspace.js';
+
+/**
+ * Shows another folder (an agent's git worktree) in place of a workspace folder in the Explorer, Search, Quick Open
+ * and new terminals. The workspace's real folders don't change: changing them restarts the extension host, and with it
+ * the agents. Extensions, settings and storage keep seeing the real folders.
+ */
+export interface IWorkspaceRootOverride {
+	/** The workspace folder that is shown as `root`. */
+	readonly folder: URI;
+	readonly root: URI;
+	/** The Explorer's title instead of the workspace name. */
+	readonly label: string;
+}
+
+/** A folder outside the workspace whose files are labelled like a workspace folder's (paths relative to it). */
+export interface IOverrideRoot {
+	readonly root: URI;
+	readonly name: string;
+	/** Set when its files can't be changed here: why. */
+	readonly readonly?: IMarkdownString;
+}
+
+export class WorkspaceRootOverrides {
+	private _current: IWorkspaceRootOverride | undefined;
+	/** The last switch, so tree view state (expanded folders) carries over to the new root. */
+	private _moved: { readonly from: string; readonly to: string } | undefined;
+	private _roots: readonly IOverrideRoot[] = [];
+
+	private readonly _onDidChange = new Emitter<void>();
+	/** The override changed (the Explorer, Search and the rest re-root). */
+	readonly onDidChange: Event<void> = this._onDidChange.event;
+	private readonly _onDidChangeRoots = new Emitter<void>();
+	/** The extra roots (or which are read-only) changed. */
+	readonly onDidChangeRoots: Event<void> = this._onDidChangeRoots.event;
+
+	get current(): IWorkspaceRootOverride | undefined {
+		return this._current;
+	}
+
+	get roots(): readonly IOverrideRoot[] {
+		return this._roots;
+	}
+
+	set(override: IWorkspaceRootOverride | undefined): void {
+		const before = this._current;
+		if (before === override || (before && override && before.label === override.label && extUriBiasedIgnorePathCase.isEqual(before.folder, override.folder) && extUriBiasedIgnorePathCase.isEqual(before.root, override.root))) {
+			return;
+		}
+		const from = before?.root ?? override?.folder;
+		const to = override?.root ?? before?.folder;
+		if (from && to && !extUriBiasedIgnorePathCase.isEqual(from, to)) {
+			this._moved = { from: from.toString(), to: to.toString() };
+		}
+		this._current = override;
+		this._onDidChange.fire();
+	}
+
+	setRoots(roots: readonly IOverrideRoot[]): void {
+		const same = roots.length === this._roots.length && roots.every((root, index) => {
+			const other = this._roots[index];
+			return root.name === other.name && root.readonly?.value === other.readonly?.value && extUriBiasedIgnorePathCase.isEqual(root.root, other.root);
+		});
+		if (!same) {
+			this._roots = roots;
+			this._onDidChangeRoots.fire();
+		}
+	}
+
+	/** The folder to show for workspace folder `uri`. */
+	map<T extends URI | undefined>(uri: T): T {
+		const current = this._current;
+		return (uri && current && extUriBiasedIgnorePathCase.isEqual(uri, current.folder) ? current.root : uri) as T;
+	}
+
+	mapWorkspaceFolders(folders: readonly IWorkspaceFolder[]): IWorkspaceFolder[] {
+		const current = this._current;
+		return folders.map(folder => current && extUriBiasedIgnorePathCase.isEqual(folder.uri, current.folder)
+			? new WorkspaceFolder({ uri: current.root, name: basename(current.root) || folder.name, index: folder.index })
+			: folder);
+	}
+
+	/** Whether the shown folders contain `uri` (undefined: there's no override, ask the workspace). */
+	contains(uri: URI): boolean | undefined {
+		const current = this._current;
+		if (!current) {
+			return undefined;
+		}
+		if (extUriBiasedIgnorePathCase.isEqualOrParent(uri, current.root)) {
+			return true;
+		}
+		return extUriBiasedIgnorePathCase.isEqualOrParent(uri, current.folder) ? false : undefined;
+	}
+
+	/** True for the folder shown in place of a workspace folder. */
+	isOverrideRoot(uri: URI): boolean {
+		return !!this._current && extUriBiasedIgnorePathCase.isEqual(uri, this._current.root);
+	}
+
+	/** The extra root containing `resource` as a workspace folder, so labels show paths relative to it. */
+	folderOf(resource: URI): IWorkspaceFolder | null {
+		const root = this.rootOf(resource);
+		return root ? new WorkspaceFolder({ uri: root.root, name: root.name, index: 0 }) : null;
+	}
+
+	readonlyMessage(resource: URI): IMarkdownString | undefined {
+		return this.rootOf(resource)?.readonly;
+	}
+
+	/** Moves ids of tree items (which contain resource strings) from the previous root to the current one. */
+	remapId(id: string): string {
+		return this._moved ? remapResourceString(id, this._moved.from, this._moved.to) : id;
+	}
+
+	remapViewState<T extends { readonly focus?: string[]; readonly selection?: string[]; readonly expanded?: string[] }>(state: T): T {
+		if (!this._moved) {
+			return state;
+		}
+		const remap = (ids: string[] | undefined) => ids?.map(id => this.remapId(id));
+		return { ...state, focus: remap(state.focus), selection: remap(state.selection), expanded: remap(state.expanded) };
+	}
+
+	private rootOf(resource: URI): IOverrideRoot | undefined {
+		let best: IOverrideRoot | undefined;
+		for (const root of this._roots) {
+			if (extUriBiasedIgnorePathCase.isEqualOrParent(resource, root.root) && (!best || root.root.path.length > best.root.path.length)) {
+				best = root;
+			}
+		}
+		return best;
+	}
+
+	dispose(): void {
+		this._onDidChange.dispose();
+		this._onDidChangeRoots.dispose();
+	}
+}
+
+/** Replaces `from` with `to` wherever it appears as a whole resource or a parent of one (not a mere prefix of a name). */
+export function remapResourceString(value: string, from: string, to: string): string {
+	if (!from || from === to) {
+		return value;
+	}
+	let result = '';
+	let index = 0;
+	for (; ;) {
+		const found = value.indexOf(from, index);
+		if (found < 0) {
+			return result + value.slice(index);
+		}
+		const next = value.charAt(found + from.length);
+		const whole = next === '' || next === '/' || next === ':';
+		result += value.slice(index, found) + (whole ? to : from);
+		index = found + from.length;
+	}
+}
+
+/** The one override for this window (the workbench has a single set of workspace folders). */
+export const workspaceRootOverride = new WorkspaceRootOverrides();
+''')
+
+
+def import_override(path, anchor, depth):
+    up = "../" * depth
+    patch(path, anchor, f"{anchor}\nimport {{ workspaceRootOverride }} from '{up}platform/workspace/common/workspaceRootOverride.js';", "platform/workspace/common/workspaceRootOverride.js';")
+
+
+# Explorer: its roots, finding items under the worktree, its title, its filter (files.exclude, .gitignore), and
+# keeping the same folders open when it switches between trees.
+explorer_model = "src/vs/workbench/contrib/files/common/explorerModel.ts"
+import_override(explorer_model, "import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    explorer_model,
+    "\t\tconst setRoots = () => this._roots = this.contextService.getWorkspace().folders\n",
+    "\t\tconst setRoots = () => this._roots = workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders) // Active: an agent's worktree\n",
+    "workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders) // Active: an agent's worktree",
+)
+patch(
+    explorer_model,
+    "\t\tthis._listener = this.contextService.onDidChangeWorkspaceFolders(() => {\n",
+    "\t\tthis._listener = Event.any<unknown>(this.contextService.onDidChangeWorkspaceFolders, workspaceRootOverride.onDidChange)(() => {\n",
+    "Event.any<unknown>(this.contextService.onDidChangeWorkspaceFolders, workspaceRootOverride.onDidChange)",
+)
+patch(
+    explorer_model,
+    "\tfindClosest(resource: URI): ExplorerItem | null {\n\t\tconst folder = this.contextService.getWorkspaceFolder(resource);\n",
+    "\tfindClosest(resource: URI): ExplorerItem | null {\n\t\t// Active: the worktree shown in place of a workspace folder isn't one itself.\n\t\tconst overrideRoot = this.roots.find(r => workspaceRootOverride.isOverrideRoot(r.resource) && this.uriIdentityService.extUri.isEqualOrParent(resource, r.resource));\n\t\tif (overrideRoot) {\n\t\t\treturn overrideRoot.find(resource);\n\t\t}\n\t\tconst folder = this.contextService.getWorkspaceFolder(resource);\n",
+    "const overrideRoot = this.roots.find(r => workspaceRootOverride.isOverrideRoot(r.resource)",
+)
+explorer_view = "src/vs/workbench/contrib/files/browser/views/explorerView.ts"
+import_override(explorer_view, "import { isUntitledWorkspace, IWorkspace, IWorkspaceContextService, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';", 5)
+patch(
+    explorer_view,
+    "\tget name(): string {\n\t\treturn this.labelService.getWorkspaceLabel(this.contextService.getWorkspace());\n",
+    "\tget name(): string {\n\t\treturn workspaceRootOverride.current?.label ?? this.labelService.getWorkspaceLabel(this.contextService.getWorkspace()); // Active: whose tree it is\n",
+    "workspaceRootOverride.current?.label ?? this.labelService.getWorkspaceLabel",
+)
+patch(
+    explorer_view,
+    "\t\tthis._register(this.labelService.onDidChangeFormatters(setHeader));\n",
+    "\t\tthis._register(this.labelService.onDidChangeFormatters(setHeader));\n\t\tthis._register(workspaceRootOverride.onDidChange(setHeader)); // Active\n",
+    "this._register(workspaceRootOverride.onDidChange(setHeader));",
+)
+patch(
+    explorer_view,
+    "\t\t\tviewState = this.tree.getViewState();\n",
+    "\t\t\tviewState = workspaceRootOverride.remapViewState(this.tree.getViewState()); // Active: the same folders stay open in the other tree\n",
+    "workspaceRootOverride.remapViewState(this.tree.getViewState())",
+)
+explorer_viewer = "src/vs/workbench/contrib/files/browser/views/explorerViewer.ts"
+import_override(explorer_viewer, "import { isTemporaryWorkspace, IWorkspaceContextService, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';", 5)
+patch(
+    explorer_viewer,
+    "\t\tthis.toDispose.push(this.contextService.onDidChangeWorkspaceFolders(() => this.updateConfiguration()));\n",
+    "\t\tthis.toDispose.push(this.contextService.onDidChangeWorkspaceFolders(() => this.updateConfiguration()));\n\t\tthis.toDispose.push(workspaceRootOverride.onDidChange(() => this.updateConfiguration())); // Active\n",
+    "this.toDispose.push(workspaceRootOverride.onDidChange(() => this.updateConfiguration()));",
+)
+patch(
+    explorer_viewer,
+    "\t\tthis.contextService.getWorkspace().folders.forEach(folder => {\n",
+    "\t\tworkspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders).forEach(folder => { // Active\n",
+    "workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders).forEach(folder => { // Active",
+)
+file_commands = "src/vs/workbench/contrib/files/browser/fileCommands.ts"
+import_override(file_commands, "import { IWorkspaceContextService, UNTITLED_WORKSPACE_NAME } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    file_commands,
+    "\t\tif (uri && contextService.isInsideWorkspace(uri)) {\n\t\t\tconst explorerView",
+    "\t\tif (uri && (workspaceRootOverride.contains(uri) ?? contextService.isInsideWorkspace(uri))) { // Active: Reveal in Explorer in a worktree\n\t\t\tconst explorerView",
+    "(workspaceRootOverride.contains(uri) ?? contextService.isInsideWorkspace(uri))",
+)
+
+# Search and Quick Open search the worktree. (Only these views: extensions' findFiles still search the real folders.)
+anything = "src/vs/workbench/contrib/search/browser/anythingQuickAccess.ts"
+import_override(anything, "import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    anything,
+    "cacheKey => this.fileQueryBuilder.file(this.contextService.getWorkspace().folders, this.getFileQueryOptions({ cacheKey })),",
+    "cacheKey => this.fileQueryBuilder.file(workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders), this.getFileQueryOptions({ cacheKey })), // Active",
+    "this.fileQueryBuilder.file(workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders), this.getFileQueryOptions({ cacheKey }))",
+)
+patch(
+    anything,
+    "\t\t\tthis.fileQueryBuilder.file(\n\t\t\t\tthis.contextService.getWorkspace().folders,\n",
+    "\t\t\tthis.fileQueryBuilder.file(\n\t\t\t\tworkspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders), // Active\n",
+    "\t\t\t\tworkspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders), // Active\n",
+)
+patch(
+    anything,
+    "\t\t\tfor (const folder of this.contextService.getWorkspace().folders) {\n",
+    "\t\t\tfor (const folder of workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders)) { // Active\n",
+    "for (const folder of workspaceRootOverride.mapWorkspaceFolders(this.contextService.getWorkspace().folders)) { // Active",
+)
+search_view = "src/vs/workbench/contrib/search/browser/searchView.ts"
+import_override(search_view, "import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    search_view,
+    "\t\t\tquery = this.queryBuilder.text(content, folderResources.map(folder => folder.uri), options);\n",
+    "\t\t\tquery = this.queryBuilder.text(content, folderResources.map(folder => workspaceRootOverride.map(folder.uri)), options); // Active\n",
+    "folderResources.map(folder => workspaceRootOverride.map(folder.uri)), options); // Active",
+)
+text_quick = "src/vs/workbench/contrib/search/browser/quickTextSearch/textSearchQuickAccess.ts"
+import_override(text_quick, "import { IWorkspaceContextService, IWorkspaceFolder } from '../../../../../platform/workspace/common/workspace.js';", 5)
+patch(
+    text_quick,
+    "this.queryBuilder.text(content, folderResources.map(folder => folder.uri), this._getTextQueryBuilderOptions(charsPerLine));",
+    "this.queryBuilder.text(content, folderResources.map(folder => workspaceRootOverride.map(folder.uri)), this._getTextQueryBuilderOptions(charsPerLine)); // Active",
+    "folderResources.map(folder => workspaceRootOverride.map(folder.uri)), this._getTextQueryBuilderOptions(charsPerLine)); // Active",
+)
+
+# New terminals start in the worktree.
+terminal_pm = "src/vs/workbench/contrib/terminal/browser/terminalProcessManager.ts"
+import_override(terminal_pm, "import { IWorkspaceContextService, IWorkspaceFolder } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    terminal_pm,
+    "\t\tconst activeWorkspaceRootUri = this._historyService.getLastActiveWorkspaceRoot(Schemas.file);\n\n\t\tconst initialCwd",
+    "\t\tconst activeWorkspaceRootUri = workspaceRootOverride.map(this._historyService.getLastActiveWorkspaceRoot(Schemas.file)); // Active: the agent's worktree\n\n\t\tconst initialCwd",
+    "workspaceRootOverride.map(this._historyService.getLastActiveWorkspaceRoot(Schemas.file)); // Active",
+)
+
+# Worktree files are labelled relative to their worktree (tabs, Quick Open, Search), like workspace files.
+label_service = "src/vs/workbench/services/label/common/labelService.ts"
+import_override(label_service, "import { IWorkspaceContextService, IWorkspace, isWorkspace, ISingleFolderWorkspaceIdentifier, isSingleFolderWorkspaceIdentifier, isWorkspaceIdentifier, IWorkspaceIdentifier, toWorkspaceIdentifier, WORKSPACE_EXTENSION, isUntitledWorkspace, isTemporaryWorkspace } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    label_service,
+    "getWorkspaceFolder: resource => this.contextService.getWorkspaceFolder(resource)\n",
+    "getWorkspaceFolder: resource => this.contextService.getWorkspaceFolder(resource) ?? workspaceRootOverride.folderOf(resource) // Active\n",
+    "this.contextService.getWorkspaceFolder(resource) ?? workspaceRootOverride.folderOf(resource) // Active\n",
+)
+patch(
+    label_service,
+    "\t\t\tlet folder = this.contextService.getWorkspaceFolder(resource);\n",
+    "\t\t\tlet folder = this.contextService.getWorkspaceFolder(resource) ?? workspaceRootOverride.folderOf(resource); // Active: agent worktrees\n",
+    "workspaceRootOverride.folderOf(resource); // Active: agent worktrees",
+)
+
+# Breadcrumbs start at the worktree (like a workspace folder), not at the top of the disk.
+breadcrumbs_model = "src/vs/workbench/browser/parts/editor/breadcrumbsModel.ts"
+import_override(breadcrumbs_model, "import { IWorkspaceContextService, IWorkspaceFolder, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    breadcrumbs_model,
+    "\t\t\tfolder: this._workspaceService.getWorkspaceFolder(uri) ?? undefined,\n",
+    "\t\t\tfolder: this._workspaceService.getWorkspaceFolder(uri) ?? workspaceRootOverride.folderOf(uri) ?? undefined, // Active: agent worktrees\n",
+    "getWorkspaceFolder(uri) ?? workspaceRootOverride.folderOf(uri) ?? undefined, // Active",
+)
+
+# Search includes like `./src` resolve against workspace folders: point those at the worktree too.
+patch(
+    search_view,
+    "\t\t\tquery = this.queryBuilder.text(content, folderResources.map(folder => workspaceRootOverride.map(folder.uri)), options); // Active\n",
+    "\t\t\tquery = this.queryBuilder.text(content, folderResources.map(folder => workspaceRootOverride.map(folder.uri)), options); // Active\n\t\t\tquery = { ...query, folderQueries: query.folderQueries.map(folderQuery => ({ ...folderQuery, folder: workspaceRootOverride.map(folderQuery.folder) })) }; // Active: relative includes too\n",
+    "// Active: relative includes too",
+)
+patch(
+    text_quick,
+    "\t\tconst query: ITextQuery = this.queryBuilder.text(content, folderResources.map(folder => workspaceRootOverride.map(folder.uri)), this._getTextQueryBuilderOptions(charsPerLine)); // Active\n",
+    "\t\tconst built: ITextQuery = this.queryBuilder.text(content, folderResources.map(folder => workspaceRootOverride.map(folder.uri)), this._getTextQueryBuilderOptions(charsPerLine)); // Active\n\t\tconst query: ITextQuery = { ...built, folderQueries: built.folderQueries.map(folderQuery => ({ ...folderQuery, folder: workspaceRootOverride.map(folderQuery.folder) })) }; // Active: relative includes too\n",
+    "// Active: relative includes too",
+)
+
+# Subagents' worktrees (the coding agent's own) are read-only, in editors and the Explorer.
+files_config = "src/vs/workbench/services/filesConfiguration/common/filesConfigurationService.ts"
+import_override(files_config, "import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';", 4)
+patch(
+    files_config,
+    "\t\tif (sessionReadonlyOverride !== undefined) {\n\t\t\treturn sessionReadonlyOverride;\n\t\t}\n",
+    "\t\tif (sessionReadonlyOverride !== undefined) {\n\t\t\treturn sessionReadonlyOverride;\n\t\t}\n\n\t\t// Active: a subagent's worktree belongs to the coding agent, shown read-only\n\t\tconst agentReadonly = workspaceRootOverride.readonlyMessage(resource);\n\t\tif (agentReadonly) {\n\t\t\treturn agentReadonly;\n\t\t}\n",
+    "const agentReadonly = workspaceRootOverride.readonlyMessage(resource);",
+)
+patch(
+    files_config,
+    "\t\tthis.registerListeners();\n\t}\n",
+    "\t\tthis.registerListeners();\n\t\tthis._register(workspaceRootOverride.onDidChangeRoots(() => this._onDidChangeReadonly.fire())); // Active\n\t}\n",
+    "this._register(workspaceRootOverride.onDidChangeRoots(() => this._onDidChangeReadonly.fire()));",
+)
+
 # 4. Branding.
 product_path = root / "product.json"
 product = json.loads(product_path.read_text())

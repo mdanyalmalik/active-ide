@@ -32,7 +32,7 @@ import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import type { CapturedFile, DetailFeedback, PendingCheck, Scene, Walkthrough } from '../common/activeProtocol.js';
 import { WalkthroughInput } from './activeInputs.js';
-import { ActiveWalkthroughFocus, Elaboration, IActiveService } from './activeService.js';
+import { ActiveWalkthroughFocus, agentLabel, Elaboration, IActiveService } from './activeService.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughPlayer } from './walkthroughPlayer.js';
 import { isRedundantVisual, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
@@ -571,11 +571,21 @@ export class WalkthroughEditor extends EditorPane {
 			dom.append(this.breadcrumbs, $('span.crumb')).textContent = segment;
 		});
 		this.relayoutChrome();
-		this.versionLabel.textContent = scene.version === 'baseline'
+		const version = scene.version === 'baseline'
 			? localize('baselineVersion', "Before the change · turn {0}", walkthrough.turnIndex)
 			: walkthrough.chapter
 				? localize('capturedChapter', "Chapter {0} · turn {1}", walkthrough.chapter, walkthrough.turnIndex)
 				: localize('capturedVersion', "Captured version · turn {0}", walkthrough.turnIndex);
+		dom.clearNode(this.versionLabel);
+		// With several agents, every explanation says whose work it is.
+		const owner = agentLabel(this.activeService, walkthrough.agentId, walkthrough.agentName);
+		if (owner) {
+			const chip = dom.append(this.versionLabel, $('span.active-agent-chip'));
+			chip.style.setProperty('--agent-color', `var(--active-agent-${owner.colorIndex}, var(--vscode-charts-blue))`);
+			chip.textContent = owner.name;
+			chip.title = localize('agentWork', "This explains {0}'s work", owner.name);
+		}
+		dom.append(this.versionLabel, $('span')).textContent = version;
 	}
 
 	/** Applies the current narration segment's cue: focus emphasis, diagram highlight, progressive reveal. */
@@ -1234,3 +1244,4 @@ export class WalkthroughEditor extends EditorPane {
 		}
 	}
 }
+

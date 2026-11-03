@@ -196,6 +196,18 @@ const general: IConfigurationNode = {
 			minimum: 1,
 			description: localize('checkpointMinutes', "Minimum minutes between asking the explanation model whether the coding agent's work so far is ready for a chapter. It's asked only when the agent reaches a checkpoint (a progress update, a finished test run or a completed step)."),
 		},
+		'active.agents.max': {
+			type: 'number',
+			default: 0,
+			minimum: 0,
+			description: localize('agentsMax', "The most agents that can run at once. 0 means no limit."),
+		},
+		'active.agents.parallelExplanations': {
+			type: 'number',
+			default: 1,
+			minimum: 1,
+			description: localize('parallelExplanations', "How many explanations can be written at once across agents. Higher is faster with several agents but spends credit faster."),
+		},
 		'active.explain.chapterMinutes': {
 			type: 'number',
 			default: 10,
