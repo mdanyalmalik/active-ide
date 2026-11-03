@@ -24,6 +24,11 @@ export interface QuickPromptOptions {
 	readonly send: (text: string) => Promise<void>;
 }
 
+/** Whether to name the receiving agent: only when there's a choice (merged agents and helpers don't count). */
+export function showsReceiver(agents: readonly AgentInfo[]): boolean {
+	return agents.filter(agent => agent.kind === 'agent' && !agent.mergedInto).length > 1;
+}
+
 /** Only one quick prompt at a time: opening another closes the first. */
 const current = new MutableDisposable<IDisposable>();
 

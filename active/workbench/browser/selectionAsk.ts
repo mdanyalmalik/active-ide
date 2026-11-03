@@ -18,7 +18,7 @@ import { localize } from '../../../../nls.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { describeCodeSelection, type CodeSelection } from '../common/activeProtocol.js';
 import { IActiveService } from './activeService.js';
-import { onRightClickQuickPrompt, QuickPromptOptions } from './quickPrompt.js';
+import { onRightClickQuickPrompt, QuickPromptOptions, showsReceiver } from './quickPrompt.js';
 
 /** How long the selection has to stay put before the button shows (so it doesn't flicker while dragging). */
 const SHOW_DELAY_MS = 180;
@@ -112,7 +112,7 @@ class SelectionAskContribution extends Disposable implements IEditorContribution
 		}
 		const { code, agentId } = picked;
 		const where = describeCodeSelection(code);
-		const shared = { agent: this.activeService.agentInfo(agentId), showAgent: this.activeService.agents.length > 1 };
+		const shared = { agent: this.activeService.agentInfo(agentId), showAgent: showsReceiver(this.activeService.agents) };
 		return target === 'ask'
 			? { ...shared, title: localize('quickAskCode', "Ask about {0}", where), placeholder: localize('quickAskCodePlaceholder', "Ask about this code…"), send: question => this.activeService.ask({ question, code }, agentId) }
 			: { ...shared, title: localize('quickChangeCode', "Request a change · {0}", where), placeholder: localize('quickChangePlaceholder', "Describe the change…"), send: change => this.activeService.submitTask({ text: change, code }, agentId, true) };

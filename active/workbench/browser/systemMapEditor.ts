@@ -25,7 +25,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { ActiveSetting, type DiagramFolderMode, type MapSelection, type SystemComponent, type SystemConnection, type SystemFileRef, type SystemMapRevision } from '../common/activeProtocol.js';
 import { SystemMapInput } from './activeInputs.js';
 import { IActiveService } from './activeService.js';
-import { onRightClickQuickPrompt, QuickPromptOptions } from './quickPrompt.js';
+import { onRightClickQuickPrompt, QuickPromptOptions, showsReceiver } from './quickPrompt.js';
 import { connectionPath, layoutMap, MapPoint, mapBounds, NODE_HEIGHT, NODE_WIDTH } from './systemMapLayout.js';
 
 const $ = dom.$;
@@ -805,7 +805,7 @@ export class SystemMapEditor extends EditorPane {
 			title: localize('quickAskMap', "Ask about {0}", picked.title),
 			placeholder: localize('quickAskMapPlaceholder', "Ask about this part of the system…"),
 			agent: this.activeService.highlightedAgent,
-			showAgent: this.activeService.agents.length > 1,
+			showAgent: showsReceiver(this.activeService.agents),
 			send: question => this.activeService.ask({ question, map: picked.selection }),
 		};
 	}

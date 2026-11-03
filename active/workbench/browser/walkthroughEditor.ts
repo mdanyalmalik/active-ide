@@ -33,7 +33,7 @@ import { IEditorGroup } from '../../../services/editor/common/editorGroupsServic
 import { MAIN_AGENT_ID, type CapturedFile, type CodeSelection, type DetailFeedback, type PendingCheck, type Scene, type Walkthrough } from '../common/activeProtocol.js';
 import { WalkthroughInput } from './activeInputs.js';
 import { ActiveWalkthroughFocus, agentLabel, Elaboration, IActiveService } from './activeService.js';
-import { onRightClickQuickPrompt, QuickPromptOptions } from './quickPrompt.js';
+import { onRightClickQuickPrompt, QuickPromptOptions, showsReceiver } from './quickPrompt.js';
 import { WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughPlayer } from './walkthroughPlayer.js';
 import { isRedundantVisual, LineChanges, lineChanges, RenderedVisual, renderVisual, visualKindLabel } from './walkthroughVisuals.js';
@@ -841,7 +841,7 @@ export class WalkthroughEditor extends EditorPane {
 			title: localize('quickChangeScene', "Request a change · {0}", scene.title),
 			placeholder: localize('quickChangePlaceholder', "Describe the change…"),
 			agent: this.activeService.agentInfo(owner),
-			showAgent: this.activeService.agents.length > 1,
+			showAgent: showsReceiver(this.activeService.agents),
 			send: text => this.activeService.submitTask({ text, code, explanation }, owner, true),
 		};
 	}
