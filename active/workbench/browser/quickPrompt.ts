@@ -88,6 +88,8 @@ export function showQuickPrompt(anchor: HTMLElement, options: QuickPromptOptions
 	place();
 	// Next frame, so the entering transition runs from the starting style.
 	targetWindow.requestAnimationFrame(() => box.classList.add('open'));
+	// Focus goes back where it was (the editor, say) when the box closes, sent or not.
+	const previousFocus = targetWindow.document.activeElement as HTMLElement | null;
 	input.focus();
 
 	const close = (sent: boolean) => {
@@ -95,6 +97,9 @@ export function showQuickPrompt(anchor: HTMLElement, options: QuickPromptOptions
 			return;
 		}
 		closing = true;
+		if (box.contains(targetWindow.document.activeElement) && previousFocus?.isConnected) {
+			previousFocus.focus();
+		}
 		box.classList.remove('open');
 		box.classList.add(sent ? 'sent' : 'closing');
 		targetWindow.setTimeout(() => box.remove(), EXIT_MS);

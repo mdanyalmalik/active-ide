@@ -631,6 +631,8 @@ export class ActiveService extends Disposable implements IActiveService {
 	) {
 		super();
 		this.lastMode = this.mode;
+		// Looking away from an agent that's waiting on an approval (another agent, the grid, another tab) alerts then.
+		this._register(this.editorService.onDidActiveEditorChange(() => this.alertWaitingApprovals()));
 		this._register(this.configurationService.onDidChangeConfiguration(event => {
 			if (event.affectsConfiguration(EXPLORER_COUNTS_SETTING)) {
 				this.watchGitChanges();
@@ -1309,6 +1311,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		this._chatContext = undefined;
 		this.fireAllForHighlight();
 		this._onDidChangeHighlight.fire({ agentId, previousId, reason });
+		this.alertWaitingApprovals();
 		if (!this._gridOpen && reason === 'user') {
 			this.maybeShortBriefing(agentId);
 		}
@@ -1351,6 +1354,7 @@ export class ActiveService extends Disposable implements IActiveService {
 		}
 		this._gridOpen = open;
 		this._onDidChangeGridOpen.fire();
+		this.alertWaitingApprovals();
 		if (!open) {
 			this.maybeShortBriefing(this._highlighted);
 		}
@@ -1443,6 +1447,23 @@ export class ActiveService extends Disposable implements IActiveService {
 		], { sticky: true });
 		this.approvalAlerts.set(approval.approvalId, handle);
 		this._register(handle.onDidClose(() => this.approvalAlerts.delete(approval.approvalId)));
+	}
+
+	/**
+	 * Approvals still waiting on agents the developer isn't looking at now. An approval that arrived while they were
+	 * watching that agent raised no alert; once they look elsewhere it would otherwise wait unseen.
+	 */
+	private alertWaitingApprovals(): void {
+		for (const [agentId, bucket] of this.buckets) {
+			// Only agents waiting now (an old chat can hold approvals its ended session never resolved), latest first.
+			if (!this.agentInfo(agentId)?.waitingForApproval) {
+				continue;
+			}
+			const waiting = [...bucket.chat].reverse().find(entry => entry.approval && !entry.approval.resolved);
+			if (waiting) {
+				this.alertApproval(agentId, waiting);
+			}
+		}
 	}
 
 	async decideApprovalFor(agentId: string, approvalId: string, choiceId: string): Promise<void> {
