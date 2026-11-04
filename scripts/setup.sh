@@ -23,7 +23,7 @@ if [ ! -d "$VSCODE_DIR/node_modules" ]; then
 	[ "${free_gb:-0}" -ge "$NEED_GB" ] || fail "Setup needs about $NEED_GB GB free here; there are ${free_gb} GB."
 fi
 mkdir -p "$ACTIVE_ROOT/.tools"
-echo "Setting up Active. A first run takes about 15–30 minutes, mostly building Code OSS."
+echo "Setting up Active."
 
 # ---------------------------------------------------------------- steps
 step 1 "Node $NODE_VERSION"

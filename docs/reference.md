@@ -6,7 +6,7 @@ You give Muse Code a task in a chat that fills the work area. The explanation mo
 
 ## Setup
 
-Requirements: macOS, Xcode's command-line tools (`xcode-select --install`), Python 3.9+ (or `uv`), and about 12 GB of free disk space. Setup checks these first. A first run takes about 15–30 minutes, mostly building Code OSS.
+Requirements: macOS, Xcode's command-line tools (`xcode-select --install`), Python 3.9+ (or `uv`), and about 12 GB of free disk space. Setup checks these first.
 
 ```sh
 scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron, narration (MMS), debuggers, Active sources
