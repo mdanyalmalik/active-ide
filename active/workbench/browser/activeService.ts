@@ -62,6 +62,8 @@ const EXPLORER_COUNTS_SETTING = 'active.explorer.changeCounts';
 const GIT_POLL_MS = 15_000;
 /** The voice setting's value for "no narration". */
 export const VOICE_OFF = 'off';
+/** Set once a narration voice (or Off) has been picked anywhere, so the welcome dialog stops asking. */
+export const VOICE_CHOSEN_KEY = 'active.welcome.voiceChosen';
 
 /**
  * What chat's second mode is about: a place in a walkthrough, parts of the system map, or code (to ask the
@@ -2382,6 +2384,8 @@ export class ActiveService extends Disposable implements IActiveService {
 				const chosen = picker.selectedItems[0];
 				picker.hide();
 				if (chosen) {
+					// Picking the Default voice leaves the setting at its default value, so remember that a choice was made.
+					this.storageService.store(VOICE_CHOSEN_KEY, true, StorageScope.PROFILE, StorageTarget.USER);
 					void this.setVoice(chosen.voice);
 				}
 			}),

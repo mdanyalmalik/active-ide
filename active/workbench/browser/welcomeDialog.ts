@@ -17,13 +17,12 @@ import { IWorkspaceTrustManagementService } from '../../../../platform/workspace
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
 import type { ActiveFeatures } from '../common/activeProtocol.js';
-import { IActiveService, VOICE_OFF } from './activeService.js';
+import { IActiveService, VOICE_CHOSEN_KEY, VOICE_OFF } from './activeService.js';
 import { renderSetupPanel, SetupPanelViewState } from './setupPanel.js';
 
 const $ = dom.$;
 const HIDE_KEY = 'active.welcome.hidden';
 /** The developer answered "Narrate walkthroughs?" (here or by choosing a voice elsewhere). */
-const VOICE_CHOSEN_KEY = 'active.welcome.voiceChosen';
 /** The developer answered "What should Active do?". */
 const FEATURES_CHOSEN_KEY = 'active.welcome.featuresChosen';
 /** How long setup must look incomplete before the dialog opens. */
