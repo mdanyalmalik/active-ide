@@ -8,6 +8,7 @@ active/extension/src/shared/
 active/multiplayer-server/node_modules/
 active/multiplayer-server/.wrangler/
 active/multiplayer-server/.dev.vars
-test-proj/
+.test-proj/
 .dev/
+.demo/
 __pycache__/
