@@ -83,6 +83,12 @@
 	overflow-x: hidden;
 }
 
+/* The viewport takes focus for arrow-key navigation; the workbench's generic [tabindex="0"]:focus outline would
+   frame the whole grid after any click, so only keyboard focus shows (as the inset ring below). */
+.monaco-workbench .active-agent-grid .agent-grid-viewport:focus {
+	outline: none;
+}
+
 .monaco-workbench .agent-grid-viewport:focus-visible {
 	box-shadow: inset 0 0 0 1px var(--vscode-focusBorder);
 }
