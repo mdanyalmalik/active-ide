@@ -3,10 +3,19 @@
   "cache": "cash",
   "cached": "casht",
   "caching": "cashihng",
+  "client": "kliyent",
+  "clients": "kliyents",
   "comments": "cawmmehnts",
   "database": "daytuhbays",
+  "header": "hehder",
+  "headers": "hehderz",
+  "minute": "minit",
+  "minutes": "minits",
   "queries": "kweereez",
-  "query": "cweery"
+  "query": "cweery",
+  "read": "reeed",
+  "reads": "reeeds",
+  "retry": "reetreye"
  },
  "heteronyms": {
   "record": [
