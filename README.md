@@ -11,7 +11,7 @@ Built this week for the Meta Global Hackathon, on top of [Code - OSS](https://gi
 You need macOS, Xcode's command-line tools (`xcode-select --install`), Python 3.9+ (or `uv`) and about 12 GB of free disk space.
 
 ```sh
-git clone <this repo> active && cd active
+git clone https://github.com/mdanyalmalik/active-ide.git && cd active-ide
 scripts/setup.sh                 # one time, about 15–30 minutes: Code - OSS, Node, narration, Active
 scripts/run.sh /path/to/project  # open a project in Active
 ```
