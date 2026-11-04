@@ -78,10 +78,16 @@ def normalize(text):
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)  # camelCase reads as words
     text = re.sub(r"\b[A-Z]{2,5}s?\b", acronym_words, text)  # TTS, APIs
     text = re.sub(r"[_\-]+(?=\w)", " ", text)  # snake_case and kebab-case too
+    text = re.sub(r"\be\.g\.,?", "for example,", text, flags=re.I)
+    text = re.sub(r"\bi\.e\.,?", "that is,", text, flags=re.I)
     text = re.sub(r"(?<=\w)\.(?=[A-Za-z])", " dot ", text)  # file.py, obj.method
     text = re.sub(r"\$(" + NUMBER + r")", money_words, text)
     text = re.sub(r"\d+(?:\.\d+){2,}", lambda m: " " + " point ".join(m.group(0).split(".")) + " ", text)  # versions: 1.143.1
     text = re.sub(NUMBER, number_words, text)
+    text = re.sub(r"\bREADME\b", "read me", text)
+    text = re.sub(r"\?(?=[A-Za-z])", " question mark ", text)  # ?limit in a URL
+    # A lone letter (the s in 30s, "s, m, and h") said as its name; MMS reads a bare letter as a stray sound.
+    text = re.sub(r"(?<![\w'])[b-hj-z](?![\w'])", lambda m: LETTERS[m.group(0)], text)
     for symbol, words in SYMBOLS.items():
         text = text.replace(symbol, words)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
