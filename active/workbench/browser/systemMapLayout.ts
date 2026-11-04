@@ -22,8 +22,8 @@ const ROW_GAP = 56;
  * Places a map's components left to right in columns, following its connections (a layered layout: cycles are
  * broken, each component goes one column after the furthest component pointing at it, and the order within a
  * column is settled by the average position of neighbours). Components that already have a place keep it, so
- * the map doesn't rearrange itself when it updates; new ones are placed where the layout puts them, moved down
- * until they overlap nothing.
+ * the map doesn't rearrange itself when it updates; new ones are placed where the layout puts them, moved down a
+ * row at a time until they clear every other box by a full row.
  */
 export function layoutMap(ids: readonly string[], edges: ReadonlyArray<{ readonly from: string; readonly to: string }>, kept: ReadonlyMap<string, MapPoint> = new Map()): Map<string, MapPoint> {
 	const known = new Set(ids);
@@ -42,24 +42,40 @@ export function layoutMap(ids: readonly string[], edges: ReadonlyArray<{ readonl
 		return placed;
 	}
 	const result = new Map<string, MapPoint>();
+	// A remembered place can be stale: a box that left the map and came back finds its old spot taken.
+	// Remembered places are honoured in order (the developer may have put boxes close together on purpose); one that
+	// actually lands on another box is placed like a new box.
+	const stale = new Set<string>();
 	for (const id of keptHere) {
-		result.set(id, kept.get(id)!);
+		const point = kept.get(id)!;
+		if ([...result.values()].some(other => collides(point, other))) {
+			stale.add(id);
+		} else {
+			result.set(id, point);
+		}
 	}
 	for (const id of ids) {
 		if (result.has(id)) {
 			continue;
 		}
-		let point = placed.get(id)!;
+		let point = stale.has(id) ? kept.get(id)! : placed.get(id)!;
+		// Step by a whole row, as the layout spaces rows: boxes grow past NODE_HEIGHT with badges and longer text.
 		for (let tries = 0; tries < 200 && [...result.values()].some(other => overlaps(point, other)); tries++) {
-			point = { x: point.x, y: point.y + NODE_HEIGHT / 2 };
+			point = { x: point.x, y: point.y + NODE_HEIGHT + ROW_GAP };
 		}
 		result.set(id, point);
 	}
 	return result;
 }
 
+/** Two boxes drawn on top of each other. */
+function collides(a: MapPoint, b: MapPoint): boolean {
+	return Math.abs(a.x - b.x) < NODE_WIDTH && Math.abs(a.y - b.y) < NODE_HEIGHT;
+}
+
+/** Two places closer than the layout's own spacing (a column apart sideways, a row apart vertically). */
 function overlaps(a: MapPoint, b: MapPoint): boolean {
-	return Math.abs(a.x - b.x) < NODE_WIDTH + 24 && Math.abs(a.y - b.y) < NODE_HEIGHT + 20;
+	return Math.abs(a.x - b.x) < NODE_WIDTH + 24 && Math.abs(a.y - b.y) < NODE_HEIGHT + ROW_GAP;
 }
 
 /** Each component's column: one past the furthest component that points at it (after breaking cycles). */

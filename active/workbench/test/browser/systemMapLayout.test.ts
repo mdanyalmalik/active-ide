@@ -31,6 +31,33 @@ suite('Active system map layout', () => {
 		assert.strictEqual(overlapping, false);
 	});
 
+	test('a component split out of a kept one lands a whole row away, not on top of it', () => {
+		// The middleware keeps its place; the limiter split out of it belongs in the same column.
+		const kept = new Map([['client', { x: 0, y: 0 }], ['api', { x: 390, y: 0 }], ['middleware', { x: 780, y: 0 }], ['store', { x: 1170, y: 76 }]]);
+		const edges = [{ from: 'client', to: 'api' }, { from: 'api', to: 'middleware' }, { from: 'api', to: 'limiter' }, { from: 'middleware', to: 'store' }];
+		const positions = layoutMap(['client', 'api', 'middleware', 'limiter', 'store'], edges, kept);
+		const limiter = positions.get('limiter')!;
+		for (const [id, point] of positions) {
+			if (id !== 'limiter' && Math.abs(point.x - limiter.x) < NODE_WIDTH) {
+				assert.ok(Math.abs(point.y - limiter.y) >= NODE_HEIGHT + 56, `${id} is too close to the limiter`);
+			}
+		}
+	});
+
+	test('a remembered place that something else now occupies is moved, not reused', () => {
+		// The limiter was remembered from an older version at the spot the middleware holds now.
+		const kept = new Map([['middleware', { x: 780, y: 0 }], ['limiter', { x: 780, y: 40 }]]);
+		const positions = layoutMap(['middleware', 'limiter'], [{ from: 'middleware', to: 'limiter' }], kept);
+		assert.deepStrictEqual(positions.get('middleware'), { x: 780, y: 0 });
+		assert.ok(Math.abs(positions.get('limiter')!.y - 0) >= NODE_HEIGHT + 56);
+	});
+
+	test('remembered places close together but not overlapping are kept as they are', () => {
+		const kept = new Map([['store', { x: 1950, y: 76 }], ['file', { x: 1950, y: 76 + NODE_HEIGHT + 10 }]]);
+		const positions = layoutMap(['store', 'file'], [{ from: 'store', to: 'file' }], kept);
+		assert.deepStrictEqual([positions.get('store'), positions.get('file')], [kept.get('store'), kept.get('file')]);
+	});
+
 	test('the bounds cover every box', () => {
 		assert.deepStrictEqual(mapBounds([{ x: 0, y: 0 }, { x: 300, y: 200 }]), { x: 0, y: 0, width: 300 + NODE_WIDTH, height: 200 + NODE_HEIGHT });
 	});
