@@ -2,6 +2,10 @@
 
 **Build at agent speed. Understand every step.**
 
+[![Watch the Active demo on YouTube](docs/images/demo-video.jpg)](https://youtu.be/uXpQJvDQBZU)
+
+▶ [Watch the demo](https://youtu.be/uXpQJvDQBZU)
+
 Active is an IDE for working with coding agents without losing track of your own code. While the agent works, Active explains each meaningful change in a short walkthrough pitched at what you already know, keeps a live map of how the system fits together, and lets you run and steer several agents, alone or with your team.
 
 Built this week for the Meta Global Hackathon, on top of [Code - OSS](https://github.com/microsoft/vscode), [Muse Code](https://github.com/meta-models/muse-code-sdk), Muse speech-to-text and Meta's [MMS](https://huggingface.co/facebook/mms-tts-eng) text-to-speech. Free and open source.
