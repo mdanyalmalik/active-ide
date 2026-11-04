@@ -12,7 +12,7 @@ You need macOS, Xcode's command-line tools (`xcode-select --install`), Python 3.
 
 ```sh
 git clone https://github.com/mdanyalmalik/active-ide.git && cd active-ide
-scripts/setup.sh                 # one time, about 15–30 minutes: Code - OSS, Node, narration, Active
+scripts/setup.sh                 # one time: Code - OSS, Node, narration, Active
 scripts/run.sh /path/to/project  # open a project in Active
 ```
 
