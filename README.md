@@ -6,7 +6,7 @@ You give Muse Code a task in a chat that fills the work area. The explanation mo
 
 ## Setup
 
-Requirements: macOS or Linux, git, Python 3.9+ (or `uv`), and about 3 GB of disk space for Code OSS.
+Requirements: macOS, Xcode's command-line tools (`xcode-select --install`), Python 3.9+ (or `uv`), and about 12 GB of free disk space. Setup checks these first. A first run takes about 15–30 minutes, mostly building Code OSS.
 
 ```sh
 scripts/setup.sh            # Node 24 (local), Code OSS 1.143.1, deps, Electron, narration (MMS), debuggers, Active sources
@@ -39,11 +39,11 @@ Muse Code is the default (`active.agent.provider: "muse"`). Adding another agent
 
 `scripts/setup-debuggers.sh` downloads the debuggers Active ships, pinned with checksums in `scripts/debuggers.json` (all MIT): debugpy 1.8.21 (the last to support Python 3.8+) into `active/extension/vendor`, and CodeLLDB 1.12.3 for this platform into `vscode/.build/builtInExtensions` (`apply_patches.py` lists it in `product.json`). Delve isn't downloaded: Active runs `go install` for it into its storage on the first Go run.
 
-`scripts/setup-tts.sh` creates `.tools/tts-venv` with both narration engines and downloads their models from Hugging Face; after that they run on the CPU. To use another interpreter, set `active.narration.pythonPath`.
+`scripts/setup-tts.sh` creates `.tools/tts-venv` with only what narration needs at run time (onnxruntime, numpy, scipy, num2words: about 170 MB) and downloads the prebuilt int8 model named in `scripts/tts-model.env`, checked against its sha256. Without a download URL, it exports the model itself, which also installs torch and transformers (about 1 GB). Narration then runs on the CPU. To use another interpreter, set `active.narration.pythonPath`.
 
-- **MMS English**: Meta's `facebook/mms-tts-eng` (VITS, ~36M parameters, CC-BY-NC 4.0, one voice). Setup exports it once (`active/tts-finetune/export_onnx.py`) to int8 ONNX in `.tools/tts-models/mms-eng-int8`. That's 40 MB instead of 145 MB, and it runs on onnxruntime with the sidecar's own tokenizer, so the runtime needs no torch. Compared with torch fp32 on an M-series CPU, it loads in 0.5 s instead of 3.4 s, runs at about 11× realtime instead of 6×, and uses about 290 MB of memory instead of 910 MB. The int8 audio differs from fp32 by less than two fp32 runs differ from each other.
+- **MMS English**: Meta's `facebook/mms-tts-eng` (VITS, ~36M parameters, CC-BY-NC 4.0, one voice). It's exported (`active/tts-finetune/export_onnx.py`) to int8 ONNX in `.tools/tts-models/mms-eng-int8`, with the model's license notice in `NOTICE.txt`. That's 40 MB instead of 145 MB, and it runs on onnxruntime with the sidecar's own tokenizer, so the runtime needs no torch. Compared with torch fp32 on an M-series CPU, it loads in 0.5 s instead of 3.4 s, runs at about 11× realtime instead of 6×, and uses about 290 MB of memory instead of 910 MB. The int8 audio differs from fp32 by less than two fp32 runs differ from each other.
 - **Your own model:** `active.narration.mmsModel` takes another int8 folder, such as a fine-tune from [`active/tts-finetune`](active/tts-finetune/README.md). It also accepts a Hugging Face id or checkpoint folder, which runs on torch.
-- **Phonon 31M** (Gradium's `ptts`, a native int8 runtime) stays in the code for after the hackathon but is hidden. To use it, set `"active.narration.engine": "phonon"` in settings.json.
+- **Phonon 31M** (Gradium's `ptts`, a native int8 runtime) stays in the code for after the hackathon but is hidden. To use it, run `ACTIVE_PHONON=1 scripts/setup-tts.sh`, then set `"active.narration.engine": "phonon"` in settings.json.
 
 Changing either setting restarts narration right away.
 

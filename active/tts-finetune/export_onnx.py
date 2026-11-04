@@ -142,6 +142,12 @@ def main():
         "speaking_rate": args.speaking_rate,
     }
     (out / "active-mms.json").write_text(json.dumps(meta, indent=2))
+    (out / "NOTICE.txt").write_text(
+        f"MMS text-to-speech ({args.model}), from Meta AI's MMS project: https://huggingface.co/facebook/mms-tts-eng\n"
+        "Licensed under CC-BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/). Non-commercial use only.\n"
+        "Changes: exported to ONNX with weight norm folded, int8-quantized (Conv, MatMul), and fixed sampling settings\n"
+        f"(noise {args.noise_scale}, duration noise {args.noise_duration}, speaking rate {args.speaking_rate}), "
+        "by active/tts-finetune/export_onnx.py in the Active repository.\n")
     print(f"wrote {out / 'model.int8.onnx'} ({(out / 'model.int8.onnx').stat().st_size / 1e6:.0f} MB)")
 
 
