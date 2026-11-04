@@ -699,7 +699,45 @@
 	color: var(--active-muted);
 }
 
+.monaco-workbench .active-chat-composer .composer-left {
+	display: flex;
+	align-items: center;
+	flex-shrink: 0;
+	margin-right: 8px;
+}
+
+.monaco-workbench .active-chat-composer .composer-mode {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+}
+
+.monaco-workbench .active-chat-composer button.composer-explain-mode {
+	white-space: nowrap;
+}
+
+/* In a narrow chat box the model's name shortens; the explanation and approval indicators stay whole. */
+.monaco-workbench .active-chat-composer button.composer-effort {
+	min-width: 0;
+	white-space: nowrap;
+}
+
+.monaco-workbench .active-chat-composer button.composer-effort > span:not(.codicon) {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .active-chat-composer button.composer-effort > .codicon {
+	flex-shrink: 0;
+}
+
+.monaco-workbench .active-chat-composer button.composer-approval-mode.allowAll {
+	border-color: var(--vscode-editorWarning-foreground, var(--active-border));
+}
+
 .monaco-workbench .active-chat-composer .composer-tools {
+	min-width: 0;
 	display: flex;
 	align-items: center;
 	gap: 6px;
@@ -4571,4 +4609,8 @@
 	.monaco-workbench .active-quick-prompt.sent {
 		transform: none;
 	}
+}
+
+.monaco-workbench .active-chat-composer .composer-tools > :not(.composer-effort) {
+	flex-shrink: 0;
 }

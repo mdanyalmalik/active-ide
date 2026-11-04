@@ -30,6 +30,7 @@ import { IKeybindingService } from '../../../../platform/keybinding/common/keybi
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
@@ -61,6 +62,7 @@ import { KnowledgeProfileEditor } from './profileEditor.js';
 import { ActiveCommandIds, WalkthroughCommandIds } from './walkthroughCommands.js';
 import { WalkthroughEditor } from './walkthroughEditor.js';
 import { ActiveWelcomeDialog } from './welcomeDialog.js';
+import { APPROVAL_MODES } from './agentGrid.js';
 import './multiplayer/multiplayer.contribution.js';
 import './feedback.js';
 
@@ -457,6 +459,33 @@ registerAction2(class extends Action2 {
 		const picked = await quickInput.pick(items.map(item => ({ ...item, description: item.mode === service.mode ? localize('currentMode', "current") : undefined })), { title: localize('explainModeTitle', "Explanation Mode") });
 		if (picked) {
 			await service.setMode(picked.mode);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: ActiveCommandIds.PickApprovalMode, title: localize2('pickApprovalMode', "Change Approval Mode"), category, f1: true });
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const service = accessor.get(IActiveService);
+		const quickInput = accessor.get(IQuickInputService);
+		const notifications = accessor.get(INotificationService);
+		if (service.remote) {
+			notifications.info(localize('approvalModeHostOnly', "Only the host can change how agents' actions are approved."));
+			return;
+		}
+		// A helper's actions are approved by its parent agent's mode.
+		const highlighted = service.highlightedAgent;
+		const agent = highlighted?.kind === 'subagent' ? service.agents.find(item => item.id === highlighted.parentId) : highlighted;
+		if (!agent) {
+			return;
+		}
+		const items = APPROVAL_MODES.map(mode => ({ mode: mode.id, label: mode.label(), detail: mode.detail(), description: mode.id === agent.approvalMode ? localize('currentApprovalMode', "current") : undefined }));
+		const title = service.agents.filter(item => item.kind === 'agent' && !item.mergedInto).length > 1 ? localize('approvalModeTitleFor', "Approval Mode for {0}", agent.name) : localize('approvalModeTitle', "Approval Mode");
+		const picked = await quickInput.pick(items, { title });
+		if (picked) {
+			await service.setAgentApprovalMode(agent.id, picked.mode);
 		}
 	}
 });

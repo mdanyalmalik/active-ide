@@ -499,16 +499,17 @@ export function explainModeActions(service: IActiveService, agentId: string): Su
 	})));
 }
 
-const APPROVAL_MODES: ReadonlyArray<{ readonly id: AgentApprovalMode; readonly label: () => string }> = [
-	{ id: 'auto', label: () => localize('approvalAuto', "Auto: sandbox, the AI judge asks you when unsure") },
-	{ id: 'ask', label: () => localize('approvalAsk', "Ask more: anything not already allowed") },
-	{ id: 'allowAll', label: () => localize('approvalAllowAll', "Allow everything") },
+/** How an agent's actions get approved: the box menu, the chat box indicator and the palette command. */
+export const APPROVAL_MODES: ReadonlyArray<{ readonly id: AgentApprovalMode; readonly label: () => string; readonly short: () => string; readonly detail: () => string; readonly icon: ThemeIcon }> = [
+	{ id: 'auto', label: () => localize('approvalAuto', "Auto"), short: () => localize('approvalAutoShort', "Auto"), detail: () => localize('approvalAutoDetail', "Works in its sandbox; the AI judge asks you when unsure"), icon: Codicon.shield },
+	{ id: 'ask', label: () => localize('approvalAsk', "Ask More"), short: () => localize('approvalAskShort', "Ask More"), detail: () => localize('approvalAskDetail', "Asks about anything not already allowed"), icon: Codicon.question },
+	{ id: 'allowAll', label: () => localize('approvalAllowAll', "Allow Everything"), short: () => localize('approvalAllowAllShort', "Allow All"), detail: () => localize('approvalAllowAllDetail', "Approves every action without asking"), icon: Codicon.warning },
 ];
 
 export function approvalModeActions(service: IActiveService, agent: AgentInfo): SubmenuAction {
 	return new SubmenuAction('active.agentApprovals', localize('boxApprovalMenu', "Approvals"), APPROVAL_MODES.map(mode => toAction({
 		id: `active.agentApprovals.${mode.id}`,
-		label: mode.label(),
+		label: localize('approvalMenuItem', "{0}: {1}", mode.label(), mode.detail()),
 		checked: mode.id === agent.approvalMode,
 		run: () => service.setAgentApprovalMode(agent.id, mode.id),
 	})));

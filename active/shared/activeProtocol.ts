@@ -595,6 +595,7 @@ export const enum ActiveSetting {
 	/** The MMS checkpoint: a Hugging Face id or a local folder (a fine-tune from active/tts-finetune). */
 	NarrationMmsModel = 'active.narration.mmsModel',
 	ExplainMode = 'active.explain.mode',
+	ApprovalMode = 'active.agents.approvalMode',
 	/** What Active does around the coding agent: walkthroughs, the system map, or both. */
 	Features = 'active.features',
 	DebugAgentTools = 'active.debug.agentTools',

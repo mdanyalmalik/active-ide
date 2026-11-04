@@ -32,7 +32,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { ActiveSetting, REASONING_EFFORTS, type AgentInfo, type ChatEntry, type ExplainMode } from '../common/activeProtocol.js';
-import { agentColor, agentOneLiner, agentStatus, agentStatusLabel, AgentGridView, approvalModeActions, explainModeActions, helperOf, shownAgents, formatCost, GRID_PRESETS, GridPreset, nestedUnder, OverscrollGesture, overlapMarkers, setPullProgress, topLevelOf, wheelPixels, DEFAULT_OVERSCROLL } from './agentGrid.js';
+import { agentColor, agentOneLiner, agentStatus, agentStatusLabel, AgentGridView, APPROVAL_MODES, approvalModeActions, explainModeActions, helperOf, shownAgents, formatCost, GRID_PRESETS, GridPreset, nestedUnder, OverscrollGesture, overlapMarkers, setPullProgress, topLevelOf, wheelPixels, DEFAULT_OVERSCROLL } from './agentGrid.js';
 import { effortLabel } from './activeSettings.js';
 import { ActiveChatInput } from './activeInputs.js';
 import { DICTATE_COMMAND_ID, DictationTarget, IActiveDictationService, insertAtCursor } from './dictation.js';
@@ -76,6 +76,7 @@ export class ActiveChatEditor extends EditorPane {
 	private micIcon!: HTMLElement;
 	private micLabel!: HTMLElement;
 	private modeLabel!: HTMLElement;
+	private shownApprovalMode: string | undefined;
 	private footerRow!: HTMLElement;
 	private mode: ComposerMode = 'task';
 	private readonly entryNodes = new Map<string, { node: HTMLElement; store: DisposableStore }>();
@@ -203,6 +204,12 @@ export class ActiveChatEditor extends EditorPane {
 		this._register(dom.addDisposableListener(this.composerTarget, dom.EventType.CLICK, () => this.showTargetMenu()));
 		this.modeLabel = dom.append(left, $('.composer-mode'));
 		this._register(this.activeService.onDidChangeMode(() => this.renderComposerContext()));
+		this._register(this.activeService.onDidChangeAgents(() => {
+			const agent = this.activeService.highlightedAgent;
+			if ((agent?.kind === 'agent' ? agent.approvalMode : undefined) !== this.shownApprovalMode) {
+				this.renderComposerContext();
+			}
+		}));
 		// Joining or leaving a session, or a new role in one, changes the header and the chat box.
 		this._register(this.activeService.onDidChangeRemote(() => {
 			this.renderChrome();
@@ -804,6 +811,26 @@ export class ActiveChatEditor extends EditorPane {
 					run: () => this.activeService.setMode(mode.id),
 				})),
 			});
+		}));
+		this.renderApprovalMode();
+	}
+
+	/** Beside the explanation mode: how the highlighted agent's actions get approved (Auto, Ask More, Allow Everything). */
+	private renderApprovalMode(): void {
+		const agent = this.activeService.highlightedAgent;
+		this.shownApprovalMode = agent?.kind === 'agent' ? agent.approvalMode : undefined;
+		if (!agent || agent.kind !== 'agent') {
+			return;
+		}
+		const current = APPROVAL_MODES.find(mode => mode.id === agent.approvalMode) ?? APPROVAL_MODES[0];
+		const button = dom.append(this.modeLabel, $('button.composer-explain-mode.composer-approval-mode')) as HTMLButtonElement;
+		button.classList.add(current.id);
+		dom.append(button, $('span')).classList.add(...ThemeIcon.asClassNameArray(current.icon));
+		dom.append(button, $('span')).textContent = localize('approvalModeButton', "Approvals: {0}", current.short());
+		dom.append(button, $('span.chevron')).classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		button.title = localize('approvalModeButtonTitle', "Approvals: {0}. Click to change.", current.detail());
+		this.modeStore.add(dom.addDisposableListener(button, dom.EventType.CLICK, () => {
+			this.contextMenuService.showContextMenu({ getAnchor: () => button, getActions: () => approvalModeActions(this.activeService, agent).actions });
 		}));
 	}
 

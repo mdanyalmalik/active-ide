@@ -234,6 +234,18 @@ const general: IConfigurationNode = {
 			minimum: 1,
 			description: localize('checkpointMinutes', "Minimum minutes between asking the explanation model whether the coding agent's work so far is ready for a chapter. It's asked only when the agent reaches a checkpoint (a progress update, a finished test run or a completed step)."),
 		},
+		[ActiveSetting.ApprovalMode]: {
+			type: 'string',
+			enum: ['auto', 'ask', 'allowAll'],
+			enumItemLabels: [localize('approvalModeAuto', "Auto"), localize('approvalModeAsk', "Ask More"), localize('approvalModeAllowAll', "Allow Everything")],
+			enumDescriptions: [
+				localize('approvalModeAutoDescription', "The coding agent works in its sandbox, and its AI judge asks you when it's unsure."),
+				localize('approvalModeAskDescription', "Asks you about anything a saved rule doesn't already allow."),
+				localize('approvalModeAllowAllDescription', "Approves everything without asking."),
+			],
+			default: 'auto',
+			markdownDescription: localize('approvalModeSetting', "How the coding agent's actions get approved. Each agent can override it from the indicator under the chat box or its menu."),
+		},
 		'active.agents.max': {
 			type: 'number',
 			default: 0,

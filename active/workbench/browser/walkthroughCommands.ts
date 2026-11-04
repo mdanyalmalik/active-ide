@@ -22,6 +22,7 @@ export const enum ActiveCommandIds {
 	NewChat = 'active.newChat',
 	CatchUp = 'active.catchUp',
 	PickExplainMode = 'active.pickExplainMode',
+	PickApprovalMode = 'active.pickApprovalMode',
 	ResumeChat = 'active.resumeChat',
 	PickCodingEffort = 'active.pickCodingEffort',
 	PickCodingModel = 'active.pickCodingModel',

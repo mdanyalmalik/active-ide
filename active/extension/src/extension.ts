@@ -480,6 +480,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		log,
 		// No limit unless the developer sets one.
 		maxAgents: () => Math.max(0, config<number>('agents.max', 0)),
+		defaultApprovalMode: () => {
+			const mode = config<string>('agents.approvalMode', 'auto');
+			return mode === 'ask' || mode === 'allowAll' ? mode : 'auto';
+		},
 		loadSubagents: () => context.workspaceState.get<SavedSubagent[]>('active.subagents', []),
 		saveSubagents: subagents => void context.workspaceState.update('active.subagents', subagents),
 	});
@@ -494,6 +498,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return agents.controllerFor(owner && agents.runtimeFor(owner) ? owner : undefined);
 	};
 
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+		if (event.affectsConfiguration(ActiveSetting.ApprovalMode)) {
+			void agents.defaultApprovalModeChanged();
+		}
+	}));
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
 		if ([ActiveSetting.CodingModel, ActiveSetting.ExplanationModel].some(key => event.affectsConfiguration(key))) {
 			agents.controllers.forEach(controller => void controller.applyRunSettings());

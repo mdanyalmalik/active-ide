@@ -58,6 +58,8 @@ export interface AgentManagerOptions {
 	readonly save: (specs: readonly AgentSpec[]) => void;
 	readonly emit: (event: ActiveEvent) => void;
 	readonly log: (line: string) => void;
+	/** The approval mode for agents that haven't chosen their own (the `active.agents.approvalMode` setting). */
+	readonly defaultApprovalMode?: () => AgentApprovalMode;
 	/** The most top-level agents that may exist at once (0: no limit). */
 	readonly maxAgents: () => number;
 	/** Subagents and their chats, kept across reloads (they're agents the developer can open and message). */
@@ -221,7 +223,7 @@ export class AgentManager {
 				name: () => spec.name,
 				multiAgent: () => this.topLevelLive().length > 1,
 				mode: () => spec.mode,
-				approvalMode: () => spec.approvalMode ?? 'auto',
+				approvalMode: () => this.approvalModeOf(spec),
 				overlaps: () => this.overlapsFor(spec.id),
 				onActivity: activity => {
 					this.activities.set(spec.id, { ...this.activities.get(spec.id), ...activity });
@@ -284,7 +286,7 @@ export class AgentManager {
 				costBreakdown: activity.costBreakdown,
 				task: activity.task ?? runtime?.controller.lastTask,
 				explainMode: spec.mode ?? 'auto',
-				approvalMode: spec.approvalMode ?? 'auto',
+				approvalMode: this.approvalModeOf(spec),
 				createdAt: spec.createdAt,
 				mergedInto: spec.mergedInto,
 				finished: spec.finished,
@@ -306,7 +308,7 @@ export class AgentManager {
 						reasoning: sub.reasoning,
 						task: sub.objective,
 						explainMode: 'off',
-						approvalMode: spec.approvalMode ?? 'auto',
+						approvalMode: this.approvalModeOf(spec),
 						createdAt: sub.createdAt,
 						finished: sub.finished,
 						finishedAt: sub.finished ? sub.finishedAt ?? 0 : undefined,
@@ -458,6 +460,16 @@ export class AgentManager {
 			this.save();
 			this.publish();
 		}
+	}
+
+	private approvalModeOf(spec: AgentSpec): AgentApprovalMode {
+		return spec.approvalMode ?? this.options.defaultApprovalMode?.() ?? 'auto';
+	}
+
+	/** The default changed: agents that haven't chosen their own mode follow it (from their next action). */
+	async defaultApprovalModeChanged(): Promise<void> {
+		this.publish();
+		await Promise.all(this.specs.filter(spec => !spec.approvalMode).map(spec => this.runtimes.get(spec.id)?.controller.applyApprovalMode()));
 	}
 
 	/** How this agent's actions get approved; applied to its live session straight away (from its next action). */

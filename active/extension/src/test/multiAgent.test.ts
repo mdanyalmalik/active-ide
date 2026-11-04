@@ -247,6 +247,23 @@ describe('the agent manager', () => {
 		manager.dispose();
 	});
 
+	test('agents without their own approval mode follow the default setting, live', async () => {
+		const { root, worktrees } = await repo();
+		const log: string[] = [];
+		let fallback: 'auto' | 'ask' | 'allowAll' = 'ask';
+		const manager = new AgentManager({ mainRoot: root, worktrees, createRuntime: spec => ({ controller: fakeController(spec.root, log) as never, dispose: () => undefined }), load: () => [], save: () => undefined, emit: () => undefined, log: () => undefined, maxAgents: () => 0, defaultApprovalMode: () => fallback });
+		await manager.start();
+		const second = (await manager.create({})).id!;
+		await manager.setApprovalMode(second, 'auto');
+		const modes = () => manager.infos().filter(agent => agent.kind === 'agent').map(agent => agent.approvalMode);
+		assert.deepStrictEqual(modes(), ['ask', 'auto'], 'main follows the default; Agent 2 chose its own');
+		fallback = 'allowAll';
+		log.length = 0;
+		await manager.defaultApprovalModeChanged();
+		assert.deepStrictEqual({ modes: modes(), applied: log.filter(line => line.startsWith('approvals ')).length }, { modes: ['allowAll', 'auto'], applied: 1 });
+		manager.dispose();
+	});
+
 	test('commit before merging commits each agent\'s work on its own branch and keeps the dragged one\'s', async () => {
 		const { root, worktrees } = await repo();
 		let saved: unknown[] = [];
