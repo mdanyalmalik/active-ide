@@ -684,6 +684,7 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 		this._register(activeService.onDidChangeNarration(update));
 		this._register(activeService.onDidChangeProfile(update));
 		this._register(activeService.onDidChangeMode(update));
+		this._register(activeService.onDidChangeDiagram(update));
 		this._register(editorService.onDidActiveEditorChange(update));
 	}
 
@@ -729,6 +730,10 @@ class ActiveStatusBar extends Disposable implements IWorkbenchContribution {
 		} else if (agent.status === 'unavailable') {
 			text = `$(warning) ${localize('agentUnavailable', "{0} unavailable", agent.provider.name)}`;
 			command = ActiveCommandIds.OpenChat;
+		} else if (this.activeService.diagram.status === 'building') {
+			// The first map (or a rebuild) takes a minute: show it's happening, and open the map on click.
+			text = `$(loading~spin) ${localize('drawingMap', "Drawing system map…")}`;
+			command = ActiveCommandIds.OpenSystemMap;
 		} else {
 			text = localize('ready', "Ready for your task");
 		}
