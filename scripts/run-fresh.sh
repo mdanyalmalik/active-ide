@@ -18,7 +18,7 @@ if [[ "${1:-}" == "--no-muse" ]]; then
 	shift
 fi
 
-FRESH="$ACTIVE_ROOT/.active-dev/fresh"
+FRESH="$ACTIVE_DATA/fresh"
 rm -rf "$FRESH"
 mkdir -p "$FRESH/user-data" "$FRESH/extensions" "$FRESH/xdg-config" "$FRESH/xdg-data"
 

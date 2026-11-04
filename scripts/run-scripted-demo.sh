@@ -15,7 +15,7 @@ mkdir -p "$WORK/.vscode"
 printf '{\n\t"active.walkthrough.backgroundTimeoutSeconds": 8\n}\n' > "$WORK/.vscode/settings.json"
 # active.muse.binaryPath is machine-scoped (ignored in workspace settings), so the test host is set in a
 # separate user-data folder: the real Muse CLI is never started and your usual profile is left alone.
-USER_DATA="$ACTIVE_ROOT/.active-dev/scripted-user-data"
+USER_DATA="$ACTIVE_DATA/scripted-user-data"
 mkdir -p "$USER_DATA/User"
 printf '{\n\t"security.workspace.trust.enabled": false,\n\t"active.muse.binaryPath": "%s"\n}\n' "$HOST" > "$USER_DATA/User/settings.json"
 ( cd "$WORK" && git add -A && git -c user.email=demo@active -c user.name=demo commit -qm "demo settings" )
