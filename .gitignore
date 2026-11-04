@@ -12,3 +12,4 @@ active/multiplayer-server/.dev.vars
 .dev/
 .demo/
 __pycache__/
+.DS_Store
