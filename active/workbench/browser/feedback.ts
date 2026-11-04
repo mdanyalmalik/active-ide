@@ -5,7 +5,6 @@
 
 import { Codicon } from '../../../../base/common/codicons.js';
 import { OS, OperatingSystem } from '../../../../base/common/platform.js';
-import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -16,8 +15,8 @@ import { IProductService } from '../../../../platform/product/common/productServ
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { IActiveService } from './activeService.js';
 
-/** Where reports go. Empty until there's an address: the report is then copied to the clipboard instead. */
-export const FEEDBACK_EMAIL = '';
+/** Where reports go. If this is ever emptied, the report is copied to the clipboard instead. */
+export const FEEDBACK_EMAIL = 'feedback.danyal@gmail.com';
 export const REPORT_ISSUE_COMMAND_ID = 'active.reportIssue';
 
 type Kind = 'bug' | 'feature';
@@ -30,6 +29,11 @@ export function feedbackEmail(kind: Kind, title: string, facts: ReadonlyArray<[s
 		: ['What you would like:', '', '', 'Why it would help:', '', ''];
 	const body = [...template, '--', ...facts.map(([label, value]) => `${label}: ${value}`)].join('\n');
 	return { subject, body };
+}
+
+/** A mailto link with the subject and body encoded for any mail app. */
+export function mailtoLink(address: string, subject: string, body: string): string {
+	return `mailto:${address}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 
 registerAction2(class extends Action2 {
@@ -85,7 +89,7 @@ registerAction2(class extends Action2 {
 			notifications.info(localize('feedbackCopied', "The report is copied to your clipboard. Paste it into an email to the Active team."));
 			return;
 		}
-		const mailto = URI.from({ scheme: 'mailto', path: FEEDBACK_EMAIL, query: `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}` });
-		await opener.open(mailto, { openExternal: true });
+		// A string, not a URI: the opener passes strings through as is, but re-encodes a URI's query (doubling every %).
+		await opener.open(mailtoLink(FEEDBACK_EMAIL, subject, body), { openExternal: true });
 	}
 });

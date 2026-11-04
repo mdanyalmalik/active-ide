@@ -5,7 +5,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { feedbackEmail } from '../../browser/feedback.js';
+import { feedbackEmail, mailtoLink } from '../../browser/feedback.js';
 
 suite('Active feedback', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -21,5 +21,15 @@ suite('Active feedback', () => {
 	test('a feature request asks what and why', () => {
 		const { subject, body } = feedbackEmail('feature', 'Dark map', []);
 		assert.deepStrictEqual({ subject, lines: body.split('\n') }, { subject: '[Active idea] Dark map', lines: ['What you would like:', '', '', 'Why it would help:', '', '', '--'] });
+	});
+
+	test('the mailto link encodes the subject and body once', () => {
+		const link = mailtoLink('team@example.com', '[Active bug] 50% & more', 'a\nb');
+		const query = new URLSearchParams(link.slice(link.indexOf('?') + 1));
+		assert.deepStrictEqual({ link, subject: query.get('subject'), body: query.get('body') }, {
+			link: 'mailto:team@example.com?subject=%5BActive%20bug%5D%2050%25%20%26%20more&body=a%0Ab',
+			subject: '[Active bug] 50% & more',
+			body: 'a\nb',
+		});
 	});
 });
