@@ -217,7 +217,8 @@ export class WalkthroughPlayer extends Disposable {
 		}
 		if (scene + 1 < this.walkthrough.scenes.length) {
 			this.seek({ scene: scene + 1, segment: 0 });
-		} else if (!this.silent) {
+		} else {
+			// Past the last scene (Next while narrating, Done when read): the walkthrough is finished.
 			this.pause();
 			this.setState('ended');
 		}

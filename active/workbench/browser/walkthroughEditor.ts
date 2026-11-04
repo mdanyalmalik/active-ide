@@ -1228,8 +1228,12 @@ export class WalkthroughEditor extends EditorPane {
 			// Audio off: the walkthrough is read, a whole scene at a time.
 			const previous = button(localize('previousScene', "← Previous"), WalkthroughCommandIds.Rewind, localize('previousSceneTitle', "Back to the previous idea"), () => player.rewind());
 			previous.disabled = player.position.scene === 0;
-			const next = button(localize('nextScene', "Next →"), WalkthroughCommandIds.Advance, localize('nextSceneTitle', "On to the next idea"), () => player.advance(), '.primary');
-			next.disabled = player.position.scene >= player.walkthrough.scenes.length - 1;
+			// On the last scene, Done finishes the walkthrough (as the narration ending does when it's heard).
+			const last = player.position.scene >= player.walkthrough.scenes.length - 1;
+			const next = last
+				? button(localize('doneScene', "Done"), WalkthroughCommandIds.Advance, localize('doneSceneTitle', "Finish the walkthrough"), () => player.advance(), '.primary')
+				: button(localize('nextScene', "Next →"), WalkthroughCommandIds.Advance, localize('nextSceneTitle', "On to the next idea"), () => player.advance(), '.primary');
+			next.disabled = player.state === 'ended';
 		} else {
 			const rewind = button(localize('rewind', "← Rewind"), WalkthroughCommandIds.Rewind, localize('rewindTitle', "Back to the previous narration step"), () => player?.rewind());
 			rewind.disabled = !player || (player.position.scene === 0 && player.position.segment === 0);

@@ -278,7 +278,7 @@ suite('Active WalkthroughPlayer with audio off: read a whole scene at a time', (
 		assert.deepStrictEqual({ state: p.state, audios, focus: visual.focus, nodes: visual.nodes, reveal: visual.reveal }, { state: 'paused', audios: 0, focus: undefined, nodes: ['y'], reveal: 2 });
 	});
 
-	test('Next and Previous move a whole scene, and stop at either end', () => {
+	test('Next and Previous move a whole scene; Next on the last scene (Done) finishes it', () => {
 		const p = player();
 		const at = () => `${p.position.scene}/${p.position.segment} ${p.state}`;
 		const steps = [at()];
@@ -290,7 +290,7 @@ suite('Active WalkthroughPlayer with audio off: read a whole scene at a time', (
 		steps.push(at());
 		p.rewind();
 		steps.push(at());
-		assert.deepStrictEqual(steps, ['0/0 paused', '1/0 paused', '1/0 paused', '0/0 paused', '0/0 paused']);
+		assert.deepStrictEqual(steps, ['0/0 paused', '1/0 paused', '1/0 ended', '0/0 paused', '0/0 paused']);
 	});
 
 	test('turning audio back on: narration plays and the voice leads the highlighting again', async () => {
